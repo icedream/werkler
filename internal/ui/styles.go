@@ -1,0 +1,86 @@
+package ui
+
+import (
+	"strings"
+
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
+)
+
+var (
+	headerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("212")).
+			Padding(0, 1)
+
+	separatorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("238"))
+
+	userPrefixStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("39"))
+
+	assistantPrefixStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("212"))
+
+	toolNameStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("220"))
+
+	toolApprovedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("42"))
+
+	toolDeniedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196"))
+
+	toolPendingStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244"))
+
+	statusStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244"))
+
+	approvalPromptStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220")).
+				Bold(true)
+
+	keyHintStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39")).
+			Bold(true)
+
+	errorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Bold(true)
+
+	inputPrefixStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244"))
+)
+
+func separator(width int) string {
+	return separatorStyle.Render(strings.Repeat("─", width))
+}
+
+func newGlamourRenderer(width int) *glamour.TermRenderer {
+	if width < 20 {
+		width = 20
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return nil
+	}
+	return r
+}
+
+func renderMarkdown(r *glamour.TermRenderer, content string) string {
+	if r == nil {
+		return content
+	}
+	rendered, err := r.Render(content)
+	if err != nil {
+		return content
+	}
+	return strings.TrimRight(rendered, "\n")
+}

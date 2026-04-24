@@ -1,0 +1,538 @@
+package ui
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+
+	"github.com/icedream/werkler/internal/ai"
+	"github.com/icedream/werkler/internal/chat"
+)
+
+// fixedLines is the number of terminal lines consumed by non-viewport UI elements:
+// header(1) + sep(1) + sep(1) + statusLine1(1) + statusLine2(1) + sep(1) + input(1) = 7
+const fixedLines = 7
+
+// --- TUI states ---
+
+type tuiState int
+
+const (
+	stateIdle tuiState = iota
+	stateThinking
+	stateCallingTool
+	stateAwaitingApproval
+)
+
+// --- Display item kinds and statuses ---
+
+const (
+	itemUser      = "user"
+	itemAssistant = "assistant"
+	itemToolCall  = "tool_call"
+	itemError     = "error"
+)
+
+const (
+	toolStatusPending = iota
+	toolStatusRunning
+	toolStatusDone
+	toolStatusFailed
+	toolStatusDenied
+)
+
+type displayItem struct {
+	kind       string
+	content    string
+	toolName   string
+	toolArgs   string // compact JSON args
+	toolStatus int
+}
+
+// --- Tea messages ---
+
+type aiResponseMsg struct {
+	msg ai.Message
+	err error
+}
+
+type toolResultMsg struct {
+	callID   string
+	toolName string
+	result   string
+	err      error
+}
+
+type contextDoneMsg struct{}
+
+// --- Model ---
+
+// Model is the bubbletea model for the interactive TUI.
+type Model struct {
+	ctx     context.Context
+	client  *ai.Client
+	session *chat.Session
+	tools   []ai.ToolDefinition
+
+	// Conversation history (managed only in Update, never in tea.Cmd goroutines).
+	messages []ai.Message
+
+	// Agent state machine.
+	state           tuiState
+	pendingCalls    []ai.ToolCall
+	currentCall     *ai.ToolCall
+	callingToolName string // name of tool currently executing (stateCallingTool)
+
+	// Display items for the viewport.
+	items       []displayItem
+	toolCallIdx map[string]int // callID → index in items
+
+	// UI components.
+	viewport viewport.Model
+	input    textinput.Model
+	spinner  spinner.Model
+	renderer *glamour.TermRenderer
+
+	// Terminal dimensions.
+	width  int
+	height int
+
+	// Header metadata.
+	modelName   string
+	serverNames []string
+}
+
+func initialModel(
+	ctx context.Context,
+	client *ai.Client,
+	session *chat.Session,
+	tools []ai.ToolDefinition,
+	modelName string,
+	serverNames []string,
+) Model {
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+
+	ti := textinput.New()
+	ti.Placeholder = "Type a message, press Enter to send..."
+	ti.CharLimit = 0
+
+	return Model{
+		ctx:         ctx,
+		client:      client,
+		session:     session,
+		tools:       tools,
+		messages:    chat.NewConversation(),
+		state:       stateIdle,
+		toolCallIdx: make(map[string]int),
+		viewport:    viewport.New(0, 0),
+		input:       ti,
+		spinner:     sp,
+		modelName:   modelName,
+		serverNames: serverNames,
+	}
+}
+
+// --- Tea interface ---
+
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(
+		m.input.Focus(),
+		m.spinner.Tick,
+		watchContext(m.ctx),
+	)
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	needRebuild := false
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.Type == tea.KeyCtrlC {
+			return m, tea.Quit
+		}
+
+		switch m.state {
+		case stateAwaitingApproval:
+			if m.currentCall != nil {
+				switch msg.String() {
+				case "y", "Y":
+					call := *m.currentCall
+					if idx, ok := m.toolCallIdx[call.ID]; ok {
+						m.items[idx].toolStatus = toolStatusRunning
+					}
+					m.callingToolName = call.Name
+					m.currentCall = nil
+					m.state = stateCallingTool
+					needRebuild = true
+					cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+				case "a", "A":
+					call := *m.currentCall
+					m.session.ApproveForSession(call.Name)
+					if idx, ok := m.toolCallIdx[call.ID]; ok {
+						m.items[idx].toolStatus = toolStatusRunning
+					}
+					m.callingToolName = call.Name
+					m.currentCall = nil
+					m.state = stateCallingTool
+					needRebuild = true
+					cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+				case "n", "N":
+					call := *m.currentCall
+					if idx, ok := m.toolCallIdx[call.ID]; ok {
+						m.items[idx].toolStatus = toolStatusDenied
+					}
+					m.messages = append(m.messages, ai.Message{
+						Role:       "tool",
+						ToolCallID: call.ID,
+						Content:    "(tool call was denied by the user)",
+					})
+					m.currentCall = nil
+					nextCmd := m.processNextCall()
+					needRebuild = true
+					cmds = append(cmds, nextCmd)
+				default:
+					var vpCmd tea.Cmd
+					m.viewport, vpCmd = m.viewport.Update(msg)
+					cmds = append(cmds, vpCmd)
+				}
+			}
+
+		case stateIdle:
+			if msg.Type == tea.KeyEnter {
+				text := strings.TrimSpace(m.input.Value())
+				if text != "" {
+					m.input.Reset()
+					m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
+					m.items = append(m.items, displayItem{kind: itemUser, content: text})
+					m.state = stateThinking
+					needRebuild = true
+					cmds = append(cmds, doComplete(m.ctx, m.client, m.messages, m.tools))
+				}
+			} else {
+				var inputCmd tea.Cmd
+				m.input, inputCmd = m.input.Update(msg)
+				cmds = append(cmds, inputCmd)
+			}
+
+		default:
+			var vpCmd tea.Cmd
+			m.viewport, vpCmd = m.viewport.Update(msg)
+			cmds = append(cmds, vpCmd)
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		vph := m.height - fixedLines
+		if vph < 1 {
+			vph = 1
+		}
+		m.viewport.Width = m.width
+		m.viewport.Height = vph
+		m.input.Width = m.width - 5 // 5 = len("You> ")
+		m.renderer = newGlamourRenderer(m.width - 4)
+		needRebuild = true
+
+	case spinner.TickMsg:
+		var spinCmd tea.Cmd
+		m.spinner, spinCmd = m.spinner.Update(msg)
+		cmds = append(cmds, spinCmd)
+
+	case aiResponseMsg:
+		if msg.err != nil {
+			m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
+			m.state = stateIdle
+			needRebuild = true
+			cmds = append(cmds, m.input.Focus())
+		} else {
+			m.messages = append(m.messages, msg.msg)
+			if len(msg.msg.ToolCalls) == 0 {
+				m.items = append(m.items, displayItem{kind: itemAssistant, content: msg.msg.Content})
+				m.state = stateIdle
+				needRebuild = true
+				cmds = append(cmds, m.input.Focus())
+			} else {
+				for _, tc := range msg.msg.ToolCalls {
+					m.toolCallIdx[tc.ID] = len(m.items)
+					m.items = append(m.items, displayItem{
+						kind:       itemToolCall,
+						toolName:   tc.Name,
+						toolArgs:   formatArgsCompact(tc.Arguments),
+						toolStatus: toolStatusPending,
+					})
+				}
+				m.pendingCalls = append(m.pendingCalls, msg.msg.ToolCalls...)
+				nextCmd := m.processNextCall()
+				needRebuild = true
+				cmds = append(cmds, nextCmd)
+			}
+		}
+
+	case toolResultMsg:
+		if msg.err != nil {
+			if idx, ok := m.toolCallIdx[msg.callID]; ok {
+				m.items[idx].toolStatus = toolStatusFailed
+			}
+			m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
+			m.callingToolName = ""
+			m.state = stateIdle
+			needRebuild = true
+			cmds = append(cmds, m.input.Focus())
+		} else {
+			if idx, ok := m.toolCallIdx[msg.callID]; ok {
+				m.items[idx].toolStatus = toolStatusDone
+			}
+			m.messages = append(m.messages, ai.Message{
+				Role:       "tool",
+				ToolCallID: msg.callID,
+				Content:    msg.result,
+			})
+			m.callingToolName = ""
+			nextCmd := m.processNextCall()
+			needRebuild = true
+			cmds = append(cmds, nextCmd)
+		}
+
+	case contextDoneMsg:
+		return m, tea.Quit
+	}
+
+	if needRebuild {
+		m.rebuildContent()
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) View() string {
+	if m.width == 0 {
+		return "" // not yet initialised — avoid rendering before first WindowSizeMsg
+	}
+
+	var b strings.Builder
+
+	b.WriteString(m.headerView())
+	b.WriteString("\n")
+	b.WriteString(separator(m.width))
+	b.WriteString("\n")
+
+	b.WriteString(m.viewport.View())
+	b.WriteString("\n")
+
+	b.WriteString(separator(m.width))
+	b.WriteString("\n")
+
+	s1, s2 := m.statusLines()
+	b.WriteString(s1)
+	b.WriteString("\n")
+	b.WriteString(s2)
+	b.WriteString("\n")
+
+	b.WriteString(separator(m.width))
+	b.WriteString("\n")
+
+	b.WriteString(m.inputView())
+
+	return b.String()
+}
+
+// --- Helper views ---
+
+func (m Model) headerView() string {
+	servers := "no servers"
+	if len(m.serverNames) > 0 {
+		servers = strings.Join(m.serverNames, ", ")
+	}
+	text := fmt.Sprintf("werkler  model: %s  servers: %s", m.modelName, servers)
+	return headerStyle.Width(m.width).Render(text)
+}
+
+func (m Model) statusLines() (line1, line2 string) {
+	switch m.state {
+	case stateThinking:
+		return statusStyle.Render(m.spinner.View() + " Thinking…"), ""
+	case stateCallingTool:
+		name := toolNameStyle.Render(m.callingToolName)
+		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name, ""
+	case stateAwaitingApproval:
+		if m.currentCall == nil {
+			return "", ""
+		}
+		args := formatArgsCompact(m.currentCall.Arguments)
+		l1 := "  ▶ " + toolNameStyle.Render(m.currentCall.Name)
+		if args != "" {
+			l1 += "  " + args
+		}
+		l2 := approvalPromptStyle.Render("Allow? ") +
+			keyHintStyle.Render("[y]") + "es  " +
+			keyHintStyle.Render("[n]") + "o  " +
+			keyHintStyle.Render("[a]") + "lways"
+		return l1, l2
+	default:
+		return "", ""
+	}
+}
+
+func (m Model) inputView() string {
+	prefix := inputPrefixStyle.Render("You> ")
+	return prefix + m.input.View()
+}
+
+// --- Viewport content ---
+
+func (m *Model) rebuildContent() {
+	var sb strings.Builder
+	for i, item := range m.items {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(m.renderItem(item))
+	}
+	m.viewport.SetContent(sb.String())
+	m.viewport.GotoBottom()
+}
+
+func (m Model) renderItem(item displayItem) string {
+	switch item.kind {
+	case itemUser:
+		return userPrefixStyle.Render("You") + "  " + item.content
+
+	case itemAssistant:
+		prefix := assistantPrefixStyle.Render("Werkler")
+		body := renderMarkdown(m.renderer, item.content)
+		return prefix + "\n" + body
+
+	case itemToolCall:
+		var badge string
+		switch item.toolStatus {
+		case toolStatusPending:
+			badge = toolPendingStyle.Render("◦")
+		case toolStatusRunning:
+			badge = toolPendingStyle.Render("▶")
+		case toolStatusDone:
+			badge = toolApprovedStyle.Render("✓")
+		case toolStatusFailed:
+			badge = toolDeniedStyle.Render("✗")
+		case toolStatusDenied:
+			badge = toolDeniedStyle.Render("✗")
+		}
+		name := toolNameStyle.Render(item.toolName)
+		line := "  " + badge + " " + name
+		if item.toolArgs != "" {
+			line += "  " + item.toolArgs
+		}
+		if item.toolStatus == toolStatusDenied {
+			line += "  " + toolDeniedStyle.Render("(denied)")
+		}
+		return line
+
+	case itemError:
+		return errorStyle.Render("Error: ") + item.content
+
+	default:
+		return item.content
+	}
+}
+
+// --- Agent loop helpers ---
+
+// processNextCall advances the tool call queue, updating state and returning the
+// next command to execute. Must only be called from Update.
+func (m *Model) processNextCall() tea.Cmd {
+	if len(m.pendingCalls) == 0 {
+		m.state = stateThinking
+		return doComplete(m.ctx, m.client, m.messages, m.tools)
+	}
+
+	call := m.pendingCalls[0]
+	m.pendingCalls = m.pendingCalls[1:]
+	callCopy := call
+	m.currentCall = &callCopy
+
+	if m.session.IsApproved(call.Name) {
+		if idx, ok := m.toolCallIdx[call.ID]; ok {
+			m.items[idx].toolStatus = toolStatusRunning
+		}
+		m.callingToolName = call.Name
+		m.currentCall = nil
+		m.state = stateCallingTool
+		return doCallTool(m.ctx, m.session, call)
+	}
+
+	m.state = stateAwaitingApproval
+	return nil
+}
+
+// --- Tea commands ---
+
+func doComplete(ctx context.Context, client *ai.Client, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
+	// Snapshot the message slice so the goroutine doesn't share the model's slice.
+	snapshot := make([]ai.Message, len(messages))
+	copy(snapshot, messages)
+	return func() tea.Msg {
+		msg, err := client.Complete(ctx, snapshot, tools)
+		return aiResponseMsg{msg, err}
+	}
+}
+
+func doCallTool(ctx context.Context, session *chat.Session, tc ai.ToolCall) tea.Cmd {
+	return func() tea.Msg {
+		result, err := session.CallTool(ctx, tc)
+		return toolResultMsg{tc.ID, tc.Name, result, err}
+	}
+}
+
+func watchContext(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		<-ctx.Done()
+		return contextDoneMsg{}
+	}
+}
+
+// --- Formatting helpers ---
+
+func formatArgsCompact(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Sprintf("%v", args)
+	}
+	s := string(b)
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return s
+}
+
+// --- Entry point ---
+
+// RunTUI starts the full-screen interactive TUI. It blocks until the user exits
+// or ctx is cancelled.
+func RunTUI(
+	ctx context.Context,
+	client *ai.Client,
+	session *chat.Session,
+	modelName string,
+	serverNames []string,
+) error {
+	tools, err := session.Tools(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching tools: %w", err)
+	}
+
+	m := initialModel(ctx, client, session, tools, modelName, serverNames)
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	_, err = p.Run()
+	return err
+}
