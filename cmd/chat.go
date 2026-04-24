@@ -7,11 +7,17 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/spf13/cobra"
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	mcppkg "github.com/icedream/werkler/internal/mcp"
+	"github.com/icedream/werkler/internal/ui"
+)
+
+var (
+	chatPrompt string
 )
 
 var chatCmd = &cobra.Command{
@@ -20,11 +26,13 @@ var chatCmd = &cobra.Command{
 	Long: `Start an interactive chat session with the configured AI model.
 The AI can use tools provided by connected MCP servers to complete tasks.
 
-Type /exit or press Ctrl-D to quit.`,
+When --prompt is given, run a single non-interactive turn and print the result.
+Otherwise the full TUI is launched. Press Ctrl-C to quit.`,
 	RunE: runChat,
 }
 
 func init() {
+	chatCmd.Flags().StringVarP(&chatPrompt, "prompt", "p", "", "Run a single non-interactive prompt and exit")
 	rootCmd.AddCommand(chatCmd)
 }
 
@@ -50,6 +58,32 @@ func runChat(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	loop := chat.NewLoop(aiClient, manager, cfg.MCP.AutoApproveTools, os.Stdin, os.Stdout)
-	return loop.Run(ctx)
+	session := chat.NewSession(manager, cfg.MCP.AutoApproveTools)
+
+	if chatPrompt != "" {
+		return runPromptMode(ctx, aiClient, session)
+	}
+	return runInteractiveMode(ctx, aiClient, session)
+}
+
+func runPromptMode(ctx context.Context, aiClient *ai.Client, session *chat.Session) error {
+	result, err := chat.RunPrompt(ctx, aiClient, session, chatPrompt, os.Stderr)
+	if err != nil {
+		return err
+	}
+	rendered, err := glamour.Render(result, "auto")
+	if err != nil {
+		fmt.Println(result)
+		return nil
+	}
+	fmt.Print(rendered)
+	return nil
+}
+
+func runInteractiveMode(ctx context.Context, aiClient *ai.Client, session *chat.Session) error {
+	serverNames := make([]string, 0, len(cfg.MCP.Servers))
+	for _, s := range cfg.MCP.Servers {
+		serverNames = append(serverNames, s.Name)
+	}
+	return ui.RunTUI(ctx, aiClient, session, cfg.AI.Model, serverNames)
 }
