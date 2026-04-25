@@ -36,6 +36,7 @@ type MCPServerConfig struct {
 	OAuth             bool   `mapstructure:"oauth"`
 	OAuthClientID     string `mapstructure:"oauth_client_id"`     // pre-registered client ID (required when server has no DCR)
 	OAuthClientSecret string `mapstructure:"oauth_client_secret"` // optional; omit for public clients using PKCE
+	OAuthCallbackPort int    `mapstructure:"oauth_callback_port"` // local callback port; 0 = random (default: 34217)
 }
 
 // MCPConfig holds all MCP-related settings.

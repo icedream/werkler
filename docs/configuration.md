@@ -210,8 +210,8 @@ Waiting for authorization…
 ```
 
 1. Open the URL in your browser and complete the login flow.
-2. Your browser is redirected to a local callback URL that Werkler is
-   listening on (`http://127.0.0.1:<random-port>/callback`).
+2. Your browser is redirected to `http://127.0.0.1:34217/callback` (the default
+   callback port; see `oauth_callback_port` below).
 3. Werkler exchanges the authorization code for tokens, then connects the
    server and proceeds with your original prompt automatically.
 
@@ -220,6 +220,15 @@ Tokens (including refresh tokens) are stored encrypted-at-rest in
 werkler sessions reuse the stored token and refresh it automatically —
 you will not be prompted again unless the refresh token expires or is
 revoked.
+
+#### OAuth configuration fields
+
+| Field | Default | Description |
+|---|---|---|
+| `oauth` | `false` | Enable OAuth for this streamable server |
+| `oauth_client_id` | — | Pre-registered client ID (required when the auth server has no Dynamic Client Registration) |
+| `oauth_client_secret` | — | Client secret (optional for public clients) |
+| `oauth_callback_port` | `34217` | Local TCP port werkler listens on for the browser redirect. Must match the callback URL registered in your OAuth App. Set to `0` to let the OS pick a random port. |
 
 > **Note:** Because the OAuth flow requires a browser, it cannot run in
 > non-interactive (`--prompt`) mode. If you try, Werkler will print an error
@@ -245,8 +254,8 @@ create a **GitHub OAuth App** first (free, takes about a minute):
 1. Go to **GitHub → Settings → Developer settings → OAuth Apps → New OAuth App**
 2. Set **Application name** to anything (e.g. `werkler`)
 3. Set **Homepage URL** to `http://localhost`
-4. Set **Authorization callback URL** to `http://localhost`
-   (werkler uses a random local port; GitHub accepts any `localhost` redirect)
+4. Set **Authorization callback URL** to `http://127.0.0.1:34217/callback`
+   (werkler's default callback port — see `oauth_callback_port` below)
 5. Click **Register application**, then note the **Client ID**
 6. Click **Generate a new client secret** and note the secret
 
@@ -254,12 +263,13 @@ Then configure werkler:
 
 ```toml
 [[mcp.servers]]
-name              = "github"
-transport         = "streamable"
-url               = "https://api.githubcopilot.com/mcp/"
-oauth             = true
-oauth_client_id   = "$GITHUB_MCP_CLIENT_ID"
+name                = "github"
+transport           = "streamable"
+url                 = "https://api.githubcopilot.com/mcp/"
+oauth               = true
+oauth_client_id     = "$GITHUB_MCP_CLIENT_ID"
 oauth_client_secret = "$GITHUB_MCP_CLIENT_SECRET"
+# oauth_callback_port defaults to 34217 — must match your OAuth App's callback URL
 ```
 
 Set the environment variables before starting werkler:
