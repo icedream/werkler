@@ -1,4 +1,4 @@
-package cmd
+package main
 
 // auth_providers.go registers all provider authenticators with the auth
 // subcommand machinery defined in auth.go.
