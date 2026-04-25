@@ -1243,17 +1243,22 @@ func (m Model) View() string {
 		return m.sessionPicker.View()
 	}
 
+	sep := separator(m.width)
+	if m.session.AllowAll() {
+		sep = separatorAllowAllStyle.Render(strings.Repeat("─", m.width))
+	}
+
 	var b strings.Builder
 
 	b.WriteString(m.headerView())
 	b.WriteString("\n")
-	b.WriteString(separator(m.width))
+	b.WriteString(sep)
 	b.WriteString("\n")
 
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
 
-	b.WriteString(separator(m.width))
+	b.WriteString(sep)
 	b.WriteString("\n")
 
 	s1, s2 := m.statusLines()
@@ -1262,7 +1267,7 @@ func (m Model) View() string {
 	b.WriteString(s2)
 	b.WriteString("\n")
 
-	b.WriteString(separator(m.width))
+	b.WriteString(sep)
 	b.WriteString("\n")
 
 	if m.showCompletion {
