@@ -27,9 +27,11 @@ type AuthURLNotifier func(ctx context.Context, serverName, authURL string) (code
 // Tokens are loaded on the first [TokenSource] call and persisted after every
 // successful authorization or automatic refresh.
 type Handler struct {
-	serverName  string
-	redirectURI string
-	notifier    AuthURLNotifier
+	serverName   string
+	redirectURI  string
+	notifier     AuthURLNotifier
+	clientID     string // pre-registered client ID; used when DCR is unavailable
+	clientSecret string // optional; empty for public clients
 
 	mu          sync.Mutex
 	oauth2Cfg   *oauth2.Config     // set after successful auth; required for refresh
@@ -39,13 +41,16 @@ type Handler struct {
 var _ auth.OAuthHandler = (*Handler)(nil)
 
 // NewHandler creates a Handler for the given MCP server.
-// redirectURI must be the redirect URI that was registered for the OAuth client;
-// it should come from [CallbackServer.RedirectURI].
-func NewHandler(serverName, redirectURI string, notifier AuthURLNotifier) *Handler {
+// redirectURI must come from [CallbackServer.RedirectURI].
+// clientID and clientSecret are optional pre-registered OAuth credentials;
+// supply them for servers that do not support Dynamic Client Registration (e.g. GitHub).
+func NewHandler(serverName, redirectURI string, notifier AuthURLNotifier, clientID, clientSecret string) *Handler {
 	return &Handler{
-		serverName:  serverName,
-		redirectURI: redirectURI,
-		notifier:    notifier,
+		serverName:   serverName,
+		redirectURI:  redirectURI,
+		notifier:     notifier,
+		clientID:     clientID,
+		clientSecret: clientSecret,
 	}
 }
 
@@ -129,7 +134,23 @@ func (h *Handler) Authorize(ctx context.Context, req *http.Request, resp *http.R
 	}
 
 	if asm.RegistrationEndpoint == "" {
-		return fmt.Errorf("authorization server for %q does not support dynamic client registration and no pre-registered client is configured", h.serverName)
+		if h.clientID == "" {
+			return fmt.Errorf(
+				"authorization server for %q does not support dynamic client registration "+
+					"and no pre-registered client is configured — set oauth_client_id in the server config",
+				h.serverName)
+		}
+		// Use the pre-registered client directly (no DCR).
+		cfg := &oauth2.Config{
+			ClientID:     h.clientID,
+			ClientSecret: h.clientSecret,
+			Endpoint: oauth2.Endpoint{
+				AuthURL:  asm.AuthorizationEndpoint,
+				TokenURL: asm.TokenEndpoint,
+			},
+			RedirectURL: h.redirectURI,
+		}
+		return h.runAuthCodeFlow(ctx, cfg, prm.Resource)
 	}
 
 	regResp, err := oauthex.RegisterClient(ctx, asm.RegistrationEndpoint, &oauthex.ClientRegistrationMetadata{
@@ -142,9 +163,6 @@ func (h *Handler) Authorize(ctx context.Context, req *http.Request, resp *http.R
 		return fmt.Errorf("dynamic client registration for %q: %w", h.serverName, err)
 	}
 
-	codeVerifier := oauth2.GenerateVerifier()
-	state := rand.Text()
-
 	cfg := &oauth2.Config{
 		ClientID:     regResp.ClientID,
 		ClientSecret: regResp.ClientSecret,
@@ -154,11 +172,21 @@ func (h *Handler) Authorize(ctx context.Context, req *http.Request, resp *http.R
 		},
 		RedirectURL: h.redirectURI,
 	}
+	return h.runAuthCodeFlow(ctx, cfg, prm.Resource)
+}
 
-	authURL := cfg.AuthCodeURL(state,
-		oauth2.S256ChallengeOption(codeVerifier),
-		oauth2.SetAuthURLParam("resource", prm.Resource),
-	)
+// runAuthCodeFlow completes the PKCE authorization code flow using cfg.
+// resource is the OAuth 2.0 resource parameter (may be empty).
+func (h *Handler) runAuthCodeFlow(ctx context.Context, cfg *oauth2.Config, resource string) error {
+	codeVerifier := oauth2.GenerateVerifier()
+	state := rand.Text()
+
+	var authURLOpts []oauth2.AuthCodeOption
+	authURLOpts = append(authURLOpts, oauth2.S256ChallengeOption(codeVerifier))
+	if resource != "" {
+		authURLOpts = append(authURLOpts, oauth2.SetAuthURLParam("resource", resource))
+	}
+	authURL := cfg.AuthCodeURL(state, authURLOpts...)
 
 	code, returnedState, err := h.notifier(ctx, h.serverName, authURL)
 	if err != nil {
@@ -168,16 +196,18 @@ func (h *Handler) Authorize(ctx context.Context, req *http.Request, resp *http.R
 		return fmt.Errorf("OAuth state mismatch for %q: possible CSRF", h.serverName)
 	}
 
+	var exchangeOpts []oauth2.AuthCodeOption
+	exchangeOpts = append(exchangeOpts, oauth2.VerifierOption(codeVerifier))
+	if resource != "" {
+		exchangeOpts = append(exchangeOpts, oauth2.SetAuthURLParam("resource", resource))
+	}
 	clientCtx := context.WithValue(ctx, oauth2.HTTPClient, http.DefaultClient)
-	token, err := cfg.Exchange(clientCtx, code,
-		oauth2.VerifierOption(codeVerifier),
-		oauth2.SetAuthURLParam("resource", prm.Resource),
-	)
+	token, err := cfg.Exchange(clientCtx, code, exchangeOpts...)
 	if err != nil {
 		return fmt.Errorf("token exchange for %q: %w", h.serverName, err)
 	}
 
-	sess := storedSessionFromToken(regResp.ClientID, regResp.ClientSecret, asm.TokenEndpoint, token)
+	sess := storedSessionFromToken(cfg.ClientID, cfg.ClientSecret, cfg.Endpoint.TokenURL, token)
 	if saveErr := SaveSession(h.serverName, sess); saveErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: could not save OAuth session for %q: %v\n", h.serverName, saveErr)
 	}

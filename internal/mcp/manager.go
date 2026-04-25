@@ -163,7 +163,7 @@ func (m *Manager) ConnectPendingOAuth(ctx context.Context, display func(serverNa
 			return result.Code, result.State, nil
 		}
 
-		handler := oauthpkg.NewHandler(srv.Name, cbSrv.RedirectURI(), localNotifier)
+		handler := oauthpkg.NewHandler(srv.Name, cbSrv.RedirectURI(), localNotifier, srv.OAuthClientID, srv.OAuthClientSecret)
 		transport := &mcp.StreamableClientTransport{
 			Endpoint:     srv.URL,
 			HTTPClient:   httpClientWithHeaders(srv.Headers),
