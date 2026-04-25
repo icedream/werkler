@@ -1575,9 +1575,10 @@ func (m *Model) processNextCall() tea.Cmd {
 	m.currentCall = &callCopy
 
 	debugLog("processNextCall: dispatching tool=%q id=%q approved=%v", call.Name, call.ID, m.session.IsApproved(call.Name))
-	// ask_user is always dispatched immediately — it suspends the goroutine and
-	// transfers control to the TUI directly, so no approval dialog is needed.
-	if m.session.IsApproved(call.Name) || call.Name == "ask_user" {
+	// ask_user and rubber_duck_review are always dispatched immediately without
+	// an approval dialog: ask_user suspends the goroutine waiting for the user,
+	// and rubber_duck_review sends data only to a user-configured reviewer.
+	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "rubber_duck_review" {
 		if idx, ok := m.toolCallIdx[call.ID]; ok {
 			m.items[idx].toolStatus = toolStatusRunning
 		}

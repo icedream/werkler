@@ -55,7 +55,12 @@ func runChat(_ *cobra.Command, _ []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	multiClient, displayName, err := buildAIClient()
+	providers, err := config.NormalizeProviders(&cfg.AI)
+	if err != nil {
+		return err
+	}
+
+	multiClient, displayName, err := buildAIClient(providers)
 	if err != nil {
 		return err
 	}
@@ -75,6 +80,14 @@ func runChat(_ *cobra.Command, _ []string) error {
 	toolMgr := tools.New(manager, nil, nil)
 	session := chat.NewSession(toolMgr, cfg.MCP.AutoApproveTools, cfg.MCP.AutoApprovePaths)
 	toolMgr.SetPathApprover(session)
+
+	reviewer, reviewerLabel, err := buildReviewerClient(providers)
+	if err != nil {
+		return fmt.Errorf("rubber duck reviewer: %w", err)
+	}
+	if reviewer != nil {
+		toolMgr.SetReviewer(reviewer, reviewerLabel)
+	}
 
 	store := sessionstore.New(sessionstore.DefaultDir())
 
@@ -103,14 +116,32 @@ func runChat(_ *cobra.Command, _ []string) error {
 	return runInteractiveMode(ctx, multiClient, session, toolMgr, displayName, opts)
 }
 
-// buildAIClient constructs a MultiClient from the current config, returning
-// the client and its initial model display name.
-func buildAIClient() (*ai.MultiClient, string, error) {
-	providers, err := config.NormalizeProviders(&cfg.AI)
-	if err != nil {
-		return nil, "", err
+// buildProviderClient constructs a single AI client from a ProviderConfig.
+func buildProviderClient(p config.ProviderConfig) (*ai.Client, error) {
+	switch p.Type {
+	case config.ProviderTypeOpenAI, "": // empty type defaults to openai
+		return ai.New(p.Endpoint, p.APIKey, p.Model), nil
+	case config.ProviderTypeCopilot:
+		tok, loadErr := copilot.LoadGitHubToken()
+		if loadErr != nil {
+			return nil, fmt.Errorf("loading Copilot token for provider %q: %w", p.Name, loadErr)
+		}
+		if tok == nil {
+			return nil, fmt.Errorf(
+				"GitHub Copilot provider %q is not authenticated — run `werkler auth copilot` first",
+				p.Name,
+			)
+		}
+		transport := copilot.NewTransport(tok.AccessToken)
+		return ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport}), nil
+	default:
+		return nil, fmt.Errorf("unknown provider type %q for provider %q", p.Type, p.Name)
 	}
+}
 
+// buildAIClient constructs a MultiClient from the given normalized providers,
+// returning the client and its initial model display name.
+func buildAIClient(providers []config.ProviderConfig) (*ai.MultiClient, string, error) {
 	// Determine which provider should be active.
 	activeName := config.ActiveProviderName(&cfg.AI, providers)
 	if chatProvider != "" {
@@ -119,27 +150,11 @@ func buildAIClient() (*ai.MultiClient, string, error) {
 
 	mc := &ai.MultiClient{}
 	for _, p := range providers {
-		switch p.Type {
-		case config.ProviderTypeOpenAI, "": // empty type defaults to openai
-			client := ai.New(p.Endpoint, p.APIKey, p.Model)
-			mc.AddProvider(p.Name, client)
-		case config.ProviderTypeCopilot:
-			tok, loadErr := copilot.LoadGitHubToken()
-			if loadErr != nil {
-				return nil, "", fmt.Errorf("loading Copilot token for provider %q: %w", p.Name, loadErr)
-			}
-			if tok == nil {
-				return nil, "", fmt.Errorf(
-					"GitHub Copilot provider %q is not authenticated — run `werkler auth copilot` first",
-					p.Name,
-				)
-			}
-			transport := copilot.NewTransport(tok.AccessToken)
-			client := ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport})
-			mc.AddProvider(p.Name, client)
-		default:
-			return nil, "", fmt.Errorf("unknown provider type %q for provider %q", p.Type, p.Name)
+		client, err := buildProviderClient(p)
+		if err != nil {
+			return nil, "", err
 		}
+		mc.AddProvider(p.Name, client)
 	}
 
 	if activeName != "" && !mc.SwitchToProvider(activeName) {
@@ -147,6 +162,68 @@ func buildAIClient() (*ai.MultiClient, string, error) {
 	}
 
 	return mc, mc.CurrentModelDisplay(), nil
+}
+
+// buildReviewerClient constructs an AI client for rubber duck reviews based on
+// the [ai.rubber_duck] config section. Returns nil, "", nil when unconfigured.
+func buildReviewerClient(providers []config.ProviderConfig) (ai.Completer, string, error) {
+	rd := cfg.AI.RubberDuck
+	if !rd.IsConfigured() {
+		return nil, "", nil
+	}
+
+	var providerCfg config.ProviderConfig
+
+	if rd.Provider != "" {
+		// Reference an existing provider by name.
+		found := false
+		for _, p := range providers {
+			if p.Name == rd.Provider {
+				providerCfg = p
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, "", fmt.Errorf("rubber duck provider %q not found in [[ai.providers]]", rd.Provider)
+		}
+		if rd.Model != "" {
+			providerCfg.Model = rd.Model
+		}
+	} else {
+		// Standalone config: validate required fields.
+		if rd.Type == "" {
+			rd.Type = config.ProviderTypeOpenAI
+		}
+		if rd.Type == config.ProviderTypeOpenAI && rd.APIKey == "" {
+			return nil, "", fmt.Errorf(
+				"[ai.rubber_duck] standalone config requires api_key (or set provider = \"<name>\" to reference an existing provider)",
+			)
+		}
+		endpoint := rd.Endpoint
+		if endpoint == "" && rd.Type == config.ProviderTypeOpenAI {
+			endpoint = "https://api.openai.com/v1"
+		}
+		providerCfg = config.ProviderConfig{
+			Name:     "rubber_duck",
+			Type:     rd.Type,
+			Endpoint: endpoint,
+			APIKey:   rd.APIKey,
+			Model:    rd.Model,
+		}
+	}
+
+	client, err := buildProviderClient(providerCfg)
+	if err != nil {
+		return nil, "", err
+	}
+
+	label := string(providerCfg.Type) + "/" + providerCfg.Model
+	if rd.Provider != "" {
+		label = rd.Provider + "/" + providerCfg.Model
+	}
+
+	return client, label, nil
 }
 
 func runPromptMode(ctx context.Context, aiClient ai.Completer, session *chat.Session) error {
