@@ -33,7 +33,9 @@ type MCPServerConfig struct {
 	Headers map[string]string `mapstructure:"headers"` // extra HTTP request headers (e.g. Authorization)
 	// OAuth enables OAuth 2.1 + PKCE authentication for streamable transport.
 	// Authentication is deferred: the browser flow runs the first time a prompt is submitted.
-	OAuth bool `mapstructure:"oauth"`
+	OAuth             bool   `mapstructure:"oauth"`
+	OAuthClientID     string `mapstructure:"oauth_client_id"`     // pre-registered client ID (required when server has no DCR)
+	OAuthClientSecret string `mapstructure:"oauth_client_secret"` // optional; omit for public clients using PKCE
 }
 
 // MCPConfig holds all MCP-related settings.

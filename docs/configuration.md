@@ -239,20 +239,40 @@ that you run yourself.
 ### Remote server — OAuth (recommended)
 
 The remote server at `https://api.githubcopilot.com/mcp/` supports standard
-OAuth 2.1. Werkler will open a browser link in the chat the first time you send
-a prompt.
+OAuth 2.1, but GitHub does not support Dynamic Client Registration — you must
+create a **GitHub OAuth App** first (free, takes about a minute):
+
+1. Go to **GitHub → Settings → Developer settings → OAuth Apps → New OAuth App**
+2. Set **Application name** to anything (e.g. `werkler`)
+3. Set **Homepage URL** to `http://localhost`
+4. Set **Authorization callback URL** to `http://localhost`
+   (werkler uses a random local port; GitHub accepts any `localhost` redirect)
+5. Click **Register application**, then note the **Client ID**
+6. Click **Generate a new client secret** and note the secret
+
+Then configure werkler:
 
 ```toml
 [[mcp.servers]]
-name      = "github"
-transport = "streamable"
-url       = "https://api.githubcopilot.com/mcp/"
-oauth     = true
+name              = "github"
+transport         = "streamable"
+url               = "https://api.githubcopilot.com/mcp/"
+oauth             = true
+oauth_client_id   = "$GITHUB_MCP_CLIENT_ID"
+oauth_client_secret = "$GITHUB_MCP_CLIENT_SECRET"
 ```
 
-> **Requirements:** A GitHub account with
-> [GitHub Copilot](https://github.com/features/copilot) access (free tier
-> works). The OAuth App used is GitHub's own; no registration is needed.
+Set the environment variables before starting werkler:
+
+```sh
+export GITHUB_MCP_CLIENT_ID=Ov23li...
+export GITHUB_MCP_CLIENT_SECRET=...
+werkler chat
+```
+
+The first time you submit a prompt, werkler shows an authorization URL in the
+chat. After you approve in the browser, the token is saved and future sessions
+re-use it automatically.
 
 ### Remote server — Personal Access Token
 
@@ -409,10 +429,12 @@ transport = "streamable"
 url       = "https://mcp.atlassian.com/v1/mcp"
 oauth     = true
 
-# GitHub MCP server (OAuth — browser login on first use)
+# GitHub MCP server (OAuth — requires a pre-registered GitHub OAuth App)
 [[mcp.servers]]
-name      = "github"
-transport = "streamable"
-url       = "https://api.githubcopilot.com/mcp/"
-oauth     = true
+name                = "github"
+transport           = "streamable"
+url                 = "https://api.githubcopilot.com/mcp/"
+oauth               = true
+oauth_client_id     = "$GITHUB_MCP_CLIENT_ID"
+oauth_client_secret = "$GITHUB_MCP_CLIENT_SECRET"
 ```
