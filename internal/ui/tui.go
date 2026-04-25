@@ -244,6 +244,15 @@ func init() {
 			},
 		},
 		{
+			name:        "allow-all",
+			description: "Toggle allow-all mode — auto-approve all tool calls and path access without prompting",
+			action: func(m *Model) []tea.Cmd {
+				m.session.SetAllowAll(!m.session.AllowAll())
+				m.rebuildContent()
+				return nil
+			},
+		},
+		{
 			name:        "quit",
 			description: "Quit werkler",
 			action: func(m *Model) []tea.Cmd {
@@ -1281,17 +1290,21 @@ func (m Model) statusLines() (line1, line2 string) {
 	if n := len(m.queuedPrompts); n > 0 {
 		queueHint = "  " + queueCountStyle.Render(fmt.Sprintf("+%d queued", n))
 	}
+	allowAllIndicator := ""
+	if m.session.AllowAll() {
+		allowAllIndicator = "  " + allowAllWarningStyle.Render("⚠ allow-all ON")
+	}
 
 	switch m.state {
 	case stateThinking:
-		return statusStyle.Render(m.spinner.View()+" Thinking…") + queueHint, ""
+		return statusStyle.Render(m.spinner.View()+" Thinking…") + queueHint + allowAllIndicator, ""
 	case stateConnectingOAuth:
-		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint, ""
+		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + allowAllIndicator, ""
 	case stateStreaming:
-		return statusStyle.Render(m.spinner.View()+" Streaming…") + queueHint, ""
+		return statusStyle.Render(m.spinner.View()+" Streaming…") + queueHint + allowAllIndicator, ""
 	case stateCallingTool:
 		name := toolNameStyle.Render(m.callingToolName)
-		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + queueHint, ""
+		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + queueHint + allowAllIndicator, ""
 	case stateAwaitingPathApproval:
 		if m.currentPathRequest.Path == "" {
 			return "", ""
@@ -1309,7 +1322,7 @@ func (m Model) statusLines() (line1, line2 string) {
 			keyHintStyle.Render("[y]") + "es  " +
 			keyHintStyle.Render("[n]") + "o  " +
 			keyHintStyle.Render("[a]") + "ll remaining"
-		return l1, l2
+		return l1 + allowAllIndicator, l2
 	case stateAwaitingApproval:
 		if m.currentCall == nil {
 			return "", ""
@@ -1323,7 +1336,7 @@ func (m Model) statusLines() (line1, line2 string) {
 			keyHintStyle.Render("[y]") + "es  " +
 			keyHintStyle.Render("[n]") + "o  " +
 			keyHintStyle.Render("[a]") + "lways"
-		return l1, l2
+		return l1 + allowAllIndicator, l2
 	case stateAwaitingUserQuestion:
 		l1 := approvalPromptStyle.Render("  ❓ AI is asking a question")
 		l2 := "  "
@@ -1334,7 +1347,7 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.askUserAllowFreeform {
 			l2 += "  " + keyHintStyle.Render("[type]") + " custom answer"
 		}
-		return l1, l2
+		return l1 + allowAllIndicator, l2
 	default:
 		mouseHint := "  " + keyHintStyle.Render("alt+m") + " select text"
 		if !m.mouseEnabled {
@@ -1348,7 +1361,7 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.sessionStore != nil {
 			sessionHint = "  " + keyHintStyle.Render("ctrl+r") + " sessions"
 		}
-		line1 := mouseHint + pickerHint + sessionHint
+		line1 := mouseHint + pickerHint + sessionHint + allowAllIndicator
 		// Show resume hint on line2 until the user sends their first message.
 		line2 := ""
 		if m.resumeHint != nil && m.sessionStore != nil {
