@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -44,6 +45,7 @@ const (
 	stateCallingTool
 	stateAwaitingApproval
 	stateConnectingOAuth // running deferred OAuth server connections
+	statePickingModel    // model selection list is open
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -54,6 +56,8 @@ func inputPlaceholder(state tuiState) string {
 		return "Approve the tool call above (y / n / a)…"
 	case stateConnectingOAuth:
 		return "Waiting for authorization in browser…"
+	case statePickingModel:
+		return ""
 	case stateIdle:
 		return "Type a message, press Enter to send…"
 	default:
@@ -120,6 +124,18 @@ type oauthConnectedMsg struct{}
 // oauthConnectFailedMsg is sent when OAuth connection fails.
 type oauthConnectFailedMsg struct{ err error }
 
+// --- Model picker messages ---
+
+type modelsLoadedMsg struct{ models []string }
+type modelsErrMsg struct{ err error }
+
+// modelItem implements list.Item for a model name string.
+type modelItem string
+
+func (m modelItem) FilterValue() string { return string(m) }
+func (m modelItem) Title() string       { return string(m) }
+func (m modelItem) Description() string { return "" }
+
 // --- Model ---
 
 // Model is the bubbletea model for the interactive TUI.
@@ -128,6 +144,10 @@ type Model struct {
 	client  ai.StreamCompleter
 	session *chat.Session
 	tools   []ai.ToolDefinition
+
+	// modelManager is optionally set when the client also implements ModelManager.
+	// When nil, the model picker feature is disabled.
+	modelManager ai.ModelManager
 
 	// send dispatches messages to this bubbletea program from goroutines.
 	// Set in RunTUI before the program starts.
@@ -151,6 +171,9 @@ type Model struct {
 	items        []displayItem
 	toolCallIdx  map[string]int // callID → index in items
 	oauthInfoIdx int            // index of the OAuth status item; -1 if none
+
+	// Model picker (only valid during statePickingModel).
+	modelPicker list.Model
 
 	// UI components.
 	viewport     viewport.Model
@@ -191,18 +214,34 @@ func initialModel(
 	ti.CharLimit = 0
 	ti.Focus() // must be called here; Init() runs on a value copy so mutations there are lost
 
+	// Model picker: initialized at zero size; sized on first WindowSizeMsg.
+	delegate := list.NewDefaultDelegate()
+	picker := list.New(nil, delegate, 0, 0)
+	picker.Title = "Select model"
+	picker.SetShowStatusBar(false)
+	picker.SetFilteringEnabled(true)
+	picker.DisableQuitKeybindings()
+
+	// Use modelManager when the client also implements ModelManager.
+	var mm ai.ModelManager
+	if m, ok := client.(ai.ModelManager); ok {
+		mm = m
+	}
+
 	return Model{
 		ctx:              ctx,
 		client:           client,
 		session:          session,
 		tools:            tools,
 		send:             send,
+		modelManager:     mm,
 		messages:         chat.NewConversation(),
 		state:            stateIdle,
 		streamingItemIdx: -1,
 		oauthInfoIdx:     -1,
 		toolCallIdx:      make(map[string]int),
 		viewport:         viewport.New(0, 0),
+		modelPicker:      picker,
 		input:            ti,
 		spinner:          sp,
 		modelName:        modelName,
@@ -289,7 +328,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case stateIdle:
-			if msg.Type == tea.KeyEnter {
+			switch msg.Type {
+			case tea.KeyEnter:
 				text := strings.TrimSpace(m.input.Value())
 				if text != "" {
 					m.input.Reset()
@@ -313,7 +353,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
 					}
 				}
-			} else {
+			case tea.KeyCtrlP:
+				if m.modelManager != nil {
+					m.state = statePickingModel
+					m.modelPicker.SetItems(nil)
+					m.modelPicker.SetSize(m.width, m.height-fixedLines)
+					cmds = append(cmds, doListModels(m.ctx, m.modelManager))
+				}
+			default:
 				// Forward to both: textinput handles text entry; viewport handles
 				// navigation keys (Up/Down/PgUp/PgDn) so the user can scroll while idle.
 				var inputCmd tea.Cmd
@@ -322,6 +369,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var vpCmd tea.Cmd
 				m.viewport, vpCmd = m.viewport.Update(msg)
 				cmds = append(cmds, vpCmd)
+			}
+
+		case statePickingModel:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.state = stateIdle
+			case tea.KeyEnter:
+				if sel := m.modelPicker.SelectedItem(); sel != nil {
+					model := string(sel.(modelItem))
+					m.modelManager.SetModel(model)
+					m.modelName = model
+				}
+				m.state = stateIdle
+			default:
+				var pickerCmd tea.Cmd
+				m.modelPicker, pickerCmd = m.modelPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
 			}
 
 		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth:
@@ -359,6 +423,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport, vpCmd = m.viewport.Update(msg)
 		cmds = append(cmds, vpCmd)
 
+	case modelsLoadedMsg:
+		// Only process if we're still in model-picking state (guard against stale results).
+		if m.state == statePickingModel {
+			items := make([]list.Item, len(msg.models))
+			selectedIdx := 0
+			for i, name := range msg.models {
+				items[i] = modelItem(name)
+				if name == m.modelName {
+					selectedIdx = i
+				}
+			}
+			m.modelPicker.SetItems(items)
+			m.modelPicker.Select(selectedIdx)
+		}
+
+	case modelsErrMsg:
+		if m.state == statePickingModel {
+			m.items = append(m.items, displayItem{kind: itemError, content: "listing models: " + msg.err.Error()})
+			m.state = stateIdle
+			needRebuild = true
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -374,6 +460,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = m.width
 		m.viewport.Height = vph
 		m.input.Width = m.width - 5 // 5 = len("You> ")
+		m.modelPicker.SetSize(m.width, vph)
 		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
 		needRebuild = true
 		// Clear and fully repaint after resize to avoid blank regions.
@@ -538,6 +625,11 @@ func (m Model) View() string {
 		return "" // not yet initialised — avoid rendering before first WindowSizeMsg
 	}
 
+	// Model picker takes over the full screen.
+	if m.state == statePickingModel {
+		return m.modelPicker.View()
+	}
+
 	var b strings.Builder
 
 	b.WriteString(m.headerView())
@@ -611,7 +703,11 @@ func (m Model) statusLines() (line1, line2 string) {
 		if !m.mouseEnabled {
 			mouseHint = "  " + keyHintStyle.Render("alt+m") + " restore scroll"
 		}
-		return mouseHint, ""
+		pickerHint := ""
+		if m.modelManager != nil {
+			pickerHint = "  " + keyHintStyle.Render("ctrl+p") + " switch model"
+		}
+		return mouseHint + pickerHint, ""
 	}
 }
 
@@ -777,6 +873,17 @@ func doConnectOAuth(ctx context.Context, session *chat.Session, send func(tea.Ms
 			return oauthConnectFailedMsg{err: err}
 		}
 		return oauthConnectedMsg{}
+	}
+}
+
+// doListModels fetches available chat models from the ModelManager.
+func doListModels(ctx context.Context, mm ai.ModelManager) tea.Cmd {
+	return func() tea.Msg {
+		models, err := mm.ListModels(ctx)
+		if err != nil {
+			return modelsErrMsg{err: err}
+		}
+		return modelsLoadedMsg{models: models}
 	}
 }
 
