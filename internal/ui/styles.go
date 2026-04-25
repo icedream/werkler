@@ -109,6 +109,9 @@ var (
 	allowAllWarningStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("202")) // orange — visible warning
+
+	separatorAllowAllStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("202")) // orange separator in allow-all mode
 )
 
 func separator(width int) string {
