@@ -136,6 +136,79 @@ func (m modelItem) FilterValue() string { return string(m) }
 func (m modelItem) Title() string       { return string(m) }
 func (m modelItem) Description() string { return "" }
 
+// --- Slash commands ---
+
+// slashCommand describes a /command available in the input box.
+type slashCommand struct {
+	name        string // without leading slash, e.g. "model"
+	description string
+	available   func(*Model) bool      // nil = always available
+	action      func(*Model) []tea.Cmd // executed on selection
+}
+
+// slashCommands is the ordered registry of all /commands.
+// Initialized in init() to avoid self-referencing the slice in the /help action.
+var slashCommands []slashCommand
+
+func init() {
+	slashCommands = []slashCommand{
+		{
+			name:        "model",
+			description: "Switch the active AI model",
+			available:   func(m *Model) bool { return m.modelManager != nil },
+			action: func(m *Model) []tea.Cmd {
+				m.state = statePickingModel
+				m.modelPicker.SetItems(nil)
+				m.modelPicker.SetSize(m.width, m.height-fixedLines)
+				return []tea.Cmd{doListModels(m.ctx, m.modelManager)}
+			},
+		},
+		{
+			name:        "clear",
+			description: "Clear the conversation history",
+			action: func(m *Model) []tea.Cmd {
+				m.messages = chat.NewConversation()
+				m.items = nil
+				m.toolCallIdx = make(map[string]int)
+				m.streamingItemIdx = -1
+				m.oauthInfoIdx = -1
+				m.rebuildContent()
+				return nil
+			},
+		},
+		{
+			name:        "quit",
+			description: "Quit werkler",
+			action: func(m *Model) []tea.Cmd {
+				return []tea.Cmd{tea.Quit}
+			},
+		},
+		{
+			name:        "help",
+			description: "Show available keyboard shortcuts and commands",
+			action: func(m *Model) []tea.Cmd {
+				var lines []string
+				lines = append(lines, "**Keyboard shortcuts**")
+				lines = append(lines, "- `ctrl+c` / `ctrl+d` — quit")
+				lines = append(lines, "- `ctrl+p` — switch model (when available)")
+				lines = append(lines, "- `alt+m` — toggle mouse reporting (off = text selection)")
+				lines = append(lines, "- `↑/↓ pgup/pgdn` — scroll conversation history")
+				lines = append(lines, "")
+				lines = append(lines, "**Slash commands** — type `/` to see autocomplete")
+				for _, cmd := range slashCommands {
+					lines = append(lines, fmt.Sprintf("- `/%s` — %s", cmd.name, cmd.description))
+				}
+				m.items = append(m.items, displayItem{
+					kind:    itemInfo,
+					content: strings.Join(lines, "\n"),
+				})
+				m.rebuildContent()
+				return nil
+			},
+		},
+	}
+}
+
 // --- Model ---
 
 // Model is the bubbletea model for the interactive TUI.
@@ -193,6 +266,12 @@ type Model struct {
 	// mouseEnabled tracks whether the terminal mouse reporting mode is active.
 	// When false, the terminal handles mouse events natively (text selection works).
 	mouseEnabled bool
+
+	// Slash-command autocomplete state.
+	// showCompletion is derived: true when state==stateIdle and input starts with "/".
+	// completionIdx is the currently highlighted item in the completion popup.
+	showCompletion bool
+	completionIdx  int
 }
 
 func initialModel(
@@ -249,6 +328,73 @@ func initialModel(
 		glamourStyle:     glamourStyle,
 		mouseEnabled:     true,
 	}
+}
+
+// --- Slash-command helpers ---
+
+// filteredCmds returns slash commands whose names start with the given prefix
+// and whose available predicate (if any) passes.
+func (m Model) filteredCmds() []slashCommand {
+	text := m.input.Value()
+	if !strings.HasPrefix(text, "/") {
+		return nil
+	}
+	prefix := strings.TrimPrefix(text, "/")
+	var out []slashCommand
+	for _, cmd := range slashCommands {
+		if cmd.available != nil && !cmd.available(&m) {
+			continue
+		}
+		if strings.HasPrefix(cmd.name, prefix) {
+			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+// completionLineCount returns the number of extra terminal lines consumed by
+// the completion popup. Each item is guaranteed to fit on one line (truncated
+// to m.width in completionView).
+func (m Model) completionLineCount() int {
+	if !m.showCompletion {
+		return 0
+	}
+	return len(m.filteredCmds())
+}
+
+// syncViewportHeight recalculates and applies the viewport height based on the
+// terminal size and current completion state. Must be called after any change
+// that affects completionLineCount or terminal dimensions.
+func (m *Model) syncViewportHeight() {
+	vph := m.height - fixedLines - m.completionLineCount()
+	if vph < 1 {
+		vph = 1
+	}
+	m.viewport.Height = vph
+}
+
+// updateCompletion derives showCompletion from the current state and input value,
+// clamps completionIdx, and syncs the viewport height. Call after any input or
+// state change that might affect completion visibility.
+func (m *Model) updateCompletion() {
+	wasShowing := m.showCompletion
+	cmds := m.filteredCmds()
+	m.showCompletion = m.state == stateIdle && len(cmds) > 0
+	if !wasShowing && m.showCompletion {
+		m.completionIdx = 0 // reset selection on fresh open
+	} else if m.completionIdx >= len(cmds) {
+		m.completionIdx = max(0, len(cmds)-1)
+	}
+	m.syncViewportHeight()
+}
+
+// runCompletion executes the action of the currently selected completion item.
+// It resets the input, hides the completion popup, and returns the resulting cmds.
+func (m *Model) runCompletion(selected slashCommand) []tea.Cmd {
+	m.input.Reset()
+	m.showCompletion = false
+	m.syncViewportHeight()
+	return selected.action(m)
 }
 
 // --- Tea interface ---
@@ -330,51 +476,125 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateIdle:
 			switch msg.Type {
 			case tea.KeyEnter:
-				text := strings.TrimSpace(m.input.Value())
-				if text != "" {
-					m.input.Reset()
-					m.items = append(m.items, displayItem{kind: itemUser, content: text})
-					needRebuild = true
+				if m.showCompletion {
+					// Execute exact match or fill partial match.
+					filtered := m.filteredCmds()
+					if len(filtered) > 0 {
+						selected := filtered[m.completionIdx]
+						if m.input.Value() == "/"+selected.name {
+							// Exact match — run the command.
+							cmds = append(cmds, m.runCompletion(selected)...)
+							m.updateCompletion()
+						} else {
+							// Partial match — fill the input without executing.
+							m.input.SetValue("/" + selected.name)
+							m.input.CursorEnd()
+							m.updateCompletion()
+						}
+					}
+				} else {
+					text := strings.TrimSpace(m.input.Value())
+					if text != "" {
+						m.input.Reset()
+						m.items = append(m.items, displayItem{kind: itemUser, content: text})
+						needRebuild = true
 
-					if m.session.HasPendingOAuth() {
-						// Defer the user prompt until OAuth servers are connected.
-						m.queuedPrompts = append([]string{text}, m.queuedPrompts...)
-						m.oauthInfoIdx = len(m.items)
-						names := strings.Join(m.session.PendingOAuthNames(), ", ")
-						m.items = append(m.items, displayItem{
-							kind:    itemInfo,
-							content: "Connecting to " + names + "…",
-						})
-						m.state = stateConnectingOAuth
-						cmds = append(cmds, doConnectOAuth(m.ctx, m.session, m.send))
-					} else {
-						m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
-						m.state = stateThinking
-						cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
+						if m.session.HasPendingOAuth() {
+							// Defer the user prompt until OAuth servers are connected.
+							m.queuedPrompts = append([]string{text}, m.queuedPrompts...)
+							m.oauthInfoIdx = len(m.items)
+							names := strings.Join(m.session.PendingOAuthNames(), ", ")
+							m.items = append(m.items, displayItem{
+								kind:    itemInfo,
+								content: "Connecting to " + names + "…",
+							})
+							m.state = stateConnectingOAuth
+							cmds = append(cmds, doConnectOAuth(m.ctx, m.session, m.send))
+						} else {
+							m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
+							m.state = stateThinking
+							cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
+						}
 					}
 				}
+
+			case tea.KeyTab:
+				if m.showCompletion {
+					// Tab fills the selected completion into the input.
+					filtered := m.filteredCmds()
+					if len(filtered) > 0 {
+						m.input.SetValue("/" + filtered[m.completionIdx].name)
+						m.input.CursorEnd()
+						m.updateCompletion()
+					}
+				} else {
+					var inputCmd tea.Cmd
+					m.input, inputCmd = m.input.Update(msg)
+					cmds = append(cmds, inputCmd)
+				}
+
+			case tea.KeyUp:
+				if m.showCompletion {
+					filtered := m.filteredCmds()
+					if len(filtered) > 0 {
+						m.completionIdx = (m.completionIdx - 1 + len(filtered)) % len(filtered)
+					}
+				} else {
+					var vpCmd tea.Cmd
+					m.viewport, vpCmd = m.viewport.Update(msg)
+					cmds = append(cmds, vpCmd)
+				}
+
+			case tea.KeyDown:
+				if m.showCompletion {
+					filtered := m.filteredCmds()
+					if len(filtered) > 0 {
+						m.completionIdx = (m.completionIdx + 1) % len(filtered)
+					}
+				} else {
+					var vpCmd tea.Cmd
+					m.viewport, vpCmd = m.viewport.Update(msg)
+					cmds = append(cmds, vpCmd)
+				}
+
+			case tea.KeyEsc:
+				if m.showCompletion {
+					m.showCompletion = false
+					m.syncViewportHeight()
+				} else if m.input.Value() != "" {
+					m.input.Reset()
+					m.updateCompletion()
+				}
+
 			case tea.KeyCtrlP:
 				if m.modelManager != nil {
+					m.showCompletion = false
 					m.state = statePickingModel
 					m.modelPicker.SetItems(nil)
 					m.modelPicker.SetSize(m.width, m.height-fixedLines)
 					cmds = append(cmds, doListModels(m.ctx, m.modelManager))
 				}
+
 			default:
-				// Forward to both: textinput handles text entry; viewport handles
-				// navigation keys (Up/Down/PgUp/PgDn) so the user can scroll while idle.
+				// Forward to textinput; do NOT forward to viewport when completion is
+				// showing (Up/Down are captured above; other nav keys close completion).
 				var inputCmd tea.Cmd
 				m.input, inputCmd = m.input.Update(msg)
 				cmds = append(cmds, inputCmd)
-				var vpCmd tea.Cmd
-				m.viewport, vpCmd = m.viewport.Update(msg)
-				cmds = append(cmds, vpCmd)
+				m.updateCompletion()
+				if !m.showCompletion {
+					// Safe to forward scroll keys to viewport when completion is hidden.
+					var vpCmd tea.Cmd
+					m.viewport, vpCmd = m.viewport.Update(msg)
+					cmds = append(cmds, vpCmd)
+				}
 			}
 
 		case statePickingModel:
 			switch msg.Type {
 			case tea.KeyEsc, tea.KeyCtrlC:
 				m.state = stateIdle
+				m.updateCompletion()
 			case tea.KeyEnter:
 				if sel := m.modelPicker.SelectedItem(); sel != nil {
 					model := string(sel.(modelItem))
@@ -382,6 +602,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.modelName = model
 				}
 				m.state = stateIdle
+				m.updateCompletion()
 			default:
 				var pickerCmd tea.Cmd
 				m.modelPicker, pickerCmd = m.modelPicker.Update(msg)
@@ -442,25 +663,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == statePickingModel {
 			m.items = append(m.items, displayItem{kind: itemError, content: "listing models: " + msg.err.Error()})
 			m.state = stateIdle
+			m.updateCompletion()
 			needRebuild = true
 		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		vph := m.height - fixedLines
-		if vph < 1 {
-			vph = 1
-		}
 		// Forward to viewport so it can update its internal state, then
 		// override the dimensions we want.
 		var vpCmd tea.Cmd
 		m.viewport, vpCmd = m.viewport.Update(msg)
 		cmds = append(cmds, vpCmd)
 		m.viewport.Width = m.width
-		m.viewport.Height = vph
 		m.input.Width = m.width - 5 // 5 = len("You> ")
-		m.modelPicker.SetSize(m.width, vph)
+		m.modelPicker.SetSize(m.width, m.height-fixedLines)
+		m.syncViewportHeight() // accounts for completion popup if visible
 		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
 		needRebuild = true
 		// Clear and fully repaint after resize to avoid blank regions.
@@ -652,6 +870,10 @@ func (m Model) View() string {
 	b.WriteString(separator(m.width))
 	b.WriteString("\n")
 
+	if m.showCompletion {
+		b.WriteString(m.completionView())
+	}
+
 	b.WriteString(m.inputView())
 
 	return b.String()
@@ -714,6 +936,40 @@ func (m Model) statusLines() (line1, line2 string) {
 func (m Model) inputView() string {
 	prefix := inputPrefixStyle.Render("You> ")
 	return prefix + m.input.View()
+}
+
+// completionView renders the slash-command popup lines that appear above the
+// input. Each line is truncated to m.width to guarantee exactly one terminal row.
+func (m Model) completionView() string {
+	filtered := m.filteredCmds()
+	if len(filtered) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, cmd := range filtered {
+		selected := i == m.completionIdx
+		var line string
+		if selected {
+			line = "  " + completionSelectedNameStyle.Render("/"+cmd.name)
+			line += "  " + completionSelectedStyle.Render(cmd.description)
+		} else {
+			line = "  " + completionNameStyle.Render("/"+cmd.name)
+			line += "  " + completionItemStyle.Render(cmd.description)
+		}
+		// Truncate to terminal width (guarantees exactly one rendered row).
+		// lipgloss.Width is ANSI-aware so escape codes don't inflate the count.
+		if m.width > 0 && lipgloss.Width(line) > m.width {
+			// Re-render without description when the line is too wide.
+			if selected {
+				line = "  " + completionSelectedNameStyle.Render("/"+cmd.name)
+			} else {
+				line = "  " + completionNameStyle.Render("/"+cmd.name)
+			}
+		}
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // --- Viewport content ---
