@@ -34,13 +34,17 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // httpClientWithHeaders returns an *http.Client whose transport injects the given headers.
-// Returns nil when headers is empty (the transport will use its default client).
+// Header values are expanded with os.ExpandEnv so $VAR and ${VAR} references are resolved
+// at connection time. Returns nil when headers is empty (the transport uses its default client).
 func httpClientWithHeaders(headers map[string]string) *http.Client {
 	if len(headers) == 0 {
 		return nil
 	}
-	base := http.DefaultTransport
-	return &http.Client{Transport: &headerTransport{base: base, headers: headers}}
+	expanded := make(map[string]string, len(headers))
+	for k, v := range headers {
+		expanded[k] = os.ExpandEnv(v)
+	}
+	return &http.Client{Transport: &headerTransport{base: http.DefaultTransport, headers: expanded}}
 }
 
 // AI-facing tool name. Double underscore keeps names safe for OpenAI's

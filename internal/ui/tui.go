@@ -166,6 +166,10 @@ type Model struct {
 	// Header metadata.
 	modelName   string
 	serverNames []string
+
+	// mouseEnabled tracks whether the terminal mouse reporting mode is active.
+	// When false, the terminal handles mouse events natively (text selection works).
+	mouseEnabled bool
 }
 
 func initialModel(
@@ -204,6 +208,7 @@ func initialModel(
 		modelName:        modelName,
 		serverNames:      serverNames,
 		glamourStyle:     glamourStyle,
+		mouseEnabled:     true,
 	}
 }
 
@@ -225,6 +230,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
+		}
+
+		// Alt+M toggles terminal mouse reporting so the user can select and copy text.
+		if msg.String() == "alt+m" {
+			if m.mouseEnabled {
+				m.mouseEnabled = false
+				return m, tea.DisableMouse
+			}
+			m.mouseEnabled = true
+			return m, tea.EnableMouseCellMotion
 		}
 
 		switch m.state {
@@ -592,7 +607,11 @@ func (m Model) statusLines() (line1, line2 string) {
 			keyHintStyle.Render("[a]") + "lways"
 		return l1, l2
 	default:
-		return "", ""
+		mouseHint := "  " + keyHintStyle.Render("alt+m") + " select text"
+		if !m.mouseEnabled {
+			mouseHint = "  " + keyHintStyle.Render("alt+m") + " restore scroll"
+		}
+		return mouseHint, ""
 	}
 }
 
