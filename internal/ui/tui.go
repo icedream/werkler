@@ -136,7 +136,7 @@ type oauthConnectFailedMsg struct{ err error }
 
 // --- Model picker messages ---
 
-type modelsLoadedMsg struct{ models []string }
+type modelsLoadedMsg struct{ models []ai.ModelItem }
 type modelsErrMsg struct{ err error }
 
 // processOutputMsg carries new output from a running process for live display.
@@ -158,12 +158,12 @@ type sessionsListMsg struct {
 	err      error
 }
 
-// modelItem implements list.Item for a model name string.
-type modelItem string
+// modelItem implements list.Item for a model picker entry.
+type modelItem struct{ ai.ModelItem }
 
-func (m modelItem) FilterValue() string { return string(m) }
-func (m modelItem) Title() string       { return string(m) }
-func (m modelItem) Description() string { return "" }
+func (m modelItem) FilterValue() string { return m.Display() }
+func (m modelItem) Title() string       { return m.Model }
+func (m modelItem) Description() string { return m.Provider }
 
 // sessionItem implements list.Item for the session picker.
 type sessionItem struct{ sess sessionstore.Session }
@@ -739,9 +739,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateCompletion()
 			case tea.KeyEnter:
 				if sel := m.modelPicker.SelectedItem(); sel != nil {
-					model := string(sel.(modelItem))
-					m.modelManager.SetModel(model)
-					m.modelName = model
+					item := sel.(modelItem)
+					m.modelManager.SetModel(item.ModelItem)
+					m.modelName = item.Display()
 				}
 				m.state = stateIdle
 				m.updateCompletion()
@@ -811,9 +811,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == statePickingModel {
 			items := make([]list.Item, len(msg.models))
 			selectedIdx := 0
-			for i, name := range msg.models {
-				items[i] = modelItem(name)
-				if name == m.modelName {
+			for i, it := range msg.models {
+				items[i] = modelItem{it}
+				if it.Display() == m.modelName {
 					selectedIdx = i
 				}
 			}

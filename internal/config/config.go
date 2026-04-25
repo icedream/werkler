@@ -46,11 +46,36 @@ type MCPConfig struct {
 	AutoApprovePaths []string          `mapstructure:"auto_approve_paths"`
 }
 
+// ProviderType identifies which kind of AI provider a ProviderConfig describes.
+type ProviderType string
+
+const (
+	ProviderTypeOpenAI  ProviderType = "openai"
+	ProviderTypeCopilot ProviderType = "copilot"
+)
+
+// ProviderConfig describes a single named AI provider.
+type ProviderConfig struct {
+	Name     string       `mapstructure:"name"`
+	Type     ProviderType `mapstructure:"type"`
+	Endpoint string       `mapstructure:"endpoint"` // OpenAI-compatible: base URL
+	APIKey   string       `mapstructure:"api_key"`  // OpenAI-compatible: API key
+	Model    string       `mapstructure:"model"`    // default model for this provider
+}
+
 // AIConfig holds AI provider settings.
+// The legacy flat fields (Endpoint, APIKey, Model) are honoured when
+// Providers is empty, so existing single-provider configs keep working.
 type AIConfig struct {
+	// Legacy flat config (backward compatible with single-provider setups).
 	Endpoint string `mapstructure:"endpoint"`
 	APIKey   string `mapstructure:"api_key"`
 	Model    string `mapstructure:"model"`
+
+	// Multi-provider configuration.
+	Providers []ProviderConfig `mapstructure:"providers"`
+	// Active names which provider to use. Defaults to the first provider.
+	Active string `mapstructure:"active"`
 }
 
 // Config is the root configuration structure.
@@ -106,6 +131,8 @@ func Load(path string) (*Config, error) {
 }
 
 // ApplyOverrides applies non-zero CLI flag values on top of a loaded Config.
+// These flags only affect the legacy flat fields and therefore only apply
+// in single-provider (non-providers[]) setups.
 func ApplyOverrides(cfg *Config, endpoint, apiKey, model string) {
 	if endpoint != "" {
 		cfg.AI.Endpoint = endpoint
@@ -116,4 +143,63 @@ func ApplyOverrides(cfg *Config, endpoint, apiKey, model string) {
 	if model != "" {
 		cfg.AI.Model = model
 	}
+}
+
+// NormalizeProviders resolves the effective list of ProviderConfigs from AIConfig.
+//
+// If Providers is non-empty it is returned as-is (after validation).
+// Otherwise a single "openai" provider is synthesised from the legacy flat
+// Endpoint / APIKey / Model fields for backward compatibility.
+//
+// Returns an error when configuration is missing or invalid.
+func NormalizeProviders(ai *AIConfig) ([]ProviderConfig, error) {
+	if len(ai.Providers) > 0 {
+		seen := make(map[string]bool, len(ai.Providers))
+		for _, p := range ai.Providers {
+			if p.Name == "" {
+				return nil, fmt.Errorf("provider has an empty name")
+			}
+			if seen[p.Name] {
+				return nil, fmt.Errorf("duplicate provider name %q", p.Name)
+			}
+			seen[p.Name] = true
+		}
+		return ai.Providers, nil
+	}
+
+	// Legacy single-provider synthesis.
+	if ai.APIKey == "" && ai.Endpoint == "" {
+		return nil, fmt.Errorf("no AI provider configured — set ai.api_key in config or use --api-key")
+	}
+	endpoint := ai.Endpoint
+	if endpoint == "" {
+		endpoint = "https://api.openai.com/v1"
+	}
+	model := ai.Model
+	if model == "" {
+		model = "gpt-4o"
+	}
+	return []ProviderConfig{{
+		Name:     "default",
+		Type:     ProviderTypeOpenAI,
+		Endpoint: endpoint,
+		APIKey:   ai.APIKey,
+		Model:    model,
+	}}, nil
+}
+
+// ActiveProviderName returns the name of the active provider.
+// Falls back to the first provider when Active is unset or invalid.
+func ActiveProviderName(ai *AIConfig, providers []ProviderConfig) string {
+	if ai.Active != "" {
+		for _, p := range providers {
+			if p.Name == ai.Active {
+				return p.Name
+			}
+		}
+	}
+	if len(providers) > 0 {
+		return providers[0].Name
+	}
+	return ""
 }

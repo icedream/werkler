@@ -19,7 +19,12 @@ The file does not need to exist — missing keys fall back to defaults or flags.
 
 ## AI provider
 
-Werkler talks to any OpenAI-compatible chat API.
+Werkler supports multiple AI providers simultaneously. You can switch between
+them in the model picker (`ctrl+p`) or by running `werkler chat --provider=name`.
+
+### Single-provider (legacy) config
+
+The simple single-provider format keeps working unchanged:
 
 ```toml
 [ai]
@@ -32,6 +37,38 @@ api_key = "sk-..."
 # Model name as understood by the provider.
 model = "gpt-4o"
 ```
+
+### Multi-provider config
+
+Define multiple providers as an array of tables and name the active one:
+
+```toml
+[ai]
+active = "copilot"   # which provider to use by default
+
+[[ai.providers]]
+name     = "openai"
+type     = "openai"
+endpoint = "https://api.openai.com/v1"
+api_key  = "sk-..."
+model    = "gpt-4o"
+
+[[ai.providers]]
+name  = "copilot"
+type  = "copilot"
+model = "gpt-4o"   # default model; overridable in the TUI
+```
+
+Provider types:
+
+| `type`    | Description |
+|-----------|-------------|
+| `openai`  | Any OpenAI-compatible API (OpenAI, Ollama, vLLM, KubeAI, etc.) |
+| `copilot` | GitHub Copilot (requires `werkler auth copilot` first) |
+
+When multiple providers are configured you can switch between them live in the
+TUI model picker (`ctrl+p`): models from all providers appear in a flat list
+as `ProviderName: model-id`.
 
 ### Using OpenAI
 
@@ -62,10 +99,69 @@ api_key  = "your-token"
 model    = "devstral-small-2"
 ```
 
+### Using GitHub Copilot
+
+GitHub Copilot is available as a native provider (type `copilot`). It gives
+access to all models enabled on your Copilot plan — GPT-4o, Claude, Gemini,
+and others — through the same OpenAI-compatible API.
+
+> **Note:** The Copilot API used here is reverse-engineered and not an
+> official public API. It may change without notice. Use responsibly and in
+> accordance with [GitHub's Acceptable Use Policies](https://docs.github.com/site-policy/acceptable-use-policies/github-acceptable-use-policies).
+
+#### Step 1 — Authenticate
+
+```sh
+werkler auth copilot
+```
+
+This runs the GitHub Device Flow. You will be shown a short code and a URL.
+Open the URL in your browser, enter the code, and approve the authorization.
+The resulting GitHub token is saved to
+`~/.config/werkler/copilot/github_token.json` (mode `0600`). Future sessions
+reuse it automatically — re-authentication is only needed if you revoke the token.
+
+#### Step 2 — Configure
+
+```toml
+[[ai.providers]]
+name  = "copilot"
+type  = "copilot"
+model = "gpt-4o"   # default model (can be changed in the TUI)
+```
+
+#### Step 3 — (Optional) use alongside another provider
+
+```toml
+[ai]
+active = "copilot"
+
+[[ai.providers]]
+name     = "openai"
+type     = "openai"
+endpoint = "https://api.openai.com/v1"
+api_key  = "sk-..."
+model    = "gpt-4o"
+
+[[ai.providers]]
+name  = "copilot"
+type  = "copilot"
+model = "claude-sonnet-4-5"
+```
+
+#### Authentication management
+
+| Command | Description |
+|---------|-------------|
+| `werkler auth copilot` | Authenticate (device flow) |
+| `werkler auth copilot --force` | Re-authenticate even if already authenticated |
+| `werkler auth status` | Show authentication status for all providers |
+
 ### Environment variables
 
-Every `ai.*` key can be set via an environment variable instead of the file,
-which is useful for CI or secret managers:
+The legacy flat `ai.*` keys can be set via environment variables, which is
+useful for CI or secret managers. These apply only to the single-provider
+(non-`[[ai.providers]]`) configuration:
 
 | Key | Environment variable |
 |-----|----------------------|
@@ -81,7 +177,12 @@ command-line flags.
 ```
 werkler --api-key sk-... --model gpt-4o chat
 werkler --endpoint http://localhost:11434/v1 --model llama3.2 chat
+werkler chat --provider=copilot
 ```
+
+The `--api-key`, `--endpoint`, and `--model` flags only affect the legacy
+single-provider configuration. Use `--provider` to select between named
+providers configured in `[[ai.providers]]`.
 
 ---
 
@@ -401,10 +502,27 @@ auto_approve_tools = [
 ## Full example config
 
 ```toml
+# Single-provider example (legacy format, still works):
 [ai]
 endpoint = "https://api.openai.com/v1"
 api_key  = "sk-..."
 model    = "gpt-4o"
+
+# ---- OR multi-provider example ----
+# [ai]
+# active = "copilot"
+#
+# [[ai.providers]]
+# name     = "openai"
+# type     = "openai"
+# endpoint = "https://api.openai.com/v1"
+# api_key  = "sk-..."
+# model    = "gpt-4o"
+#
+# [[ai.providers]]
+# name  = "copilot"
+# type  = "copilot"
+# model = "claude-sonnet-4-5"
 
 [mcp]
 auto_approve_tools = [
