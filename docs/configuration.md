@@ -165,6 +165,20 @@ transport = "streamable"
 url       = "https://mcp.example.com/mcp"
 ```
 
+Extra HTTP request headers can be injected with a `[mcp.servers.headers]` block.
+This is useful for servers that authenticate via a static token in the
+`Authorization` header:
+
+```toml
+[[mcp.servers]]
+name      = "cloud-tools"
+transport = "streamable"
+url       = "https://mcp.example.com/mcp"
+
+[mcp.servers.headers]
+Authorization = "Bearer your-token-here"
+```
+
 ### Streamable HTTP server with OAuth authentication
 
 Some remote MCP servers — such as
@@ -210,6 +224,108 @@ revoked.
 > non-interactive (`--prompt`) mode. If you try, Werkler will print an error
 > and exit. Run `werkler chat` once first to authenticate, then use
 > `--prompt` freely afterwards.
+
+---
+
+## GitHub MCP server
+
+[GitHub's MCP server](https://github.com/github/github-mcp-server) gives the
+AI access to repositories, issues, pull requests, GitHub Actions, and more.
+
+There are two ways to run it: a **remote** hosted server and a **local** server
+that you run yourself.
+
+### Remote server — OAuth (recommended)
+
+The remote server at `https://api.githubcopilot.com/mcp/` supports standard
+OAuth 2.1. Werkler will open a browser link in the chat the first time you send
+a prompt.
+
+```toml
+[[mcp.servers]]
+name      = "github"
+transport = "streamable"
+url       = "https://api.githubcopilot.com/mcp/"
+oauth     = true
+```
+
+> **Requirements:** A GitHub account with
+> [GitHub Copilot](https://github.com/features/copilot) access (free tier
+> works). The OAuth App used is GitHub's own; no registration is needed.
+
+### Remote server — Personal Access Token
+
+If you prefer not to use the browser OAuth flow, create a
+[GitHub PAT](https://github.com/settings/tokens) with the scopes your use case
+requires (e.g. `repo`, `read:org`) and pass it as a header:
+
+```toml
+[[mcp.servers]]
+name      = "github"
+transport = "streamable"
+url       = "https://api.githubcopilot.com/mcp/"
+
+[mcp.servers.headers]
+Authorization = "Bearer ghp_your_token_here"
+```
+
+Keep the token out of the config file by using an environment variable and
+shell substitution — or store the file with mode `0600`.
+
+### Local server — stdio (Docker)
+
+If you do not have a Copilot subscription, or want full control, run the
+server locally. The official Docker image is the easiest option:
+
+```toml
+[[mcp.servers]]
+name      = "github"
+transport = "stdio"
+command   = "docker"
+args      = ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+             "ghcr.io/github/github-mcp-server"]
+
+[mcp.servers.env]
+GITHUB_PERSONAL_ACCESS_TOKEN = "$GITHUB_PERSONAL_ACCESS_TOKEN"
+```
+
+Set the token in your shell before starting werkler:
+
+```sh
+export GITHUB_PERSONAL_ACCESS_TOKEN=ghp_your_token_here
+werkler chat
+```
+
+### Local server — stdio (binary)
+
+Download the pre-built binary from the
+[releases page](https://github.com/github/github-mcp-server/releases) and
+point werkler at it:
+
+```toml
+[[mcp.servers]]
+name      = "github"
+transport = "stdio"
+command   = "/usr/local/bin/github-mcp-server"
+args      = ["stdio"]
+
+[mcp.servers.env]
+GITHUB_PERSONAL_ACCESS_TOKEN = "$GITHUB_PERSONAL_ACCESS_TOKEN"
+```
+
+### Auto-approving GitHub tools
+
+Most GitHub read operations are safe to auto-approve. Write operations (creating
+issues, pushing code, etc.) should stay under manual review.
+
+```toml
+[mcp]
+auto_approve_tools = [
+  "github__get_*",
+  "github__list_*",
+  "github__search_*",
+]
+```
 
 ---
 
@@ -285,5 +401,12 @@ url       = "https://mcp.example.com/mcp"
 name      = "atlassian"
 transport = "streamable"
 url       = "https://mcp.atlassian.com/v1/mcp"
+oauth     = true
+
+# GitHub MCP server (OAuth — browser login on first use)
+[[mcp.servers]]
+name      = "github"
+transport = "streamable"
+url       = "https://api.githubcopilot.com/mcp/"
 oauth     = true
 ```
