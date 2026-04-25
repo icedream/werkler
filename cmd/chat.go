@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
+	"github.com/icedream/werkler/internal/config"
+	"github.com/icedream/werkler/internal/copilot"
 	mcppkg "github.com/icedream/werkler/internal/mcp"
 	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/tools"
@@ -25,6 +28,7 @@ var (
 	chatVerbose   bool
 	chatResume    bool
 	chatSessionID string
+	chatProvider  string
 )
 
 var chatCmd = &cobra.Command{
@@ -43,18 +47,18 @@ func init() {
 	chatCmd.Flags().BoolVarP(&chatVerbose, "verbose", "v", false, "Print tool calls to stderr (--prompt mode only)")
 	chatCmd.Flags().BoolVar(&chatResume, "resume", false, "Open the session picker to resume a previous session")
 	chatCmd.Flags().StringVar(&chatSessionID, "session", "", "Resume the session with this ID (or unique prefix)")
+	chatCmd.Flags().StringVar(&chatProvider, "provider", "", "Name of the AI provider to use (overrides ai.active in config)")
 	rootCmd.AddCommand(chatCmd)
 }
 
 func runChat(_ *cobra.Command, _ []string) error {
-	if cfg.AI.APIKey == "" {
-		return fmt.Errorf("no API key configured — set ai.api_key in config or use --api-key")
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	aiClient := ai.New(cfg.AI.Endpoint, cfg.AI.APIKey, cfg.AI.Model)
+	multiClient, displayName, err := buildAIClient()
+	if err != nil {
+		return err
+	}
 
 	manager := mcppkg.NewManager()
 	defer manager.Close()
@@ -79,7 +83,7 @@ func runChat(_ *cobra.Command, _ []string) error {
 			names := strings.Join(session.PendingOAuthNames(), ", ")
 			return fmt.Errorf("OAuth authentication required for: %s — run `werkler chat` to authenticate interactively", names)
 		}
-		return runPromptMode(ctx, aiClient, session)
+		return runPromptMode(ctx, multiClient, session)
 	}
 
 	opts := ui.SessionOptions{Store: store}
@@ -89,7 +93,6 @@ func runChat(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("loading session: %w", err)
 		}
 		opts.Initial = sess
-		// Re-apply session-approved tools so they persist across resumes.
 		for _, t := range sess.ApprovedTools {
 			session.ApproveForSession(t)
 		}
@@ -97,10 +100,56 @@ func runChat(_ *cobra.Command, _ []string) error {
 		opts.OpenPicker = true
 	}
 
-	return runInteractiveMode(ctx, aiClient, session, toolMgr, opts)
+	return runInteractiveMode(ctx, multiClient, session, toolMgr, displayName, opts)
 }
 
-func runPromptMode(ctx context.Context, aiClient *ai.Client, session *chat.Session) error {
+// buildAIClient constructs a MultiClient from the current config, returning
+// the client and its initial model display name.
+func buildAIClient() (*ai.MultiClient, string, error) {
+	providers, err := config.NormalizeProviders(&cfg.AI)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Determine which provider should be active.
+	activeName := config.ActiveProviderName(&cfg.AI, providers)
+	if chatProvider != "" {
+		activeName = chatProvider
+	}
+
+	mc := &ai.MultiClient{}
+	for _, p := range providers {
+		switch p.Type {
+		case config.ProviderTypeOpenAI, "": // empty type defaults to openai
+			client := ai.New(p.Endpoint, p.APIKey, p.Model)
+			mc.AddProvider(p.Name, client)
+		case config.ProviderTypeCopilot:
+			tok, loadErr := copilot.LoadGitHubToken()
+			if loadErr != nil {
+				return nil, "", fmt.Errorf("loading Copilot token for provider %q: %w", p.Name, loadErr)
+			}
+			if tok == nil {
+				return nil, "", fmt.Errorf(
+					"GitHub Copilot provider %q is not authenticated — run `werkler auth copilot` first",
+					p.Name,
+				)
+			}
+			transport := copilot.NewTransport(tok.AccessToken)
+			client := ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport})
+			mc.AddProvider(p.Name, client)
+		default:
+			return nil, "", fmt.Errorf("unknown provider type %q for provider %q", p.Type, p.Name)
+		}
+	}
+
+	if activeName != "" && !mc.SwitchToProvider(activeName) {
+		return nil, "", fmt.Errorf("active provider %q is not configured", activeName)
+	}
+
+	return mc, mc.CurrentModelDisplay(), nil
+}
+
+func runPromptMode(ctx context.Context, aiClient ai.Completer, session *chat.Session) error {
 	var progress io.Writer
 	if chatVerbose {
 		progress = os.Stderr
@@ -118,10 +167,10 @@ func runPromptMode(ctx context.Context, aiClient *ai.Client, session *chat.Sessi
 	return nil
 }
 
-func runInteractiveMode(ctx context.Context, aiClient *ai.Client, session *chat.Session, toolMgr *tools.Manager, opts ui.SessionOptions) error {
+func runInteractiveMode(ctx context.Context, aiClient ai.StreamCompleter, session *chat.Session, toolMgr *tools.Manager, displayName string, opts ui.SessionOptions) error {
 	serverNames := make([]string, 0, len(cfg.MCP.Servers))
 	for _, s := range cfg.MCP.Servers {
 		serverNames = append(serverNames, s.Name)
 	}
-	return ui.RunTUI(ctx, aiClient, session, toolMgr, cfg.AI.Model, serverNames, opts)
+	return ui.RunTUI(ctx, aiClient, session, toolMgr, displayName, serverNames, opts)
 }

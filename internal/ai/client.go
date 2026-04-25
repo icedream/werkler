@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -70,10 +71,26 @@ type StreamCompleter interface {
 	CompleteStream(ctx context.Context, messages []Message, tools []ToolDefinition) <-chan StreamChunk
 }
 
+// ModelItem identifies a model available from a provider.
+// Provider is empty for single-provider clients.
+type ModelItem struct {
+	Provider string
+	Model    string
+}
+
+// Display returns the formatted display string for the item.
+// When Provider is set, the format is "Provider: Model".
+func (m ModelItem) Display() string {
+	if m.Provider == "" {
+		return m.Model
+	}
+	return m.Provider + ": " + m.Model
+}
+
 // ModelManager can list available chat models and switch the active model.
 type ModelManager interface {
-	ListModels(ctx context.Context) ([]string, error)
-	SetModel(model string)
+	ListModels(ctx context.Context) ([]ModelItem, error)
+	SetModel(item ModelItem)
 }
 
 // Compile-time assertions: *Client satisfies all interfaces.
@@ -82,8 +99,21 @@ var _ StreamCompleter = (*Client)(nil)
 var _ ModelManager = (*Client)(nil)
 
 // SetModel changes the model used for subsequent completions.
-func (c *Client) SetModel(model string) {
-	c.model = model
+func (c *Client) SetModel(item ModelItem) {
+	c.model = item.Model
+}
+
+// NewWithHTTPClient creates a Client using the given base URL, model and a
+// custom *http.Client (e.g. with a custom transport for token injection).
+// The API key is handled by the transport; an empty string is used here.
+func NewWithHTTPClient(baseURL, model string, httpClient *http.Client) *Client {
+	cfg := openai.DefaultConfig("")
+	cfg.BaseURL = baseURL
+	cfg.HTTPClient = httpClient
+	return &Client{
+		inner: *openai.NewClientWithConfig(cfg),
+		model: model,
+	}
 }
 
 // nonChatKeywords identifies model IDs that are clearly not chat-completion models.
@@ -98,12 +128,12 @@ var nonChatKeywords = []string{
 // ListModels returns the IDs of models available for chat completions.
 // Models that are clearly non-chat (embeddings, TTS, image generation, etc.)
 // are filtered out. The list is sorted alphabetically.
-func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+func (c *Client) ListModels(ctx context.Context) ([]ModelItem, error) {
 	resp, err := c.inner.ListModels(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing models: %w", err)
 	}
-	var names []string
+	var items []ModelItem
 	for _, m := range resp.Models {
 		id := strings.ToLower(m.ID)
 		skip := false
@@ -114,11 +144,11 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 			}
 		}
 		if !skip {
-			names = append(names, m.ID)
+			items = append(items, ModelItem{Model: m.ID})
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Slice(items, func(i, j int) bool { return items[i].Model < items[j].Model })
+	return items, nil
 }
 
 type accumTool struct {
