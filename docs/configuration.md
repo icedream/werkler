@@ -532,6 +532,7 @@ in the interactive TUI:
 |-----|--------|
 | `y` | Allow this call once |
 | `a` | Allow this tool for the rest of the session |
+| `p` | Allow permanently — appends the tool name to `auto_approve_tools` in your config file |
 | `n` | Deny this call (the AI is told it was denied) |
 
 In non-interactive mode (`--prompt`), only tools that match
@@ -558,6 +559,13 @@ auto_approve_tools = [
 File operations (read, write, edit, delete) additionally require per-path
 approval the first time the AI accesses a path. These prompts appear in the
 TUI as a separate dialog before the tool is executed.
+
+| Key | Effect |
+|-----|--------|
+| `y` | Allow this path access once |
+| `a` | Allow all remaining paths in this batch |
+| `p` | Allow permanently — appends the path to `auto_approve_paths` in your config file |
+| `n` | Deny and cancel the current tool call |
 
 By default, the AI may read any file under the **current working directory**
 without prompting — the assumption is you started werkler in a project you

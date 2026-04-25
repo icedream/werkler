@@ -105,7 +105,15 @@ func runChat(_ *cobra.Command, _ []string) error {
 		return runPromptMode(ctx, multiClient, session)
 	}
 
-	opts := ui.SessionOptions{Store: store}
+	opts := ui.SessionOptions{
+		Store: store,
+		PersistToolApproval: func(toolName string) error {
+			return config.AppendAutoApproveTool(flagConfigPath, toolName)
+		},
+		PersistPathApproval: func(path string, _ bool) error {
+			return config.AppendAutoApprovePath(flagConfigPath, path)
+		},
+	}
 	if chatSessionID != "" {
 		sess, err := store.LoadByPrefix(chatSessionID)
 		if err != nil {
