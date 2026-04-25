@@ -70,11 +70,57 @@ type StreamCompleter interface {
 	CompleteStream(ctx context.Context, messages []Message, tools []ToolDefinition) <-chan StreamChunk
 }
 
-// Compile-time assertions: *Client satisfies both interfaces.
+// ModelManager can list available chat models and switch the active model.
+type ModelManager interface {
+	ListModels(ctx context.Context) ([]string, error)
+	SetModel(model string)
+}
+
+// Compile-time assertions: *Client satisfies all interfaces.
 var _ Completer = (*Client)(nil)
 var _ StreamCompleter = (*Client)(nil)
+var _ ModelManager = (*Client)(nil)
 
-// accumTool holds incrementally received fragments of one tool call.
+// SetModel changes the model used for subsequent completions.
+func (c *Client) SetModel(model string) {
+	c.model = model
+}
+
+// nonChatKeywords identifies model IDs that are clearly not chat-completion models.
+var nonChatKeywords = []string{
+	"embed", "embedding",
+	"whisper", "tts", "transcri",
+	"dall-e", "dall_e", "image",
+	"moderat",
+	"rerank",
+}
+
+// ListModels returns the IDs of models available for chat completions.
+// Models that are clearly non-chat (embeddings, TTS, image generation, etc.)
+// are filtered out. The list is sorted alphabetically.
+func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+	resp, err := c.inner.ListModels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing models: %w", err)
+	}
+	var names []string
+	for _, m := range resp.Models {
+		id := strings.ToLower(m.ID)
+		skip := false
+		for _, kw := range nonChatKeywords {
+			if strings.Contains(id, kw) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			names = append(names, m.ID)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 type accumTool struct {
 	id   string
 	name string
