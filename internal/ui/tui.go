@@ -258,9 +258,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
 				}
 			} else {
+				// Forward to both: textinput handles text entry; viewport handles
+				// navigation keys (Up/Down/PgUp/PgDn) so the user can scroll while idle.
 				var inputCmd tea.Cmd
 				m.input, inputCmd = m.input.Update(msg)
 				cmds = append(cmds, inputCmd)
+				var vpCmd tea.Cmd
+				m.viewport, vpCmd = m.viewport.Update(msg)
+				cmds = append(cmds, vpCmd)
 			}
 
 		case stateThinking, stateStreaming, stateCallingTool:
@@ -291,6 +296,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, vpCmd)
 			}
 		}
+
+	case tea.MouseMsg:
+		// Forward all mouse events to the viewport so scroll wheel works in every state.
+		var vpCmd tea.Cmd
+		m.viewport, vpCmd = m.viewport.Update(msg)
+		cmds = append(cmds, vpCmd)
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
