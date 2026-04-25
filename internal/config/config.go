@@ -44,6 +44,9 @@ type MCPConfig struct {
 	Servers          []MCPServerConfig `mapstructure:"servers"`
 	AutoApproveTools []string          `mapstructure:"auto_approve_tools"`
 	AutoApprovePaths []string          `mapstructure:"auto_approve_paths"`
+	// AutoApproveCWDRead controls whether the AI may read any file under the
+	// current working directory without per-path approval. Defaults to true.
+	AutoApproveCWDRead bool `mapstructure:"auto_approve_cwd_read"`
 }
 
 // ProviderType identifies which kind of AI provider a ProviderConfig describes.
@@ -126,6 +129,7 @@ func Load(path string) (*Config, error) {
 	// Defaults
 	v.SetDefault("ai.endpoint", "https://api.openai.com/v1")
 	v.SetDefault("ai.model", "gpt-4o")
+	v.SetDefault("mcp.auto_approve_cwd_read", true)
 
 	if path == "" {
 		path = DefaultConfigPath()

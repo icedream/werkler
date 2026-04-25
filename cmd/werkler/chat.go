@@ -81,6 +81,12 @@ func runChat(_ *cobra.Command, _ []string) error {
 	session := chat.NewSession(toolMgr, cfg.MCP.AutoApproveTools, cfg.MCP.AutoApprovePaths)
 	toolMgr.SetPathApprover(session)
 
+	if cfg.MCP.AutoApproveCWDRead {
+		if cwd, err := os.Getwd(); err == nil {
+			session.SetCWDReadPrefix(cwd)
+		}
+	}
+
 	reviewer, reviewerLabel, err := buildReviewerClient(providers)
 	if err != nil {
 		return fmt.Errorf("rubber duck reviewer: %w", err)
