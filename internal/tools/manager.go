@@ -69,11 +69,13 @@ type UserAsker func(ctx context.Context, question string, choices []string, reco
 
 // Manager wraps a chat.ToolManager and adds built-in tools.
 type Manager struct {
-	wrapped      chat.ToolManager
-	processes    *process.Manager
-	pathApprover PathApprover
-	builtins     []builtin
-	userAsker    UserAsker
+	wrapped       chat.ToolManager
+	processes     *process.Manager
+	pathApprover  PathApprover
+	builtins      []builtin
+	userAsker     UserAsker
+	reviewer      ai.Completer
+	reviewerLabel string
 }
 
 type builtin struct {
@@ -115,6 +117,16 @@ func (m *Manager) SetPathApprover(pa PathApprover) {
 // user input interactively. When nil (the default), ask_user returns a static
 // "not available in non-interactive mode" message.
 func (m *Manager) SetUserAsker(fn UserAsker) { m.userAsker = fn }
+
+// SetReviewer provides an optional secondary AI model for rubber duck reviews.
+// Calling this rebuilds the built-in tool list to include rubber_duck_review
+// when c is non-nil, or remove it when nil. Must be called before the tool
+// manager is in use (setup time only — not concurrency-safe).
+func (m *Manager) SetReviewer(c ai.Completer, label string) {
+	m.reviewer = c
+	m.reviewerLabel = label
+	m.builtins = m.makeBuiltins()
+}
 
 // Processes returns the underlying process.Manager for inspection by the TUI.
 func (m *Manager) Processes() *process.Manager { return m.processes }
@@ -337,7 +349,7 @@ func (m *Manager) checkSingleWrite(path string) *UnapprovedPathsError {
 // --- Built-in tool definitions ---
 
 func (m *Manager) makeBuiltins() []builtin {
-	return []builtin{
+	builtins := []builtin{
 		{
 			def: ai.ToolDefinition{
 				Name: "process_start",
@@ -543,6 +555,39 @@ Set recommended_choice to highlight a suggested option.`,
 			handle: m.handleAskUser,
 		},
 	}
+
+	if m.reviewer != nil {
+		reviewerDesc := fmt.Sprintf(
+			"Submit a plan, code, or reasoning to a separate reviewer AI for critical feedback.\n"+
+				"Reviewer: %s\n"+
+				"Use before implementing something non-trivial to catch bugs, logic errors, or design flaws early.\n"+
+				"Provide complete context so the reviewer can give useful feedback.",
+			m.reviewerLabel,
+		)
+		builtins = append(builtins, builtin{
+			def: ai.ToolDefinition{
+				Name:        "rubber_duck_review",
+				Description: reviewerDesc,
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"context": map[string]any{
+							"type":        "string",
+							"description": "The plan, code, or reasoning to review",
+						},
+						"focus": map[string]any{
+							"type":        "string",
+							"description": `Optional: specific aspects to focus on (e.g. "concurrency safety", "error handling")`,
+						},
+					},
+					"required": []string{"context"},
+				},
+			},
+			handle: m.handleRubberDuck,
+		})
+	}
+
+	return builtins
 }
 
 // --- Built-in handlers ---
@@ -986,4 +1031,33 @@ func (m *Manager) handleAskUser(ctx context.Context, args map[string]any) (strin
 		return "(ask_user requires interactive mode — run werkler interactively to provide an answer)", nil
 	}
 	return m.userAsker(ctx, question, choices, recommended, allowFreeform)
+}
+
+// --- Rubber duck handler ---
+
+// rubberDuckSystemPrompt instructs the reviewer AI to give concise, high-signal feedback.
+const rubberDuckSystemPrompt = `You are a technical reviewer. Critically evaluate the plan, code, or reasoning you are given.
+Identify: correctness issues, bugs, logic errors, edge cases, security concerns, design flaws.
+Be concise. Only surface issues that genuinely matter.
+If you find no significant issues, say so briefly.
+Do NOT comment on style, formatting, naming conventions, or other minor matters.`
+
+func (m *Manager) handleRubberDuck(ctx context.Context, args map[string]any) (string, error) {
+	plan := stringArg(args, "context")
+	if plan == "" {
+		return "error: rubber_duck_review requires a non-empty context", nil
+	}
+	userContent := plan
+	if focus := stringArg(args, "focus"); focus != "" {
+		userContent += "\n\nFocus particularly on: " + focus
+	}
+	messages := []ai.Message{
+		{Role: "system", Content: rubberDuckSystemPrompt},
+		{Role: "user", Content: userContent},
+	}
+	msg, err := m.reviewer.Complete(ctx, messages, nil)
+	if err != nil {
+		return "", fmt.Errorf("rubber duck review failed: %w", err)
+	}
+	return msg.Content, nil
 }

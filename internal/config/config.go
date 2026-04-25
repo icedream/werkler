@@ -63,6 +63,28 @@ type ProviderConfig struct {
 	Model    string       `mapstructure:"model"`    // default model for this provider
 }
 
+// RubberDuckConfig configures an optional secondary AI model used for critical
+// review of plans and implementations. When configured, the AI is offered a
+// rubber_duck_review tool it can call to get independent feedback.
+type RubberDuckConfig struct {
+	// Provider names an existing [[ai.providers]] entry to reuse.
+	// When set, Type/Endpoint/APIKey are ignored.
+	Provider string `mapstructure:"provider"`
+	// Model overrides the provider's default model (optional).
+	Model string `mapstructure:"model"`
+	// Type, Endpoint, APIKey configure a standalone provider not listed in
+	// [[ai.providers]]. Ignored when Provider is set.
+	Type     ProviderType `mapstructure:"type"`
+	Endpoint string       `mapstructure:"endpoint"`
+	APIKey   string       `mapstructure:"api_key"`
+}
+
+// IsConfigured reports whether the rubber duck section contains enough
+// information to attempt building a reviewer client.
+func (r RubberDuckConfig) IsConfigured() bool {
+	return r.Provider != "" || r.APIKey != "" || r.Type == ProviderTypeCopilot
+}
+
 // AIConfig holds AI provider settings.
 // The legacy flat fields (Endpoint, APIKey, Model) are honoured when
 // Providers is empty, so existing single-provider configs keep working.
@@ -76,6 +98,9 @@ type AIConfig struct {
 	Providers []ProviderConfig `mapstructure:"providers"`
 	// Active names which provider to use. Defaults to the first provider.
 	Active string `mapstructure:"active"`
+
+	// RubberDuck configures an optional secondary reviewer AI.
+	RubberDuck RubberDuckConfig `mapstructure:"rubber_duck"`
 }
 
 // Config is the root configuration structure.

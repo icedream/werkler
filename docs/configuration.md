@@ -186,6 +186,62 @@ providers configured in `[[ai.providers]]`.
 
 ---
 
+## Rubber duck reviewer
+
+Werkler can optionally route planning and code-review requests to a second AI
+model — a "rubber duck" — before the main model implements anything. When this
+is configured, the main AI receives a `rubber_duck_review` tool it can invoke to
+get independent critical feedback on a plan, piece of code, or reasoning.
+
+The reviewer is entirely separate from the main chat model and can be a
+different model from the same or a different provider. The AI decides when to
+use it; the tool is auto-approved (no confirmation prompt) since you explicitly
+configured the destination.
+
+### Reference an existing provider
+
+Point the rubber duck at a provider already listed in `[[ai.providers]]`, with
+an optional model override:
+
+```toml
+[ai.rubber_duck]
+provider = "copilot"          # must match a [[ai.providers]] name
+model    = "claude-opus-4-5"  # optional: override the provider's default model
+```
+
+### Standalone provider
+
+Configure a separate AI provider just for reviews without adding it to the main
+`[[ai.providers]]` list:
+
+```toml
+[ai.rubber_duck]
+type     = "openai"
+endpoint = "https://api.openai.com/v1"
+api_key  = "sk-..."
+model    = "o3"
+```
+
+For Copilot (shares the token from `werkler auth copilot`):
+
+```toml
+[ai.rubber_duck]
+type  = "copilot"
+model = "claude-opus-4-5"
+```
+
+### Fields
+
+| Field | Description |
+|-------|-------------|
+| `provider` | Name of an existing `[[ai.providers]]` entry to reuse. When set, `type`/`endpoint`/`api_key` are ignored. |
+| `model` | Model to use. Overrides the referenced provider's default when `provider` is set; required for standalone configs. |
+| `type` | Provider type for standalone config: `openai` or `copilot`. Defaults to `openai` when omitted. |
+| `endpoint` | Base URL for standalone OpenAI-compatible providers. Defaults to `https://api.openai.com/v1`. |
+| `api_key` | API key for standalone OpenAI-compatible providers. Required when `type = "openai"`. |
+
+---
+
 ## Tools (MCP servers)
 
 Werkler gives the AI access to external capabilities through
@@ -523,6 +579,11 @@ model    = "gpt-4o"
 # name  = "copilot"
 # type  = "copilot"
 # model = "claude-sonnet-4-5"
+
+# Optional: rubber duck reviewer (separate model for critical feedback)
+# [ai.rubber_duck]
+# provider = "copilot"         # reuse an existing provider
+# model    = "claude-opus-4-5" # with a more capable model for review
 
 [mcp]
 auto_approve_tools = [
