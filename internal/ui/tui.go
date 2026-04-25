@@ -201,6 +201,13 @@ type SessionOptions struct {
 	Store      *sessionstore.Store   // nil = session persistence disabled
 	Initial    *sessionstore.Session // non-nil = load this session on startup
 	OpenPicker bool                  // open session picker immediately on launch
+	// PersistToolApproval, if non-nil, is called when the user permanently
+	// approves a tool (adds it to auto_approve_tools in the config file).
+	PersistToolApproval func(toolName string) error
+	// PersistPathApproval, if non-nil, is called when the user permanently
+	// approves a path (adds it to auto_approve_paths in the config file).
+	// write indicates whether write access was granted (false = read-only).
+	PersistPathApproval func(path string, write bool) error
 }
 
 // --- Slash commands ---
@@ -269,6 +276,12 @@ func init() {
 				lines = append(lines, "- `ctrl+p` — switch model (when available)")
 				lines = append(lines, "- `alt+m` — toggle mouse reporting (off = text selection)")
 				lines = append(lines, "- `↑/↓ pgup/pgdn` — scroll conversation history")
+				lines = append(lines, "")
+				lines = append(lines, "**Tool approval keys** (when prompted)")
+				lines = append(lines, "- `y` — allow once")
+				lines = append(lines, "- `a` — allow for this session")
+				lines = append(lines, "- `p` — allow permanently (saves to config)")
+				lines = append(lines, "- `n` — deny")
 				lines = append(lines, "")
 				lines = append(lines, "**Slash commands** — type `/` to see autocomplete")
 				for _, cmd := range slashCommands {
@@ -345,6 +358,11 @@ type Model struct {
 	// resumeHint is the latest CWD-matching session found on startup.
 	// Shown in the status bar until the first message is sent.
 	resumeHint *sessionstore.Session
+
+	// persistToolApproval, if non-nil, saves a tool name to auto_approve_tools.
+	persistToolApproval func(toolName string) error
+	// persistPathApproval, if non-nil, saves a path to auto_approve_paths.
+	persistPathApproval func(path string, write bool) error
 
 	// ask_user state (stateAwaitingUserQuestion).
 	askUserCallID        string
@@ -573,6 +591,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.currentPathRequest = chat.PathAccessRequest{}
 					cmds = append(cmds, m.processNextPath())
 					needRebuild = true
+				case "p", "P":
+					if m.persistPathApproval != nil {
+						req := m.currentPathRequest
+						m.approvePathRequest(req)
+						if err := m.persistPathApproval(req.Path, req.Write); err != nil {
+							m.items = append(m.items, displayItem{
+								kind:    itemError,
+								content: "Failed to save approval: " + err.Error(),
+							})
+						}
+						m.currentPathRequest = chat.PathAccessRequest{}
+						cmds = append(cmds, m.processNextPath())
+						needRebuild = true
+					}
 				case "n", "N":
 					// Deny: clear path queue, deny the pending tool call.
 					m.pendingPathApprovals = nil
@@ -628,6 +660,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = stateCallingTool
 					needRebuild = true
 					cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+				case "p", "P":
+					if m.persistToolApproval != nil {
+						call := *m.currentCall
+						m.session.ApproveForSession(call.Name)
+						if err := m.persistToolApproval(call.Name); err != nil {
+							m.items = append(m.items, displayItem{
+								kind:    itemError,
+								content: "Failed to save approval: " + err.Error(),
+							})
+						}
+						if idx, ok := m.toolCallIdx[call.ID]; ok {
+							m.items[idx].toolStatus = toolStatusRunning
+						}
+						m.callingToolName = call.Name
+						m.currentCall = nil
+						m.executingCall = &call
+						m.state = stateCallingTool
+						needRebuild = true
+						cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+					}
 				case "n", "N":
 					call := *m.currentCall
 					if idx, ok := m.toolCallIdx[call.ID]; ok {
@@ -1326,6 +1378,9 @@ func (m Model) statusLines() (line1, line2 string) {
 			keyHintStyle.Render("[y]") + "es  " +
 			keyHintStyle.Render("[n]") + "o  " +
 			keyHintStyle.Render("[a]") + "ll remaining"
+		if m.persistPathApproval != nil {
+			l2 += "  " + keyHintStyle.Render("[p]") + "ermanent"
+		}
 		return l1 + allowAllIndicator, l2
 	case stateAwaitingApproval:
 		if m.currentCall == nil {
@@ -1340,6 +1395,9 @@ func (m Model) statusLines() (line1, line2 string) {
 			keyHintStyle.Render("[y]") + "es  " +
 			keyHintStyle.Render("[n]") + "o  " +
 			keyHintStyle.Render("[a]") + "lways"
+		if m.persistToolApproval != nil {
+			l2 += "  " + keyHintStyle.Render("[p]") + "ermanent"
+		}
 		return l1 + allowAllIndicator, l2
 	case stateAwaitingUserQuestion:
 		l1 := approvalPromptStyle.Render("  ❓ AI is asking a question")
@@ -1865,6 +1923,8 @@ func RunTUI(
 
 	// Apply session persistence options.
 	m.sessionStore = opts.Store
+	m.persistToolApproval = opts.PersistToolApproval
+	m.persistPathApproval = opts.PersistPathApproval
 	if opts.Initial != nil {
 		m.applySession(opts.Initial)
 	} else if opts.OpenPicker && opts.Store != nil {
