@@ -105,6 +105,10 @@ var (
 	choiceRecommendedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("42")).
 				Italic(true)
+
+	allowAllWarningStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("202")) // orange — visible warning
 )
 
 func separator(width int) string {

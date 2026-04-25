@@ -57,6 +57,7 @@ type Session struct {
 	autoApprovePaths  []string        // glob patterns for pre-approved paths (grants write+read)
 	sessionReadPaths  map[string]bool // paths approved for read access this session
 	sessionWritePaths map[string]bool // paths approved for write (+ read) access this session
+	allowAll          bool            // when true, all tools and paths are approved without prompting
 }
 
 // NewSession creates a Session with the given tool manager and auto-approve glob patterns.
@@ -108,6 +109,9 @@ func (s *Session) CallTool(ctx context.Context, tc ai.ToolCall) (string, error) 
 // IsPathReadApproved returns true if path may be read without interactive approval.
 // Write approval implies read approval.
 func (s *Session) IsPathReadApproved(path string) bool {
+	if s.allowAll {
+		return true
+	}
 	if s.sessionReadPaths[path] || s.sessionWritePaths[path] {
 		return true
 	}
@@ -121,6 +125,9 @@ func (s *Session) IsPathReadApproved(path string) bool {
 
 // IsPathWriteApproved returns true if path may be written without interactive approval.
 func (s *Session) IsPathWriteApproved(path string) bool {
+	if s.allowAll {
+		return true
+	}
 	if s.sessionWritePaths[path] {
 		return true
 	}
@@ -146,6 +153,9 @@ func (s *Session) ApprovePathWriteForSession(path string) {
 // IsApproved returns true if the tool can be called without interactive user approval.
 // Session-level approvals take priority, then config glob patterns are checked.
 func (s *Session) IsApproved(toolName string) bool {
+	if s.allowAll {
+		return true
+	}
 	if s.sessionApproved[toolName] {
 		return true
 	}
@@ -162,10 +172,17 @@ func (s *Session) ApproveForSession(toolName string) {
 	s.sessionApproved[toolName] = true
 }
 
-// ResetApprovals clears all session-level approvals.
+// ResetApprovals clears all session-level approvals (but not allow-all mode).
 func (s *Session) ResetApprovals() {
 	s.sessionApproved = make(map[string]bool)
 }
+
+// SetAllowAll enables or disables allow-all mode. When enabled, all tool calls
+// and path accesses are approved without prompting.
+func (s *Session) SetAllowAll(v bool) { s.allowAll = v }
+
+// AllowAll reports whether allow-all mode is currently active.
+func (s *Session) AllowAll() bool { return s.allowAll }
 
 // HasPendingOAuth reports whether there are OAuth MCP servers not yet connected.
 // Returns false when the underlying ToolManager does not support OAuth.
