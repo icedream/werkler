@@ -12,7 +12,7 @@ import (
 // Tools are invoked only if pre-approved via config globs or session approvals;
 // unapproved tool calls receive a "not approved" result so the AI can adapt.
 // If progress is non-nil, tool call events are written to it.
-func RunPrompt(ctx context.Context, client *ai.Client, session *Session, prompt string, progress io.Writer) (string, error) {
+func RunPrompt(ctx context.Context, client ai.Completer, session *Session, prompt string, progress io.Writer) (string, error) {
 	messages := NewConversation()
 	messages = append(messages, ai.Message{Role: "user", Content: prompt})
 
