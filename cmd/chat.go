@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,7 +18,8 @@ import (
 )
 
 var (
-	chatPrompt string
+	chatPrompt  string
+	chatVerbose bool
 )
 
 var chatCmd = &cobra.Command{
@@ -33,6 +35,7 @@ Otherwise the full TUI is launched. Press Ctrl-C to quit.`,
 
 func init() {
 	chatCmd.Flags().StringVarP(&chatPrompt, "prompt", "p", "", "Run a single non-interactive prompt and exit")
+	chatCmd.Flags().BoolVarP(&chatVerbose, "verbose", "v", false, "Print tool calls to stderr (--prompt mode only)")
 	rootCmd.AddCommand(chatCmd)
 }
 
@@ -67,7 +70,11 @@ func runChat(_ *cobra.Command, _ []string) error {
 }
 
 func runPromptMode(ctx context.Context, aiClient *ai.Client, session *chat.Session) error {
-	result, err := chat.RunPrompt(ctx, aiClient, session, chatPrompt, os.Stderr)
+	var progress io.Writer
+	if chatVerbose {
+		progress = os.Stderr
+	}
+	result, err := chat.RunPrompt(ctx, aiClient, session, chatPrompt, progress)
 	if err != nil {
 		return err
 	}
