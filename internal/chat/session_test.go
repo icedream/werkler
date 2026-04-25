@@ -138,6 +138,60 @@ func TestCallTool_ContextCancel_ReturnsGoError(t *testing.T) {
 	tm.AssertExpectations(t)
 }
 
+// --- Path approval subtree ---
+
+func TestIsPathReadApproved_SessionRead_ExactMatch(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, nil)
+	s.ApprovePathReadForSession("/project/src/main.go")
+	assert.True(t, s.IsPathReadApproved("/project/src/main.go"))
+}
+
+func TestIsPathReadApproved_SessionRead_SubpathUnderApprovedDir(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, nil)
+	s.ApprovePathReadForSession("/project/src")
+	assert.True(t, s.IsPathReadApproved("/project/src/main.go"))
+	assert.True(t, s.IsPathReadApproved("/project/src/sub/deep.go"))
+}
+
+func TestIsPathReadApproved_SessionRead_SiblingDirNotCovered(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, nil)
+	s.ApprovePathReadForSession("/project/src")
+	assert.False(t, s.IsPathReadApproved("/project/srcother/main.go"))
+	assert.False(t, s.IsPathReadApproved("/project/"))
+}
+
+func TestIsPathReadApproved_SessionWrite_CoversRead(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, nil)
+	s.ApprovePathWriteForSession("/project/out")
+	assert.True(t, s.IsPathReadApproved("/project/out/result.txt"))
+}
+
+func TestIsPathWriteApproved_SessionWrite_SubpathUnderApprovedDir(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, nil)
+	s.ApprovePathWriteForSession("/project/out")
+	assert.True(t, s.IsPathWriteApproved("/project/out/result.txt"))
+	assert.True(t, s.IsPathWriteApproved("/project/out"))
+}
+
+func TestIsPathWriteApproved_SessionRead_DoesNotGrantWrite(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, nil)
+	s.ApprovePathReadForSession("/project/src")
+	assert.False(t, s.IsPathWriteApproved("/project/src/main.go"))
+}
+
+func TestIsPathReadApproved_ConfigPath_SubpathCovered(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, []string{"/shared/docs"})
+	assert.True(t, s.IsPathReadApproved("/shared/docs/readme.md"))
+	assert.True(t, s.IsPathReadApproved("/shared/docs"))
+	assert.False(t, s.IsPathReadApproved("/shared/docsother/readme.md"))
+}
+
+func TestIsPathWriteApproved_ConfigPath_SubpathCovered(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, []string{"/shared/docs"})
+	assert.True(t, s.IsPathWriteApproved("/shared/docs/readme.md"))
+	assert.False(t, s.IsPathWriteApproved("/shared/other/readme.md"))
+}
+
 // --- NewConversation ---
 
 func TestNewConversation_StartsWithSystem(t *testing.T) {

@@ -108,20 +108,38 @@ func (s *Session) CallTool(ctx context.Context, tc ai.ToolCall) (string, error) 
 	return result, nil
 }
 
+// pathCoveredBy returns true if requestedPath equals approvedPath or is
+// nested anywhere under it (i.e., approvedPath is a parent directory).
+// Both paths should be clean absolute paths.
+func pathCoveredBy(approvedPath, requestedPath string) bool {
+	return requestedPath == approvedPath ||
+		strings.HasPrefix(requestedPath, approvedPath+"/")
+}
+
 // IsPathReadApproved returns true if path may be read without interactive approval.
 // Write approval implies read approval.
 func (s *Session) IsPathReadApproved(path string) bool {
 	if s.allowAll {
 		return true
 	}
-	if s.cwdReadPrefix != "" && (path == s.cwdReadPrefix || strings.HasPrefix(path, s.cwdReadPrefix+"/")) {
+	if s.cwdReadPrefix != "" && pathCoveredBy(s.cwdReadPrefix, path) {
 		return true
 	}
-	if s.sessionReadPaths[path] || s.sessionWritePaths[path] {
-		return true
+	for approved := range s.sessionWritePaths {
+		if pathCoveredBy(approved, path) {
+			return true
+		}
+	}
+	for approved := range s.sessionReadPaths {
+		if pathCoveredBy(approved, path) {
+			return true
+		}
 	}
 	for _, pattern := range s.autoApprovePaths {
 		if matched, _ := filepath.Match(pattern, path); matched {
+			return true
+		}
+		if pathCoveredBy(pattern, path) {
 			return true
 		}
 	}
@@ -133,11 +151,16 @@ func (s *Session) IsPathWriteApproved(path string) bool {
 	if s.allowAll {
 		return true
 	}
-	if s.sessionWritePaths[path] {
-		return true
+	for approved := range s.sessionWritePaths {
+		if pathCoveredBy(approved, path) {
+			return true
+		}
 	}
 	for _, pattern := range s.autoApprovePaths {
 		if matched, _ := filepath.Match(pattern, path); matched {
+			return true
+		}
+		if pathCoveredBy(pattern, path) {
 			return true
 		}
 	}
