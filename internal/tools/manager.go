@@ -62,12 +62,18 @@ type oauthManager interface {
 	ConnectPendingOAuth(ctx context.Context, display func(serverName, authURL string)) error
 }
 
+// UserAsker is implemented by interactive callers (e.g. the TUI) to suspend a
+// tool goroutine and wait for user input. It is called from a tool execution
+// goroutine and blocks until the user responds or ctx is cancelled.
+type UserAsker func(ctx context.Context, question string, choices []string, recommendedChoice string, allowFreeform bool) (string, error)
+
 // Manager wraps a chat.ToolManager and adds built-in tools.
 type Manager struct {
 	wrapped      chat.ToolManager
 	processes    *process.Manager
 	pathApprover PathApprover
 	builtins     []builtin
+	userAsker    UserAsker
 }
 
 type builtin struct {
@@ -104,6 +110,11 @@ func (m *Manager) SetOutputNotify(fn OutputNotification) {
 func (m *Manager) SetPathApprover(pa PathApprover) {
 	m.pathApprover = pa
 }
+
+// SetUserAsker provides the callback used by the ask_user built-in to request
+// user input interactively. When nil (the default), ask_user returns a static
+// "not available in non-interactive mode" message.
+func (m *Manager) SetUserAsker(fn UserAsker) { m.userAsker = fn }
 
 // Processes returns the underlying process.Manager for inspection by the TUI.
 func (m *Manager) Processes() *process.Manager { return m.processes }
@@ -495,6 +506,41 @@ On success, returns the line number where the replacement was made.`,
 				},
 			},
 			handle: m.handleFileDelete,
+		},
+		// --- Interaction tools ---
+		{
+			def: ai.ToolDefinition{
+				Name: "ask_user",
+				Description: `Ask the user a direct question and wait for their answer.
+Use this when the task requires a decision or information that only the user can provide.
+Provide predefined choices when the answer is one of a known set.
+Set allow_freeform to false to restrict the user strictly to those choices.
+Set recommended_choice to highlight a suggested option.`,
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"question": map[string]any{
+							"type":        "string",
+							"description": "The question to present to the user",
+						},
+						"choices": map[string]any{
+							"type":        "array",
+							"items":       map[string]any{"type": "string"},
+							"description": "Predefined answer choices",
+						},
+						"recommended_choice": map[string]any{
+							"type":        "string",
+							"description": "The choice you recommend; must exactly match one of the choices",
+						},
+						"allow_freeform": map[string]any{
+							"type":        "boolean",
+							"description": "Whether to also accept a custom typed answer (default: true)",
+						},
+					},
+					"required": []string{"question"},
+				},
+			},
+			handle: m.handleAskUser,
 		},
 	}
 }
@@ -909,3 +955,35 @@ var _ chat.ToolManager = (*Manager)(nil)
 
 // ensure slices is used (imported for future dedup use).
 var _ = slices.Contains[[]string, string]
+
+func (m *Manager) handleAskUser(ctx context.Context, args map[string]any) (string, error) {
+	question := stringArg(args, "question")
+	if question == "" {
+		return "error: ask_user requires a non-empty question", nil
+	}
+	choices := stringSliceArg(args, "choices")
+	recommended := stringArg(args, "recommended_choice")
+	allowFreeform := true
+	if v, ok := args["allow_freeform"].(bool); ok {
+		allowFreeform = v
+	}
+	if !allowFreeform && len(choices) == 0 {
+		return "error: ask_user requires at least one choice when allow_freeform is false", nil
+	}
+	if recommended != "" {
+		found := false
+		for _, c := range choices {
+			if c == recommended {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Sprintf("error: recommended_choice %q does not match any provided choice", recommended), nil
+		}
+	}
+	if m.userAsker == nil {
+		return "(ask_user requires interactive mode — run werkler interactively to provide an answer)", nil
+	}
+	return m.userAsker(ctx, question, choices, recommended, allowFreeform)
+}

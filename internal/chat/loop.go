@@ -33,7 +33,7 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 		}
 
 		for _, tc := range msg.ToolCalls {
-			if !session.IsApproved(tc.Name) {
+			if !session.IsApproved(tc.Name) && tc.Name != "ask_user" {
 				if progress != nil {
 					_, _ = fmt.Fprintf(progress, "[tool denied (not pre-approved in non-interactive mode): %s]\n", tc.Name)
 				}
