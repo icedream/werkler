@@ -274,7 +274,7 @@ func init() {
 				lines = append(lines, "**Keyboard shortcuts**")
 				lines = append(lines, "- `ctrl+c` / `ctrl+d` — quit")
 				lines = append(lines, "- `ctrl+p` — switch model (when available)")
-				lines = append(lines, "- `alt+m` — toggle mouse reporting (off = text selection)")
+				lines = append(lines, "- `alt+m` — toggle mouse reporting (on = scroll wheel; off = terminal text selection)")
 				lines = append(lines, "- `↑/↓ pgup/pgdn` — scroll conversation history")
 				lines = append(lines, "")
 				lines = append(lines, "**Tool approval keys** (when prompted)")
@@ -1473,9 +1473,9 @@ func (m Model) statusLines() (line1, line2 string) {
 		}
 		return l1 + allowAllIndicator, l2
 	default:
-		mouseHint := "  " + keyHintStyle.Render("alt+m") + " select text"
+		mouseHint := "  " + keyHintStyle.Render("alt+m") + " enable text selection"
 		if !m.mouseEnabled {
-			mouseHint = "  " + keyHintStyle.Render("alt+m") + " restore scroll"
+			mouseHint = "  " + keyHintStyle.Render("alt+m") + " enable mouse scroll"
 		}
 		pickerHint := ""
 		if m.modelManager != nil {
