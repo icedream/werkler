@@ -34,6 +34,19 @@ const (
 	stateAwaitingApproval
 )
 
+// inputPlaceholder returns the appropriate placeholder text for the input
+// based on the current TUI state.
+func inputPlaceholder(state tuiState) string {
+	switch state {
+	case stateAwaitingApproval:
+		return "Approve the tool call above (y / n / a)…"
+	case stateIdle:
+		return "Type a message, press Enter to send…"
+	default:
+		return "Queue a follow-up, press Enter…"
+	}
+}
+
 // --- Display item kinds and statuses ---
 
 const (
@@ -96,6 +109,10 @@ type Model struct {
 	callingToolName  string // name of tool currently executing (stateCallingTool)
 	streamingItemIdx int    // index into items of the in-progress assistant item; -1 if none
 
+	// Queue of user prompts entered while the AI is busy.
+	// Processed FIFO after the current agent turn completes successfully.
+	queuedPrompts []string
+
 	// Display items for the viewport.
 	items       []displayItem
 	toolCallIdx map[string]int // callID → index in items
@@ -129,7 +146,7 @@ func initialModel(
 	sp.Spinner = thinkingSpinner
 
 	ti := textinput.New()
-	ti.Placeholder = "Type a message, press Enter to send..."
+	ti.Placeholder = inputPlaceholder(stateIdle)
 	ti.Prompt = ""
 	ti.CharLimit = 0
 	ti.Focus() // must be called here; Init() runs on a value copy so mutations there are lost
@@ -235,10 +252,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, inputCmd)
 			}
 
-		default:
-			var vpCmd tea.Cmd
-			m.viewport, vpCmd = m.viewport.Update(msg)
-			cmds = append(cmds, vpCmd)
+		case stateThinking, stateStreaming, stateCallingTool:
+			switch msg.Type {
+			case tea.KeyEnter:
+				text := strings.TrimSpace(m.input.Value())
+				if text != "" {
+					m.input.Reset()
+					m.queuedPrompts = append(m.queuedPrompts, text)
+					needRebuild = true
+				}
+			case tea.KeyEsc:
+				if m.input.Value() != "" {
+					m.input.Reset()
+				} else if len(m.queuedPrompts) > 0 {
+					m.queuedPrompts = m.queuedPrompts[:len(m.queuedPrompts)-1]
+					needRebuild = true
+				}
+			default:
+				// Forward to both: textinput handles text-entry keys (runes, backspace,
+				// cursor movement); viewport handles navigation keys (Up/Down/PgUp/PgDn).
+				// Single-line textinput ignores directional keys, so double-routing is safe.
+				var inputCmd tea.Cmd
+				m.input, inputCmd = m.input.Update(msg)
+				cmds = append(cmds, inputCmd)
+				var vpCmd tea.Cmd
+				m.viewport, vpCmd = m.viewport.Update(msg)
+				cmds = append(cmds, vpCmd)
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -270,7 +310,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		chunk := msg.chunk
 		switch {
 		case chunk.Err != nil:
-			// Embed error in the streaming item if one exists, else add a new error item.
+			// Stream error: go idle but keep queued prompts intact.
+			// The user can retry from idle state.
 			if m.streamingItemIdx >= 0 {
 				m.items[m.streamingItemIdx].content += "\n[stream error: " + chunk.Err.Error() + "]"
 				m.streamingItemIdx = -1
@@ -285,9 +326,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamingItemIdx = -1
 			m.messages = append(m.messages, chunk.Msg)
 			if len(chunk.Msg.ToolCalls) == 0 {
-				m.state = stateIdle
+				// Turn complete: drain queued prompts or go idle.
 				needRebuild = true
-				cmds = append(cmds, m.input.Focus())
+				cmds = append(cmds, m.processQueueOrIdle())
 			} else {
 				for _, tc := range chunk.Msg.ToolCalls {
 					m.toolCallIdx[tc.ID] = len(m.items)
@@ -317,11 +358,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case toolResultMsg:
 		if msg.err != nil {
+			// Tool execution error: go idle but keep queued prompts intact.
 			if idx, ok := m.toolCallIdx[msg.callID]; ok {
 				m.items[idx].toolStatus = toolStatusFailed
 			}
 			m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
 			m.callingToolName = ""
+			m.pendingCalls = nil
+			m.currentCall = nil
 			m.state = stateIdle
 			needRebuild = true
 			cmds = append(cmds, m.input.Focus())
@@ -347,6 +391,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if needRebuild {
 		m.rebuildContent()
 	}
+
+	// Keep input placeholder in sync with state so users always know what Enter does.
+	m.input.Placeholder = inputPlaceholder(m.state)
 
 	return m, tea.Batch(cmds...)
 }
@@ -395,14 +442,19 @@ func (m Model) headerView() string {
 }
 
 func (m Model) statusLines() (line1, line2 string) {
+	queueHint := ""
+	if n := len(m.queuedPrompts); n > 0 {
+		queueHint = "  " + queueCountStyle.Render(fmt.Sprintf("+%d queued", n))
+	}
+
 	switch m.state {
 	case stateThinking:
-		return statusStyle.Render(m.spinner.View() + " Thinking…"), ""
+		return statusStyle.Render(m.spinner.View()+" Thinking…") + queueHint, ""
 	case stateStreaming:
-		return statusStyle.Render(m.spinner.View() + " Streaming…"), ""
+		return statusStyle.Render(m.spinner.View()+" Streaming…") + queueHint, ""
 	case stateCallingTool:
 		name := toolNameStyle.Render(m.callingToolName)
-		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name, ""
+		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + queueHint, ""
 	case stateAwaitingApproval:
 		if m.currentCall == nil {
 			return "", ""
@@ -484,6 +536,22 @@ func (m Model) renderItem(item displayItem) string {
 }
 
 // --- Agent loop helpers ---
+
+// processQueueOrIdle is called when an AI turn finishes successfully.
+// If queued prompts exist, the next one is dequeued and sent immediately,
+// keeping the agent busy. Otherwise the TUI returns to idle.
+func (m *Model) processQueueOrIdle() tea.Cmd {
+	if len(m.queuedPrompts) > 0 {
+		text := m.queuedPrompts[0]
+		m.queuedPrompts = m.queuedPrompts[1:]
+		m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
+		m.items = append(m.items, displayItem{kind: itemUser, content: text})
+		m.state = stateThinking
+		return doStartStream(m.ctx, m.client, m.messages, m.tools)
+	}
+	m.state = stateIdle
+	return m.input.Focus()
+}
 
 // processNextCall advances the tool call queue, updating state and returning the
 // next command to execute. Must only be called from Update.

@@ -307,7 +307,7 @@ func TestUpdate_ToolResult_Success_ProcessesNext(t *testing.T) {
 	assert.Equal(t, "result text", last.Content)
 }
 
-func TestUpdate_ToolResult_Failure_GoesIdle(t *testing.T) {
+func TestUpdate_ToolResult_Failure_GoesIdle_KeepsQueue(t *testing.T) {
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil)
 	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark")
@@ -315,13 +315,16 @@ func TestUpdate_ToolResult_Failure_GoesIdle(t *testing.T) {
 	m.callingToolName = "bad_tool"
 	m.toolCallIdx["c1"] = 0
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusRunning})
+	m.queuedPrompts = []string{"follow-up"}
 
 	m, _ = update(t, m, toolResultMsg{callID: "c1", toolName: "bad_tool", err: assert.AnError})
 
 	assert.Equal(t, stateIdle, m.state)
 	assert.Equal(t, toolStatusFailed, m.items[0].toolStatus)
-	require.Len(t, m.items, 2)
-	assert.Equal(t, itemError, m.items[1].kind)
+	// Queue must be preserved on error — not consumed.
+	require.Len(t, m.queuedPrompts, 1, "queued prompts must survive tool errors")
+	assert.Nil(t, m.pendingCalls)
+	assert.Nil(t, m.currentCall)
 }
 
 // --- CtrlC always quits ---
@@ -368,4 +371,169 @@ func TestUpdate_Enter_EmptyInput_NoOp(t *testing.T) {
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, stateIdle, m.state)
 	assert.Empty(t, m.items)
+}
+
+// --- Prompt queueing ---
+
+func TestUpdate_Queue_EnterWhileBusy_AddsToQueue(t *testing.T) {
+	m := baseModel()
+	m.state = stateThinking
+
+	// Type "hello" into the input.
+	for _, r := range "hello" {
+		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Len(t, m.queuedPrompts, 1)
+	assert.Equal(t, "hello", m.queuedPrompts[0])
+	assert.Equal(t, "", m.input.Value(), "input should be cleared after queueing")
+	// State must not change — we're still thinking.
+	assert.Equal(t, stateThinking, m.state)
+}
+
+func TestUpdate_Queue_MultiplePrompts_FIFO(t *testing.T) {
+	m := baseModel()
+	m.state = stateStreaming
+
+	for _, text := range []string{"first", "second", "third"} {
+		for _, r := range text {
+			m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	}
+
+	require.Len(t, m.queuedPrompts, 3)
+	assert.Equal(t, "first", m.queuedPrompts[0])
+	assert.Equal(t, "second", m.queuedPrompts[1])
+	assert.Equal(t, "third", m.queuedPrompts[2])
+}
+
+func TestUpdate_Queue_EscWithText_ClearsInput(t *testing.T) {
+	m := baseModel()
+	m.state = stateThinking
+
+	for _, r := range "hello" {
+		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	assert.Equal(t, "", m.input.Value())
+	assert.Empty(t, m.queuedPrompts)
+}
+
+func TestUpdate_Queue_EscEmptyInput_RemovesLastQueued(t *testing.T) {
+	m := baseModel()
+	m.state = stateStreaming
+	m.queuedPrompts = []string{"first", "second"}
+
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	require.Len(t, m.queuedPrompts, 1)
+	assert.Equal(t, "first", m.queuedPrompts[0])
+}
+
+func TestUpdate_Queue_EscEmptyInputNoQueue_NoOp(t *testing.T) {
+	m := baseModel()
+	m.state = stateThinking
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	assert.Empty(t, m.queuedPrompts)
+	assert.Equal(t, stateThinking, m.state)
+}
+
+func TestUpdate_Queue_EnterEmpty_NotQueued(t *testing.T) {
+	m := baseModel()
+	m.state = stateThinking
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Empty(t, m.queuedPrompts)
+}
+
+func TestUpdate_ProcessQueueOrIdle_WithQueue_StartsNextTurn(t *testing.T) {
+	sc := &mockStreamCompleter{}
+	sc.On("CompleteStream", mock.Anything, mock.Anything, mock.Anything).
+		Return(chanOf(ai.StreamChunk{Done: true, Msg: ai.Message{Role: "assistant", Content: "pong"}}))
+
+	tm := &mockToolManager{}
+	session := chat.NewSession(tm, nil)
+	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark")
+	m.state = stateStreaming
+	m.queuedPrompts = []string{"next question"}
+
+	// Simulate stream completing with no tool calls → processQueueOrIdle fires.
+	finalMsg := ai.Message{Role: "assistant", Content: "answer"}
+	ch := chanOf()
+	m, cmd := update(t, m, streamChunkMsg{ch: ch, chunk: ai.StreamChunk{Done: true, Msg: finalMsg}})
+
+	// Queue drained, next prompt sent.
+	assert.Empty(t, m.queuedPrompts)
+	assert.Equal(t, stateThinking, m.state)
+	// The queued user message should appear as a display item.
+	require.Len(t, m.items, 1)
+	assert.Equal(t, itemUser, m.items[0].kind)
+	assert.Equal(t, "next question", m.items[0].content)
+	assert.NotNil(t, cmd)
+}
+
+func TestUpdate_ProcessQueueOrIdle_NoQueue_GoesIdle(t *testing.T) {
+	m := baseModel()
+	m.state = stateStreaming
+
+	finalMsg := ai.Message{Role: "assistant", Content: "done"}
+	ch := chanOf()
+	m, _ = update(t, m, streamChunkMsg{ch: ch, chunk: ai.StreamChunk{Done: true, Msg: finalMsg}})
+
+	assert.Equal(t, stateIdle, m.state)
+	assert.Empty(t, m.queuedPrompts)
+}
+
+func TestUpdate_Queue_SurvivesToolCalls(t *testing.T) {
+	// Proves the invariant: queued prompts must survive an entire assistant turn
+	// (including tool calls) and only be consumed after the final response.
+
+	sc := &mockStreamCompleter{}
+	tm := &mockToolManager{}
+	session := chat.NewSession(tm, []string{"my_tool"})
+	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark")
+
+	// 1. Queue a follow-up while the first stream is in-flight.
+	m.state = stateStreaming
+	for _, r := range "follow-up" {
+		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	require.Len(t, m.queuedPrompts, 1)
+
+	// 2. First stream finishes with a tool call.
+	tc := ai.ToolCall{ID: "c1", Name: "my_tool"}
+	firstDone := ai.Message{Role: "assistant", ToolCalls: []ai.ToolCall{tc}}
+	ch := chanOf()
+	m, _ = update(t, m, streamChunkMsg{ch: ch, chunk: ai.StreamChunk{Done: true, Msg: firstDone}})
+	// Queue must still be intact — tool calls haven't finished.
+	require.Len(t, m.queuedPrompts, 1, "queue must survive tool-call processing")
+	assert.Equal(t, stateCallingTool, m.state)
+
+	// 3. Tool result comes back; processNextCall → doStartStream for the second AI turn.
+	sc.On("CompleteStream", mock.Anything, mock.Anything, mock.Anything).
+		Return(chanOf(ai.StreamChunk{Done: true, Msg: ai.Message{Role: "assistant", Content: "all done"}}))
+	m, _ = update(t, m, toolResultMsg{callID: "c1", toolName: "my_tool", result: "tool output"})
+	// processNextCall has no more pending calls → starts next stream.
+	require.Len(t, m.queuedPrompts, 1, "queue must survive after tool result, before final response")
+	assert.Equal(t, stateThinking, m.state)
+
+	// 4. Second stream finishes with no tool calls → processQueueOrIdle drains the queue.
+	secondDone := ai.Message{Role: "assistant", Content: "all done"}
+	ch2 := chanOf()
+	m, _ = update(t, m, streamChunkMsg{ch: ch2, chunk: ai.StreamChunk{Done: true, Msg: secondDone}})
+	assert.Empty(t, m.queuedPrompts, "queue must be drained after full agent turn completes")
+	assert.Equal(t, stateThinking, m.state, "next queued turn should start immediately")
+}
+
+// --- inputPlaceholder ---
+
+func TestInputPlaceholder_States(t *testing.T) {
+	assert.Contains(t, inputPlaceholder(stateIdle), "Enter")
+	assert.Contains(t, inputPlaceholder(stateThinking), "Queue")
+	assert.Contains(t, inputPlaceholder(stateStreaming), "Queue")
+	assert.Contains(t, inputPlaceholder(stateCallingTool), "Queue")
+	assert.Contains(t, inputPlaceholder(stateAwaitingApproval), "y")
 }
