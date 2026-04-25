@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -21,6 +22,16 @@ import (
 // fixedLines is the number of terminal lines consumed by non-viewport UI elements:
 // header(1) + sep(1) + sep(1) + statusLine1(1) + statusLine2(1) + sep(1) + input(1) = 7
 const fixedLines = 7
+
+// --- Debug logging ---
+
+var debugLogger *log.Logger
+
+func debugLog(format string, args ...any) {
+	if debugLogger != nil {
+		debugLogger.Printf(format, args...)
+	}
+}
 
 // --- TUI states ---
 
@@ -310,6 +321,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		chunk := msg.chunk
 		switch {
 		case chunk.Err != nil:
+			debugLog("streamChunk: error: %v", chunk.Err)
 			// Stream error: go idle but keep queued prompts intact.
 			// The user can retry from idle state.
 			if m.streamingItemIdx >= 0 {
@@ -322,7 +334,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 			cmds = append(cmds, m.input.Focus())
 		case chunk.Done:
+			debugLog("streamChunk: done, toolCalls=%d, streamingItemIdx=%d, content=%q", len(chunk.Msg.ToolCalls), m.streamingItemIdx, chunk.Msg.Content)
 			// Stream finished — append the full message to history and handle tool calls.
+			// If no delta chunks arrived but the message has content (e.g. the model
+			// returned a full response without streaming tokens), create the display item now.
+			if m.streamingItemIdx < 0 && chunk.Msg.Content != "" {
+				m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content})
+			}
 			m.streamingItemIdx = -1
 			m.messages = append(m.messages, chunk.Msg)
 			if len(chunk.Msg.ToolCalls) == 0 {
@@ -331,6 +349,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.processQueueOrIdle())
 			} else {
 				for _, tc := range chunk.Msg.ToolCalls {
+					debugLog("streamChunk: tool call id=%q name=%q", tc.ID, tc.Name)
 					m.toolCallIdx[tc.ID] = len(m.items)
 					m.items = append(m.items, displayItem{
 						kind:       itemToolCall,
@@ -358,6 +377,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case toolResultMsg:
 		if msg.err != nil {
+			debugLog("toolResult: error tool=%q err=%v", msg.toolName, msg.err)
 			// Tool execution error: go idle but keep queued prompts intact.
 			if idx, ok := m.toolCallIdx[msg.callID]; ok {
 				m.items[idx].toolStatus = toolStatusFailed
@@ -370,6 +390,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 			cmds = append(cmds, m.input.Focus())
 		} else {
+			debugLog("toolResult: ok tool=%q result=%q", msg.toolName, msg.result[:min(len(msg.result), 80)])
 			if idx, ok := m.toolCallIdx[msg.callID]; ok {
 				m.items[idx].toolStatus = toolStatusDone
 			}
@@ -557,6 +578,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 // next command to execute. Must only be called from Update.
 func (m *Model) processNextCall() tea.Cmd {
 	if len(m.pendingCalls) == 0 {
+		debugLog("processNextCall: no more pending calls, starting new stream (messages=%d)", len(m.messages))
 		m.state = stateThinking
 		return doStartStream(m.ctx, m.client, m.messages, m.tools)
 	}
@@ -566,6 +588,7 @@ func (m *Model) processNextCall() tea.Cmd {
 	callCopy := call
 	m.currentCall = &callCopy
 
+	debugLog("processNextCall: dispatching tool=%q id=%q approved=%v", call.Name, call.ID, m.session.IsApproved(call.Name))
 	if m.session.IsApproved(call.Name) {
 		if idx, ok := m.toolCallIdx[call.ID]; ok {
 			m.items[idx].toolStatus = toolStatusRunning
@@ -657,6 +680,15 @@ func RunTUI(
 	// OSC 11 query to stdout; the terminal's response arrives on stdin and would
 	// be swallowed by bubbletea as garbage key input if done after p.Run().
 	glamourStyle := resolveGlamourStyle()
+
+	// Enable debug logging to a file if WERKLER_DEBUG_LOG is set.
+	if logPath := os.Getenv("WERKLER_DEBUG_LOG"); logPath != "" {
+		f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if ferr == nil {
+			debugLogger = log.New(f, "", log.Ltime|log.Lmicroseconds)
+			defer func() { _ = f.Close() }()
+		}
+	}
 
 	m := initialModel(ctx, client, session, tools, modelName, serverNames, glamourStyle)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())

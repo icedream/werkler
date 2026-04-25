@@ -467,10 +467,12 @@ func TestUpdate_ProcessQueueOrIdle_WithQueue_StartsNextTurn(t *testing.T) {
 	// Queue drained, next prompt sent.
 	assert.Empty(t, m.queuedPrompts)
 	assert.Equal(t, stateThinking, m.state)
-	// The queued user message should appear as a display item.
-	require.Len(t, m.items, 1)
-	assert.Equal(t, itemUser, m.items[0].kind)
-	assert.Equal(t, "next question", m.items[0].content)
+	// The completed assistant message plus the queued user message should appear.
+	require.Len(t, m.items, 2)
+	assert.Equal(t, itemAssistant, m.items[0].kind)
+	assert.Equal(t, "answer", m.items[0].content)
+	assert.Equal(t, itemUser, m.items[1].kind)
+	assert.Equal(t, "next question", m.items[1].content)
 	assert.NotNil(t, cmd)
 }
 
@@ -484,6 +486,10 @@ func TestUpdate_ProcessQueueOrIdle_NoQueue_GoesIdle(t *testing.T) {
 
 	assert.Equal(t, stateIdle, m.state)
 	assert.Empty(t, m.queuedPrompts)
+	// Content arrived via Done (no prior deltas) — should be shown.
+	require.Len(t, m.items, 1)
+	assert.Equal(t, itemAssistant, m.items[0].kind)
+	assert.Equal(t, "done", m.items[0].content)
 }
 
 func TestUpdate_Queue_SurvivesToolCalls(t *testing.T) {
