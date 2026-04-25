@@ -15,13 +15,16 @@ import (
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	mcppkg "github.com/icedream/werkler/internal/mcp"
+	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/tools"
 	"github.com/icedream/werkler/internal/ui"
 )
 
 var (
-	chatPrompt  string
-	chatVerbose bool
+	chatPrompt    string
+	chatVerbose   bool
+	chatResume    bool
+	chatSessionID string
 )
 
 var chatCmd = &cobra.Command{
@@ -38,6 +41,8 @@ Otherwise the full TUI is launched. Press Ctrl-C to quit.`,
 func init() {
 	chatCmd.Flags().StringVarP(&chatPrompt, "prompt", "p", "", "Run a single non-interactive prompt and exit")
 	chatCmd.Flags().BoolVarP(&chatVerbose, "verbose", "v", false, "Print tool calls to stderr (--prompt mode only)")
+	chatCmd.Flags().BoolVar(&chatResume, "resume", false, "Open the session picker to resume a previous session")
+	chatCmd.Flags().StringVar(&chatSessionID, "session", "", "Resume the session with this ID (or unique prefix)")
 	rootCmd.AddCommand(chatCmd)
 }
 
@@ -63,12 +68,11 @@ func runChat(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Build the tool manager. Path approvals are delegated to the session;
-	// we construct both together using a small forwarding shim so there's no
-	// import cycle.
 	toolMgr := tools.New(manager, nil, nil)
 	session := chat.NewSession(toolMgr, cfg.MCP.AutoApproveTools, cfg.MCP.AutoApprovePaths)
 	toolMgr.SetPathApprover(session)
+
+	store := sessionstore.New(sessionstore.DefaultDir())
 
 	if chatPrompt != "" {
 		if session.HasPendingOAuth() {
@@ -77,7 +81,23 @@ func runChat(_ *cobra.Command, _ []string) error {
 		}
 		return runPromptMode(ctx, aiClient, session)
 	}
-	return runInteractiveMode(ctx, aiClient, session, toolMgr)
+
+	opts := ui.SessionOptions{Store: store}
+	if chatSessionID != "" {
+		sess, err := store.LoadByPrefix(chatSessionID)
+		if err != nil {
+			return fmt.Errorf("loading session: %w", err)
+		}
+		opts.Initial = sess
+		// Re-apply session-approved tools so they persist across resumes.
+		for _, t := range sess.ApprovedTools {
+			session.ApproveForSession(t)
+		}
+	} else if chatResume {
+		opts.OpenPicker = true
+	}
+
+	return runInteractiveMode(ctx, aiClient, session, toolMgr, opts)
 }
 
 func runPromptMode(ctx context.Context, aiClient *ai.Client, session *chat.Session) error {
@@ -98,10 +118,10 @@ func runPromptMode(ctx context.Context, aiClient *ai.Client, session *chat.Sessi
 	return nil
 }
 
-func runInteractiveMode(ctx context.Context, aiClient *ai.Client, session *chat.Session, toolMgr *tools.Manager) error {
+func runInteractiveMode(ctx context.Context, aiClient *ai.Client, session *chat.Session, toolMgr *tools.Manager, opts ui.SessionOptions) error {
 	serverNames := make([]string, 0, len(cfg.MCP.Servers))
 	for _, s := range cfg.MCP.Servers {
 		serverNames = append(serverNames, s.Name)
 	}
-	return ui.RunTUI(ctx, aiClient, session, toolMgr, cfg.AI.Model, serverNames)
+	return ui.RunTUI(ctx, aiClient, session, toolMgr, cfg.AI.Model, serverNames, opts)
 }
