@@ -122,7 +122,7 @@ func initialModel(
 	glamourStyle string,
 ) Model {
 	sp := spinner.New()
-	sp.Spinner = spinner.Dot
+	sp.Spinner = thinkingSpinner
 
 	ti := textinput.New()
 	ti.Placeholder = "Type a message, press Enter to send..."
@@ -243,11 +243,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if vph < 1 {
 			vph = 1
 		}
+		// Forward to viewport so it can update its internal state, then
+		// override the dimensions we want.
+		var vpCmd tea.Cmd
+		m.viewport, vpCmd = m.viewport.Update(msg)
+		cmds = append(cmds, vpCmd)
 		m.viewport.Width = m.width
 		m.viewport.Height = vph
 		m.input.Width = m.width - 5 // 5 = len("You> ")
 		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
 		needRebuild = true
+		// Clear and fully repaint after resize to avoid blank regions.
+		cmds = append(cmds, tea.ClearScreen)
 
 	case spinner.TickMsg:
 		var spinCmd tea.Cmd
