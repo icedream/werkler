@@ -165,6 +165,52 @@ transport = "streamable"
 url       = "https://mcp.example.com/mcp"
 ```
 
+### Streamable HTTP server with OAuth authentication
+
+Some remote MCP servers — such as
+[Atlassian Rovo](https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/)
+— require OAuth 2.1 authentication. Add `oauth = true` to the server block:
+
+```toml
+[[mcp.servers]]
+name      = "atlassian"
+transport = "streamable"
+url       = "https://mcp.atlassian.com/v1/mcp"
+oauth     = true
+```
+
+`oauth` is only valid with `transport = "streamable"`.
+
+#### How authentication works
+
+OAuth-enabled servers are not connected at startup. The first time you submit
+a prompt that requires those tools, Werkler pauses and shows you a browser
+link directly in the chat:
+
+```
+To connect to atlassian, open this URL in your browser:
+https://auth.atlassian.com/authorize?...
+
+Waiting for authorization…
+```
+
+1. Open the URL in your browser and complete the login flow.
+2. Your browser is redirected to a local callback URL that Werkler is
+   listening on (`http://127.0.0.1:<random-port>/callback`).
+3. Werkler exchanges the authorization code for tokens, then connects the
+   server and proceeds with your original prompt automatically.
+
+Tokens (including refresh tokens) are stored encrypted-at-rest in
+`~/.config/werkler/oauth/<server-name>.json` (mode `0600`). Subsequent
+werkler sessions reuse the stored token and refresh it automatically —
+you will not be prompted again unless the refresh token expires or is
+revoked.
+
+> **Note:** Because the OAuth flow requires a browser, it cannot run in
+> non-interactive (`--prompt`) mode. If you try, Werkler will print an error
+> and exit. Run `werkler chat` once first to authenticate, then use
+> `--prompt` freely afterwards.
+
 ---
 
 ## Tool approval
@@ -233,4 +279,11 @@ args      = ["mcp-server-git", "--repository", "."]
 name      = "search"
 transport = "streamable"
 url       = "https://mcp.example.com/mcp"
+
+# Atlassian Rovo (requires OAuth — browser login on first use)
+[[mcp.servers]]
+name      = "atlassian"
+transport = "streamable"
+url       = "https://mcp.atlassian.com/v1/mcp"
+oauth     = true
 ```
