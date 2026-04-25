@@ -8,91 +8,93 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
-
-	"github.com/icedream/werkler/internal/copilot"
 )
+
+// providerAuth is the interface that every AI-provider authenticator must satisfy.
+// Implementations live in their respective internal/*/authenticator.go files and
+// are registered in cmd/auth_providers.go — no changes to this file are needed
+// when adding a new provider.
+type providerAuth interface {
+	// ProviderType returns the provider type name used as the subcommand name
+	// and in config (e.g. "copilot").
+	ProviderType() string
+	// Description returns a short one-line description for `werkler auth <type> --help`.
+	Description() string
+	// LongDescription returns the full help text (may be empty).
+	LongDescription() string
+	// IsAuthenticated reports whether valid credentials are already saved.
+	IsAuthenticated() (bool, error)
+	// Authenticate runs the interactive auth flow, writing prompts/progress to
+	// stdout. It must respect context cancellation.
+	Authenticate(ctx context.Context) error
+	// StatusLine returns a single-line human-readable status string shown by
+	// `werkler auth status`.
+	StatusLine() string
+}
+
+// authProviders is the registry of all known provider authenticators.
+// Populated by cmd/auth_providers.go.
+var authProviders []providerAuth
 
 var authCmd = &cobra.Command{
 	Use:   "auth",
 	Short: "Manage authentication for AI providers",
 }
 
-var authCopilotForce bool
-
-var authCopilotCmd = &cobra.Command{
-	Use:   "copilot",
-	Short: "Authenticate with GitHub Copilot using the GitHub Device Flow",
-	Long: `Authenticate with GitHub Copilot by running the GitHub Device Flow.
-
-You will be shown a URL and a short code. Open the URL in your browser,
-enter the code, and approve the authorization. werkler will then save a
-GitHub access token to ~/.config/werkler/copilot/github_token.json (mode 0600).
-
-The saved token is used automatically whenever the "copilot" provider is
-active. No re-authentication is needed unless the token is revoked.`,
-	RunE: runAuthCopilot,
-}
-
 var authStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show authentication status for AI providers",
+	Short: "Show authentication status for all registered providers",
 	RunE:  runAuthStatus,
 }
 
 func init() {
-	authCopilotCmd.Flags().BoolVar(&authCopilotForce, "force", false, "Re-authenticate even if already authenticated")
-	authCmd.AddCommand(authCopilotCmd)
 	authCmd.AddCommand(authStatusCmd)
 	rootCmd.AddCommand(authCmd)
 }
 
-func runAuthCopilot(_ *cobra.Command, _ []string) error {
-	if !authCopilotForce {
-		existing, err := copilot.LoadGitHubToken()
+// registerAuthProvider adds p to the registry and wires up its cobra subcommand.
+// Call this from cmd/auth_providers.go (or any init() that runs before Execute).
+func registerAuthProvider(p providerAuth) {
+	authProviders = append(authProviders, p)
+
+	var force bool
+	sub := &cobra.Command{
+		Use:   p.ProviderType(),
+		Short: p.Description(),
+		Long:  p.LongDescription(),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runAuthProvider(cmd.Context(), p, force)
+		},
+	}
+	sub.Flags().BoolVar(&force, "force", false, "Re-authenticate even if already authenticated")
+	authCmd.AddCommand(sub)
+}
+
+func runAuthProvider(ctx context.Context, p providerAuth, force bool) error {
+	if !force {
+		ok, err := p.IsAuthenticated()
 		if err != nil {
-			return fmt.Errorf("checking existing token: %w", err)
+			return fmt.Errorf("checking auth status: %w", err)
 		}
-		if existing != nil {
-			fmt.Println("Already authenticated with GitHub Copilot.")
-			fmt.Println("Use --force to re-authenticate.")
+		if ok {
+			fmt.Printf("Already authenticated for %q. Use --force to re-authenticate.\n", p.ProviderType())
 			return nil
 		}
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	fmt.Println("Authenticating with GitHub Copilot via GitHub Device Flow…")
-	fmt.Println()
-
-	tok, err := copilot.Authenticate(ctx, "", func(verificationURI, userCode string) {
-		fmt.Printf("Open this URL in your browser:\n  %s\n\n", verificationURI)
-		fmt.Printf("Then enter the code:  %s\n\n", userCode)
-		fmt.Println("Waiting for authorization…")
-	})
-	if err != nil {
-		return fmt.Errorf("authentication failed: %w", err)
-	}
-
-	if err := copilot.SaveGitHubToken(tok); err != nil {
-		return fmt.Errorf("saving token: %w", err)
-	}
-
-	fmt.Println()
-	fmt.Println("✓ Successfully authenticated with GitHub Copilot!")
-	fmt.Println("  You can now use  type = \"copilot\"  in [[ai.providers]].")
-	return nil
+	return p.Authenticate(ctx)
 }
 
 func runAuthStatus(_ *cobra.Command, _ []string) error {
-	tok, err := copilot.LoadGitHubToken()
-	if err != nil {
-		return fmt.Errorf("checking Copilot token: %w", err)
+	if len(authProviders) == 0 {
+		fmt.Println("No auth providers registered.")
+		return nil
 	}
-	if tok != nil {
-		fmt.Println("GitHub Copilot: ✓ authenticated")
-	} else {
-		fmt.Println("GitHub Copilot: ✗ not authenticated  (run `werkler auth copilot` to authenticate)")
+	for _, p := range authProviders {
+		fmt.Println(p.StatusLine())
 	}
 	return nil
 }
