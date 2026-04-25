@@ -70,6 +70,10 @@ var (
 
 	inputPrefixStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("244"))
+
+	queueCountStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39")).
+			Bold(true)
 )
 
 func separator(width int) string {
