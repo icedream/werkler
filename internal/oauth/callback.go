@@ -26,7 +26,7 @@ type CallbackServer struct {
 // returns immediately; the server handles the callback in the background.
 // Use port 0 to let the OS pick a random available port.
 func StartCallbackServer(port int) (*CallbackServer, error) {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	ln, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("starting OAuth callback server: %w", err)
 	}
@@ -79,7 +79,7 @@ func (s *CallbackServer) Port() int {
 
 // RedirectURI returns the full redirect URI for this callback server.
 func (s *CallbackServer) RedirectURI() string {
-	return fmt.Sprintf("http://127.0.0.1:%d/callback", s.Port())
+	return fmt.Sprintf("http://localhost:%d/callback", s.Port())
 }
 
 // Wait blocks until an OAuth callback is received or ctx is cancelled.

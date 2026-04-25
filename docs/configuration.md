@@ -210,7 +210,7 @@ Waiting for authorization…
 ```
 
 1. Open the URL in your browser and complete the login flow.
-2. Your browser is redirected to `http://127.0.0.1:34217/callback` (the default
+2. Your browser is redirected to `http://localhost:34217/callback` (the default
    callback port; see `oauth_callback_port` below).
 3. Werkler exchanges the authorization code for tokens, then connects the
    server and proceeds with your original prompt automatically.
@@ -254,7 +254,7 @@ create a **GitHub OAuth App** first (free, takes about a minute):
 1. Go to **GitHub → Settings → Developer settings → OAuth Apps → New OAuth App**
 2. Set **Application name** to anything (e.g. `werkler`)
 3. Set **Homepage URL** to `http://localhost`
-4. Set **Authorization callback URL** to `http://127.0.0.1:34217/callback`
+4. Set **Authorization callback URL** to `http://localhost:34217/callback`
    (werkler's default callback port — see `oauth_callback_port` below)
 5. Click **Register application**, then note the **Client ID**
 6. Click **Generate a new client secret** and note the secret
