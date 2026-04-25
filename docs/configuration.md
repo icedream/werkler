@@ -167,7 +167,8 @@ url       = "https://mcp.example.com/mcp"
 
 Extra HTTP request headers can be injected with a `[mcp.servers.headers]` block.
 This is useful for servers that authenticate via a static token in the
-`Authorization` header:
+`Authorization` header. Values support `$VAR` and `${VAR}` environment variable
+expansion:
 
 ```toml
 [[mcp.servers]]
@@ -176,7 +177,7 @@ transport = "streamable"
 url       = "https://mcp.example.com/mcp"
 
 [mcp.servers.headers]
-Authorization = "Bearer your-token-here"
+Authorization = "Bearer $CLOUD_TOOLS_TOKEN"
 ```
 
 ### Streamable HTTP server with OAuth authentication
@@ -257,7 +258,8 @@ oauth     = true
 
 If you prefer not to use the browser OAuth flow, create a
 [GitHub PAT](https://github.com/settings/tokens) with the scopes your use case
-requires (e.g. `repo`, `read:org`) and pass it as a header:
+requires (e.g. `repo`, `read:org`) and pass it as a header. Use an environment
+variable so the token is not stored in the config file:
 
 ```toml
 [[mcp.servers]]
@@ -266,11 +268,15 @@ transport = "streamable"
 url       = "https://api.githubcopilot.com/mcp/"
 
 [mcp.servers.headers]
-Authorization = "Bearer ghp_your_token_here"
+Authorization = "Bearer $GITHUB_TOKEN"
 ```
 
-Keep the token out of the config file by using an environment variable and
-shell substitution — or store the file with mode `0600`.
+Then set the token in your shell before starting werkler:
+
+```sh
+export GITHUB_TOKEN=ghp_your_token_here
+werkler chat
+```
 
 ### Local server — stdio (Docker)
 
