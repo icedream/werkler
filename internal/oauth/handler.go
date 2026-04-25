@@ -70,7 +70,7 @@ func (h *Handler) TokenSource(ctx context.Context) (oauth2.TokenSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading OAuth session for %q: %w", h.serverName, err)
 	}
-	if sess == nil || sess.RefreshToken == "" {
+	if sess == nil || sess.AccessToken == "" {
 		// No persisted session: return nil so the transport gets a 401 and calls Authorize.
 		return nil, nil
 	}
@@ -81,10 +81,20 @@ func (h *Handler) TokenSource(ctx context.Context) (oauth2.TokenSource, error) {
 		Endpoint:     oauth2.Endpoint{TokenURL: sess.TokenURL},
 	}
 	h.oauth2Cfg = cfg
-	h.tokenSource = &savingTokenSource{
-		inner:      cfg.TokenSource(ctx, sess.Token()),
-		serverName: h.serverName,
-		cfg:        cfg,
+
+	tok := sess.Token()
+	if sess.RefreshToken != "" {
+		// Full session with refresh capability: auto-save on every refresh.
+		h.tokenSource = &savingTokenSource{
+			inner:      cfg.TokenSource(ctx, tok),
+			serverName: h.serverName,
+			cfg:        cfg,
+		}
+	} else {
+		// Access-token-only session (e.g. GitHub OAuth Apps): the token has no
+		// expiry and cannot be refreshed. Use it as-is; if it's ever rejected with
+		// a 401 the transport will call Authorize to start a fresh auth flow.
+		h.tokenSource = oauth2.StaticTokenSource(tok)
 	}
 	return h.tokenSource, nil
 }
