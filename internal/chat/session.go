@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/icedream/werkler/internal/ai"
 )
@@ -58,6 +59,7 @@ type Session struct {
 	sessionReadPaths  map[string]bool // paths approved for read access this session
 	sessionWritePaths map[string]bool // paths approved for write (+ read) access this session
 	allowAll          bool            // when true, all tools and paths are approved without prompting
+	cwdReadPrefix     string          // if non-empty, reads under this absolute path are auto-approved
 }
 
 // NewSession creates a Session with the given tool manager and auto-approve glob patterns.
@@ -110,6 +112,9 @@ func (s *Session) CallTool(ctx context.Context, tc ai.ToolCall) (string, error) 
 // Write approval implies read approval.
 func (s *Session) IsPathReadApproved(path string) bool {
 	if s.allowAll {
+		return true
+	}
+	if s.cwdReadPrefix != "" && (path == s.cwdReadPrefix || strings.HasPrefix(path, s.cwdReadPrefix+"/")) {
 		return true
 	}
 	if s.sessionReadPaths[path] || s.sessionWritePaths[path] {
@@ -183,6 +188,11 @@ func (s *Session) SetAllowAll(v bool) { s.allowAll = v }
 
 // AllowAll reports whether allow-all mode is currently active.
 func (s *Session) AllowAll() bool { return s.allowAll }
+
+// SetCWDReadPrefix sets an absolute path prefix under which reads are
+// auto-approved without prompting. Intended to be called once at startup
+// with the resolved working directory when auto_approve_cwd_read is true.
+func (s *Session) SetCWDReadPrefix(prefix string) { s.cwdReadPrefix = prefix }
 
 // HasPendingOAuth reports whether there are OAuth MCP servers not yet connected.
 // Returns false when the underlying ToolManager does not support OAuth.

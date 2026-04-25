@@ -553,6 +553,30 @@ auto_approve_tools = [
 ]
 ```
 
+### Path access
+
+File operations (read, write, edit, delete) additionally require per-path
+approval the first time the AI accesses a path. These prompts appear in the
+TUI as a separate dialog before the tool is executed.
+
+By default, the AI may read any file under the **current working directory**
+without prompting — the assumption is you started werkler in a project you
+want the AI to work with. You can disable this:
+
+```toml
+[mcp]
+auto_approve_cwd_read = false   # default: true
+```
+
+Additional paths (or glob patterns) can be permanently pre-approved:
+
+```toml
+[mcp]
+auto_approve_paths = [
+  "/home/user/shared-docs",
+]
+```
+
 ---
 
 ## Full example config
