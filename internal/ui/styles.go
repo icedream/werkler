@@ -112,6 +112,11 @@ var (
 
 	separatorAllowAllStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("202")) // orange separator in allow-all mode
+
+	approvalSelectedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Reverse(true).
+				Foreground(lipgloss.Color("220")) // highlighted/staged approval choice
 )
 
 func separator(width int) string {
