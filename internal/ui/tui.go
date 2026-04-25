@@ -122,7 +122,9 @@ func initialModel(
 
 	ti := textinput.New()
 	ti.Placeholder = "Type a message, press Enter to send..."
+	ti.Prompt = ""
 	ti.CharLimit = 0
+	ti.Focus() // must be called here; Init() runs on a value copy so mutations there are lost
 
 	return Model{
 		ctx:         ctx,
@@ -144,7 +146,7 @@ func initialModel(
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
-		m.input.Focus(),
+		textinput.Blink, // cursor blink; Focus() state is set in initialModel
 		m.spinner.Tick,
 		watchContext(m.ctx),
 	)
