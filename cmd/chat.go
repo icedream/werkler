@@ -15,6 +15,7 @@ import (
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	mcppkg "github.com/icedream/werkler/internal/mcp"
+	"github.com/icedream/werkler/internal/tools"
 	"github.com/icedream/werkler/internal/ui"
 )
 
@@ -62,7 +63,12 @@ func runChat(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	session := chat.NewSession(manager, cfg.MCP.AutoApproveTools)
+	// Build the tool manager. Path approvals are delegated to the session;
+	// we construct both together using a small forwarding shim so there's no
+	// import cycle.
+	toolMgr := tools.New(manager, nil, nil)
+	session := chat.NewSession(toolMgr, cfg.MCP.AutoApproveTools, cfg.MCP.AutoApprovePaths)
+	toolMgr.SetPathApprover(session)
 
 	if chatPrompt != "" {
 		if session.HasPendingOAuth() {
@@ -71,7 +77,7 @@ func runChat(_ *cobra.Command, _ []string) error {
 		}
 		return runPromptMode(ctx, aiClient, session)
 	}
-	return runInteractiveMode(ctx, aiClient, session)
+	return runInteractiveMode(ctx, aiClient, session, toolMgr)
 }
 
 func runPromptMode(ctx context.Context, aiClient *ai.Client, session *chat.Session) error {
@@ -92,10 +98,10 @@ func runPromptMode(ctx context.Context, aiClient *ai.Client, session *chat.Sessi
 	return nil
 }
 
-func runInteractiveMode(ctx context.Context, aiClient *ai.Client, session *chat.Session) error {
+func runInteractiveMode(ctx context.Context, aiClient *ai.Client, session *chat.Session, toolMgr *tools.Manager) error {
 	serverNames := make([]string, 0, len(cfg.MCP.Servers))
 	for _, s := range cfg.MCP.Servers {
 		serverNames = append(serverNames, s.Name)
 	}
-	return ui.RunTUI(ctx, aiClient, session, cfg.AI.Model, serverNames)
+	return ui.RunTUI(ctx, aiClient, session, toolMgr, cfg.AI.Model, serverNames)
 }

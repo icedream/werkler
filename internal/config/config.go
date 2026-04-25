@@ -43,6 +43,7 @@ type MCPServerConfig struct {
 type MCPConfig struct {
 	Servers          []MCPServerConfig `mapstructure:"servers"`
 	AutoApproveTools []string          `mapstructure:"auto_approve_tools"`
+	AutoApprovePaths []string          `mapstructure:"auto_approve_paths"`
 }
 
 // AIConfig holds AI provider settings.

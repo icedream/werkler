@@ -27,7 +27,7 @@ func (m *mockCompleter) Complete(ctx context.Context, messages []ai.Message, too
 // newTestSession returns a Session with the given tool manager and no auto-approved tools,
 // paired with the same mockToolManager instance for assertion.
 func newTestSession(tm *mockToolManager, autoApprove []string) *chat.Session {
-	return chat.NewSession(tm, autoApprove)
+	return chat.NewSession(tm, autoApprove, nil)
 }
 
 // --- RunPrompt ---
