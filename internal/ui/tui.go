@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
@@ -95,10 +97,11 @@ type Model struct {
 	toolCallIdx map[string]int // callID → index in items
 
 	// UI components.
-	viewport viewport.Model
-	input    textinput.Model
-	spinner  spinner.Model
-	renderer *glamour.TermRenderer
+	viewport     viewport.Model
+	input        textinput.Model
+	spinner      spinner.Model
+	renderer     *glamour.TermRenderer
+	glamourStyle string // resolved once before TUI starts (dark/light)
 
 	// Terminal dimensions.
 	width  int
@@ -116,6 +119,7 @@ func initialModel(
 	tools []ai.ToolDefinition,
 	modelName string,
 	serverNames []string,
+	glamourStyle string,
 ) Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -127,18 +131,19 @@ func initialModel(
 	ti.Focus() // must be called here; Init() runs on a value copy so mutations there are lost
 
 	return Model{
-		ctx:         ctx,
-		client:      client,
-		session:     session,
-		tools:       tools,
-		messages:    chat.NewConversation(),
-		state:       stateIdle,
-		toolCallIdx: make(map[string]int),
-		viewport:    viewport.New(0, 0),
-		input:       ti,
-		spinner:     sp,
-		modelName:   modelName,
-		serverNames: serverNames,
+		ctx:          ctx,
+		client:       client,
+		session:      session,
+		tools:        tools,
+		messages:     chat.NewConversation(),
+		state:        stateIdle,
+		toolCallIdx:  make(map[string]int),
+		viewport:     viewport.New(0, 0),
+		input:        ti,
+		spinner:      sp,
+		modelName:    modelName,
+		serverNames:  serverNames,
+		glamourStyle: glamourStyle,
 	}
 }
 
@@ -241,7 +246,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = m.width
 		m.viewport.Height = vph
 		m.input.Width = m.width - 5 // 5 = len("You> ")
-		m.renderer = newGlamourRenderer(m.width - 4)
+		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
 		needRebuild = true
 
 	case spinner.TickMsg:
@@ -533,8 +538,27 @@ func RunTUI(
 		return fmt.Errorf("fetching tools: %w", err)
 	}
 
-	m := initialModel(ctx, client, session, tools, modelName, serverNames)
+	// Resolve glamour style before starting bubbletea. WithAutoStyle() sends an
+	// OSC 11 query to stdout; the terminal's response arrives on stdin and would
+	// be swallowed by bubbletea as garbage key input if done after p.Run().
+	glamourStyle := resolveGlamourStyle()
+
+	m := initialModel(ctx, client, session, tools, modelName, serverNames, glamourStyle)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
 	return err
+}
+
+// resolveGlamourStyle returns the glamour style name to use for markdown rendering.
+// It honours the GLAMOUR_STYLE environment variable, falling back to auto-detection
+// via lipgloss (safe to call before bubbletea starts since it queries the terminal
+// directly on real stdin/stdout before bubbletea intercepts them).
+func resolveGlamourStyle() string {
+	if s := os.Getenv("GLAMOUR_STYLE"); s != "" {
+		return s
+	}
+	if lipgloss.HasDarkBackground() {
+		return "dark"
+	}
+	return "light"
 }

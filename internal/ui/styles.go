@@ -60,12 +60,12 @@ func separator(width int) string {
 	return separatorStyle.Render(strings.Repeat("─", width))
 }
 
-func newGlamourRenderer(width int) *glamour.TermRenderer {
+func newGlamourRenderer(width int, style string) *glamour.TermRenderer {
 	if width < 20 {
 		width = 20
 	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStylePath(style),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
