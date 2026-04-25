@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -110,7 +111,7 @@ func (h *Handler) Authorize(ctx context.Context, req *http.Request, resp *http.R
 		return fmt.Errorf("no authorization servers found in protected resource metadata for %q", resourceURL)
 	}
 
-	asm, err := auth.GetAuthServerMetadata(ctx, prm.AuthorizationServers[0], http.DefaultClient)
+	asm, err := fetchAuthServerMeta(ctx, prm.AuthorizationServers[0])
 	if err != nil {
 		return fmt.Errorf("discovering authorization server metadata: %w", err)
 	}
@@ -287,4 +288,88 @@ func errorFromChallenges(cs []oauthex.Challenge) string {
 		}
 	}
 	return ""
+}
+
+// fetchAuthServerMeta fetches authorization server metadata for authServerURL,
+// tolerating servers (e.g. Atlassian) whose metadata document reports a canonical
+// issuer that differs from the URL used to retrieve it.
+//
+// The SDK's auth.GetAuthServerMetadata enforces RFC 8414 §3.3 (issuer must match
+// the lookup URL). Some deployments violate this by serving metadata at one hostname
+// while advertising a different canonical issuer. We handle this by:
+//  1. Trying the standard well-known URLs with the SDK (no issuer mismatch expected).
+//  2. On issuer-mismatch error: fetch the raw JSON ourselves, read the canonical
+//     issuer, and retry the SDK call with that issuer so the validation passes.
+func fetchAuthServerMeta(ctx context.Context, authServerURL string) (*oauthex.AuthServerMeta, error) {
+	// Happy path: SDK fetch with strict issuer validation.
+	asm, err := fetchAuthServerMetaStrict(ctx, authServerURL)
+	if err == nil {
+		return asm, nil // includes the nil-nil "not found" case
+	}
+
+	// On issuer mismatch: read the raw metadata to find the canonical issuer,
+	// then retry with that URL so the SDK's issuer check passes.
+	if !strings.Contains(err.Error(), "does not match issuer URL") {
+		return nil, err
+	}
+
+	wellKnown := authServerURL
+	u, parseErr := url.Parse(authServerURL)
+	if parseErr == nil && u.Path == "" {
+		u.Path = "/.well-known/oauth-authorization-server"
+		wellKnown = u.String()
+	}
+
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
+	if reqErr != nil {
+		return nil, err // return the original error
+	}
+	resp, doErr := http.DefaultClient.Do(req)
+	if doErr != nil || resp.StatusCode != http.StatusOK {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var raw struct {
+		Issuer string `json:"issuer"`
+	}
+	if jsonErr := json.NewDecoder(resp.Body).Decode(&raw); jsonErr != nil || raw.Issuer == "" {
+		return nil, err
+	}
+
+	// Retry with the canonical issuer URL the server actually reports.
+	return fetchAuthServerMetaStrict(ctx, raw.Issuer)
+}
+
+// fetchAuthServerMetaStrict calls the SDK's standard metadata discovery with strict issuer validation.
+func fetchAuthServerMetaStrict(ctx context.Context, issuerURL string) (*oauthex.AuthServerMeta, error) {
+	u, err := url.Parse(issuerURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid auth server URL %q: %w", issuerURL, err)
+	}
+	// Build the same well-known URLs the SDK uses.
+	candidates := []string{}
+	base := *u
+	if base.Path == "" {
+		base.Path = "/.well-known/oauth-authorization-server"
+		candidates = append(candidates, base.String())
+		base.Path = "/.well-known/openid-configuration"
+		candidates = append(candidates, base.String())
+	} else {
+		orig := base.Path
+		base.Path = "/.well-known/oauth-authorization-server/" + strings.TrimLeft(orig, "/")
+		candidates = append(candidates, base.String())
+		base.Path = "/.well-known/openid-configuration/" + strings.TrimLeft(orig, "/")
+		candidates = append(candidates, base.String())
+	}
+	for _, metaURL := range candidates {
+		asm, ferr := oauthex.GetAuthServerMeta(ctx, metaURL, issuerURL, http.DefaultClient)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if asm != nil {
+			return asm, nil
+		}
+	}
+	return nil, nil
 }
