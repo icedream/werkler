@@ -27,8 +27,9 @@ const fixedLines = 7
 type tuiState int
 
 const (
-	stateIdle tuiState = iota
-	stateThinking
+	stateIdle      tuiState = iota
+	stateThinking           // waiting for first token
+	stateStreaming          // tokens arriving
 	stateCallingTool
 	stateAwaitingApproval
 )
@@ -60,9 +61,11 @@ type displayItem struct {
 
 // --- Tea messages ---
 
-type aiResponseMsg struct {
-	msg ai.Message
-	err error
+// streamChunkMsg carries one StreamChunk from the AI stream, plus the channel
+// so Update can dispatch the next read without storing the channel in the model.
+type streamChunkMsg struct {
+	ch    <-chan ai.StreamChunk
+	chunk ai.StreamChunk
 }
 
 type toolResultMsg struct {
@@ -87,10 +90,11 @@ type Model struct {
 	messages []ai.Message
 
 	// Agent state machine.
-	state           tuiState
-	pendingCalls    []ai.ToolCall
-	currentCall     *ai.ToolCall
-	callingToolName string // name of tool currently executing (stateCallingTool)
+	state            tuiState
+	pendingCalls     []ai.ToolCall
+	currentCall      *ai.ToolCall
+	callingToolName  string // name of tool currently executing (stateCallingTool)
+	streamingItemIdx int    // index into items of the in-progress assistant item; -1 if none
 
 	// Display items for the viewport.
 	items       []displayItem
@@ -131,19 +135,20 @@ func initialModel(
 	ti.Focus() // must be called here; Init() runs on a value copy so mutations there are lost
 
 	return Model{
-		ctx:          ctx,
-		client:       client,
-		session:      session,
-		tools:        tools,
-		messages:     chat.NewConversation(),
-		state:        stateIdle,
-		toolCallIdx:  make(map[string]int),
-		viewport:     viewport.New(0, 0),
-		input:        ti,
-		spinner:      sp,
-		modelName:    modelName,
-		serverNames:  serverNames,
-		glamourStyle: glamourStyle,
+		ctx:              ctx,
+		client:           client,
+		session:          session,
+		tools:            tools,
+		messages:         chat.NewConversation(),
+		state:            stateIdle,
+		streamingItemIdx: -1,
+		toolCallIdx:      make(map[string]int),
+		viewport:         viewport.New(0, 0),
+		input:            ti,
+		spinner:          sp,
+		modelName:        modelName,
+		serverNames:      serverNames,
+		glamourStyle:     glamourStyle,
 	}
 }
 
@@ -222,7 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.items = append(m.items, displayItem{kind: itemUser, content: text})
 					m.state = stateThinking
 					needRebuild = true
-					cmds = append(cmds, doComplete(m.ctx, m.client, m.messages, m.tools))
+					cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
 				}
 			} else {
 				var inputCmd tea.Cmd
@@ -261,21 +266,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		cmds = append(cmds, spinCmd)
 
-	case aiResponseMsg:
-		if msg.err != nil {
-			m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
+	case streamChunkMsg:
+		chunk := msg.chunk
+		switch {
+		case chunk.Err != nil:
+			// Embed error in the streaming item if one exists, else add a new error item.
+			if m.streamingItemIdx >= 0 {
+				m.items[m.streamingItemIdx].content += "\n[stream error: " + chunk.Err.Error() + "]"
+				m.streamingItemIdx = -1
+			} else {
+				m.items = append(m.items, displayItem{kind: itemError, content: chunk.Err.Error()})
+			}
 			m.state = stateIdle
 			needRebuild = true
 			cmds = append(cmds, m.input.Focus())
-		} else {
-			m.messages = append(m.messages, msg.msg)
-			if len(msg.msg.ToolCalls) == 0 {
-				m.items = append(m.items, displayItem{kind: itemAssistant, content: msg.msg.Content})
+		case chunk.Done:
+			// Stream finished — append the full message to history and handle tool calls.
+			m.streamingItemIdx = -1
+			m.messages = append(m.messages, chunk.Msg)
+			if len(chunk.Msg.ToolCalls) == 0 {
 				m.state = stateIdle
 				needRebuild = true
 				cmds = append(cmds, m.input.Focus())
 			} else {
-				for _, tc := range msg.msg.ToolCalls {
+				for _, tc := range chunk.Msg.ToolCalls {
 					m.toolCallIdx[tc.ID] = len(m.items)
 					m.items = append(m.items, displayItem{
 						kind:       itemToolCall,
@@ -284,11 +298,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						toolStatus: toolStatusPending,
 					})
 				}
-				m.pendingCalls = append(m.pendingCalls, msg.msg.ToolCalls...)
+				m.pendingCalls = append(m.pendingCalls, chunk.Msg.ToolCalls...)
 				nextCmd := m.processNextCall()
 				needRebuild = true
 				cmds = append(cmds, nextCmd)
 			}
+		default:
+			// Delta — create streaming assistant item on first token, then append.
+			if m.streamingItemIdx < 0 {
+				m.streamingItemIdx = len(m.items)
+				m.items = append(m.items, displayItem{kind: itemAssistant, content: ""})
+				m.state = stateStreaming
+			}
+			m.items[m.streamingItemIdx].content += chunk.Delta
+			needRebuild = true
+			cmds = append(cmds, readNextChunk(msg.ch))
 		}
 
 	case toolResultMsg:
@@ -374,6 +398,8 @@ func (m Model) statusLines() (line1, line2 string) {
 	switch m.state {
 	case stateThinking:
 		return statusStyle.Render(m.spinner.View() + " Thinking…"), ""
+	case stateStreaming:
+		return statusStyle.Render(m.spinner.View() + " Streaming…"), ""
 	case stateCallingTool:
 		name := toolNameStyle.Render(m.callingToolName)
 		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name, ""
@@ -464,7 +490,7 @@ func (m Model) renderItem(item displayItem) string {
 func (m *Model) processNextCall() tea.Cmd {
 	if len(m.pendingCalls) == 0 {
 		m.state = stateThinking
-		return doComplete(m.ctx, m.client, m.messages, m.tools)
+		return doStartStream(m.ctx, m.client, m.messages, m.tools)
 	}
 
 	call := m.pendingCalls[0]
@@ -488,13 +514,27 @@ func (m *Model) processNextCall() tea.Cmd {
 
 // --- Tea commands ---
 
-func doComplete(ctx context.Context, client *ai.Client, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
-	// Snapshot the message slice so the goroutine doesn't share the model's slice.
+// doStartStream kicks off a streaming completion in a goroutine and returns
+// the first chunk as a streamChunkMsg (carrying the channel for further reads).
+func doStartStream(ctx context.Context, client *ai.Client, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
 	snapshot := make([]ai.Message, len(messages))
 	copy(snapshot, messages)
 	return func() tea.Msg {
-		msg, err := client.Complete(ctx, snapshot, tools)
-		return aiResponseMsg{msg, err}
+		ch := client.CompleteStream(ctx, snapshot, tools)
+		return readNextChunk(ch)()
+	}
+}
+
+// readNextChunk returns a Cmd that reads one chunk from ch and wraps it in a
+// streamChunkMsg (which carries ch so Update can dispatch the next read).
+func readNextChunk(ch <-chan ai.StreamChunk) tea.Cmd {
+	return func() tea.Msg {
+		chunk, ok := <-ch
+		if !ok {
+			// Channel closed without a Done chunk — treat as done with empty message.
+			return streamChunkMsg{ch: ch, chunk: ai.StreamChunk{Done: true}}
+		}
+		return streamChunkMsg{ch: ch, chunk: chunk}
 	}
 }
 
