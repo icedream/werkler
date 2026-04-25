@@ -200,3 +200,88 @@ func TestNewConversation_StartsWithSystem(t *testing.T) {
 	assert.Equal(t, "system", msgs[0].Role)
 	assert.NotEmpty(t, msgs[0].Content)
 }
+
+// --- SetToolEnabled / IsToolEnabled ---
+
+func TestIsToolEnabled_EnabledByDefault(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, nil)
+	assert.True(t, s.IsToolEnabled("any__tool"))
+}
+
+func TestSetToolEnabled_DisableAndReenable(t *testing.T) {
+	s := chat.NewSession(&mockToolManager{}, nil, nil)
+	s.SetToolEnabled("fs__read", false)
+	assert.False(t, s.IsToolEnabled("fs__read"))
+	assert.True(t, s.IsToolEnabled("fs__write"))
+	s.SetToolEnabled("fs__read", true)
+	assert.True(t, s.IsToolEnabled("fs__read"))
+}
+
+func TestTools_FiltersDisabledTools(t *testing.T) {
+	tm := &mockToolManager{}
+	allTools := []ai.ToolDefinition{
+		{Name: "fs__read", Description: "read"},
+		{Name: "fs__write", Description: "write"},
+		{Name: "git__log", Description: "log"},
+	}
+	tm.On("Tools", mock.Anything).Return(allTools, nil)
+
+	s := chat.NewSession(tm, nil, nil)
+	s.SetToolEnabled("fs__write", false)
+
+	tools, err := s.Tools(context.Background())
+	require.NoError(t, err)
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	assert.Equal(t, []string{"fs__read", "git__log"}, names)
+	tm.AssertExpectations(t)
+}
+
+func TestTools_AllEnabledReturnsAll(t *testing.T) {
+	tm := &mockToolManager{}
+	allTools := []ai.ToolDefinition{
+		{Name: "fs__read"},
+		{Name: "git__log"},
+	}
+	tm.On("Tools", mock.Anything).Return(allTools, nil)
+
+	s := chat.NewSession(tm, nil, nil)
+	tools, err := s.Tools(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, tools, 2)
+}
+
+func TestCallTool_RejectsDisabledTool(t *testing.T) {
+	tm := &mockToolManager{}
+	// CallTool on the manager should NOT be called for disabled tools.
+
+	s := chat.NewSession(tm, nil, nil)
+	s.SetToolEnabled("danger__tool", false)
+
+	result, err := s.CallTool(context.Background(), ai.ToolCall{
+		ID:   "x",
+		Name: "danger__tool",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, result, "disabled")
+	tm.AssertNotCalled(t, "CallTool", mock.Anything, "danger__tool", mock.Anything)
+}
+
+func TestAllTools_IgnoresDisabledFilter(t *testing.T) {
+	tm := &mockToolManager{}
+	allTools := []ai.ToolDefinition{
+		{Name: "fs__read"},
+		{Name: "fs__write"},
+	}
+	tm.On("Tools", mock.Anything).Return(allTools, nil)
+
+	s := chat.NewSession(tm, nil, nil)
+	s.SetToolEnabled("fs__write", false)
+
+	// AllTools should return all tools regardless of disabled state.
+	tools, err := s.AllTools(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, tools, 2)
+}
