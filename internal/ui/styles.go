@@ -97,6 +97,14 @@ var (
 	queueCountStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39")).
 			Bold(true)
+
+	choiceSelectedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("212"))
+
+	choiceRecommendedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("42")).
+				Italic(true)
 )
 
 func separator(width int) string {

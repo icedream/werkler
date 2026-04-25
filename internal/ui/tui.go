@@ -52,6 +52,7 @@ const (
 	stateConnectingOAuth      // running deferred OAuth server connections
 	statePickingModel         // model selection list is open
 	statePickingSession       // session picker list is open
+	stateAwaitingUserQuestion // AI asked a question; waiting for the user's reply
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -62,6 +63,8 @@ func inputPlaceholder(state tuiState) string {
 		return "Approve the tool call above (y / n / a)…"
 	case stateAwaitingPathApproval:
 		return "Approve path access (y / n / a)…"
+	case stateAwaitingUserQuestion:
+		return "Use ↑/↓ to select a choice, Enter to confirm…"
 	case stateConnectingOAuth:
 		return "Waiting for authorization in browser…"
 	case statePickingModel, statePickingSession:
@@ -82,6 +85,7 @@ const (
 	itemError         = "error"
 	itemInfo          = "info"        // neutral status/system messages
 	itemProcessOutput = "proc_output" // live process output streamed into viewport
+	itemAskUser       = "ask_user"    // ask_user tool waiting for a response
 )
 
 const (
@@ -156,6 +160,24 @@ type sessionSavedMsg struct{}
 type sessionsListMsg struct {
 	sessions []sessionstore.Session
 	err      error
+}
+
+// askUserResult carries the user's reply (or context error) back to the blocked
+// tool goroutine.
+type askUserResult struct {
+	answer string
+	err    error
+}
+
+// askUserMsg is sent by the ask_user tool goroutine to the TUI so it can present
+// the question and collect a reply. resultCh is buffered (capacity 1).
+type askUserMsg struct {
+	callID        string
+	question      string
+	choices       []string
+	recommended   string
+	allowFreeform bool
+	resultCh      chan<- askUserResult
 }
 
 // modelItem implements list.Item for a model picker entry.
@@ -315,6 +337,17 @@ type Model struct {
 	// Shown in the status bar until the first message is sent.
 	resumeHint *sessionstore.Session
 
+	// ask_user state (stateAwaitingUserQuestion).
+	askUserCallID        string
+	askUserQuestion      string
+	askUserChoices       []string
+	askUserRecommended   string
+	askUserAllowFreeform bool
+	askUserSelectedIdx   int // index of highlighted choice; -1 = freeform input active
+	askUserItemIdx       int // index of the question display item in items; -1 if none
+	askUserResultCh      chan<- askUserResult
+	askUserSavedDraft    string // input text saved on entry, restored on exit
+
 	// UI components.
 	viewport     viewport.Model
 	input        textinput.Model
@@ -385,27 +418,29 @@ func initialModel(
 	cwd, _ := os.Getwd()
 
 	return Model{
-		ctx:              ctx,
-		client:           client,
-		session:          session,
-		tools:            tools,
-		send:             send,
-		modelManager:     mm,
-		messages:         chat.NewConversation(),
-		state:            stateIdle,
-		streamingItemIdx: -1,
-		oauthInfoIdx:     -1,
-		toolCallIdx:      make(map[string]int),
-		viewport:         viewport.New(0, 0),
-		modelPicker:      picker,
-		sessionPicker:    sessPicker,
-		input:            ti,
-		spinner:          sp,
-		modelName:        modelName,
-		serverNames:      serverNames,
-		glamourStyle:     glamourStyle,
-		mouseEnabled:     true,
-		sessionCWD:       cwd,
+		ctx:                ctx,
+		client:             client,
+		session:            session,
+		tools:              tools,
+		send:               send,
+		modelManager:       mm,
+		messages:           chat.NewConversation(),
+		state:              stateIdle,
+		streamingItemIdx:   -1,
+		oauthInfoIdx:       -1,
+		askUserSelectedIdx: -1,
+		askUserItemIdx:     -1,
+		toolCallIdx:        make(map[string]int),
+		viewport:           viewport.New(0, 0),
+		modelPicker:        picker,
+		sessionPicker:      sessPicker,
+		input:              ti,
+		spinner:            sp,
+		modelName:          modelName,
+		serverNames:        serverNames,
+		glamourStyle:       glamourStyle,
+		mouseEnabled:       true,
+		sessionCWD:         cwd,
 	}
 }
 
@@ -798,6 +833,76 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport, vpCmd = m.viewport.Update(msg)
 				cmds = append(cmds, vpCmd)
 			}
+
+		case stateAwaitingUserQuestion:
+			switch msg.Type {
+			case tea.KeyUp:
+				if len(m.askUserChoices) > 0 {
+					switch {
+					case m.askUserSelectedIdx > 0:
+						m.askUserSelectedIdx--
+					case m.askUserAllowFreeform && m.askUserSelectedIdx == 0:
+						m.askUserSelectedIdx = -1 // back to freeform
+					default:
+						m.askUserSelectedIdx = len(m.askUserChoices) - 1 // wrap (no-freeform)
+					}
+					needRebuild = true
+				}
+			case tea.KeyDown:
+				if len(m.askUserChoices) > 0 {
+					switch {
+					case m.askUserSelectedIdx < len(m.askUserChoices)-1:
+						m.askUserSelectedIdx++
+					case m.askUserAllowFreeform:
+						m.askUserSelectedIdx = -1 // past last = freeform
+					default:
+						m.askUserSelectedIdx = 0 // wrap (no-freeform)
+					}
+					needRebuild = true
+				}
+			case tea.KeyEnter:
+				var answer string
+				var readyToSubmit bool
+				switch {
+				case m.askUserSelectedIdx >= 0:
+					answer = m.askUserChoices[m.askUserSelectedIdx]
+					readyToSubmit = true
+				case m.askUserAllowFreeform:
+					answer = strings.TrimSpace(m.input.Value())
+					readyToSubmit = answer != ""
+				}
+				if !readyToSubmit {
+					break
+				}
+				// Finalise the display item to show the chosen answer.
+				if m.askUserItemIdx >= 0 && m.askUserItemIdx < len(m.items) {
+					m.items[m.askUserItemIdx] = displayItem{
+						kind:    itemInfo,
+						content: "❓ " + m.askUserQuestion + "\n\n→ " + answer,
+					}
+				}
+				ch := m.askUserResultCh
+				m.teardownAskUser()
+				m.state = stateCallingTool
+				needRebuild = true
+				if ch != nil {
+					ch <- askUserResult{answer: answer}
+				}
+			default:
+				if m.askUserAllowFreeform || len(m.askUserChoices) == 0 {
+					// Typing any rune deselects any highlighted choice.
+					if msg.Type == tea.KeyRunes && m.askUserSelectedIdx >= 0 {
+						m.askUserSelectedIdx = -1
+						needRebuild = true
+					}
+					var inputCmd tea.Cmd
+					m.input, inputCmd = m.input.Update(msg)
+					cmds = append(cmds, inputCmd)
+				}
+				var vpCmd tea.Cmd
+				m.viewport, vpCmd = m.viewport.Update(msg)
+				cmds = append(cmds, vpCmd)
+			}
 		}
 
 	case tea.MouseMsg:
@@ -852,6 +957,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionPicker.SetSize(m.width, m.height-fixedLines)
 			}
 		}
+
+	case askUserMsg:
+		// Guard against stale messages that arrive after the call already finished
+		// (e.g. context was cancelled between send and receive).
+		if m.executingCall == nil || m.executingCall.ID != msg.callID {
+			break
+		}
+		m.askUserCallID = msg.callID
+		m.askUserQuestion = msg.question
+		m.askUserChoices = msg.choices
+		m.askUserRecommended = msg.recommended
+		m.askUserAllowFreeform = msg.allowFreeform
+
+		// Pre-select only when freeform is disabled; otherwise just mark recommended.
+		m.askUserSelectedIdx = -1
+		if !msg.allowFreeform && len(msg.choices) > 0 {
+			m.askUserSelectedIdx = 0
+			for i, c := range msg.choices {
+				if c == msg.recommended {
+					m.askUserSelectedIdx = i
+					break
+				}
+			}
+		}
+
+		// Save and reset the input so the user's draft doesn't bleed into the answer.
+		m.askUserSavedDraft = m.input.Value()
+		m.input.Reset()
+		if msg.allowFreeform {
+			m.input.Placeholder = "Type a custom answer, or ↑/↓ to select a choice…"
+		} else {
+			m.input.Placeholder = "Use ↑/↓ to select a choice and press Enter…"
+		}
+
+		m.askUserResultCh = msg.resultCh
+		m.state = stateAwaitingUserQuestion
+		m.askUserItemIdx = len(m.items)
+		m.items = append(m.items, displayItem{kind: itemAskUser})
+		needRebuild = true
 
 	case processOutputMsg:
 		// Live process output: append (or extend) a process output display item.
@@ -959,6 +1103,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case toolResultMsg:
+		// If a toolResultMsg arrives while we're still showing the ask_user prompt
+		// (e.g. ctx was cancelled), tear down the question display gracefully.
+		if m.state == stateAwaitingUserQuestion {
+			if m.askUserItemIdx >= 0 && m.askUserItemIdx < len(m.items) {
+				m.items[m.askUserItemIdx] = displayItem{
+					kind:    itemInfo,
+					content: "❓ " + m.askUserQuestion + " (cancelled)",
+				}
+			}
+			m.teardownAskUser()
+			// needRebuild is set by the toolResultMsg error/success branches below.
+		}
 		if msg.err != nil {
 			debugLog("toolResult: error tool=%q err=%v", msg.toolName, msg.err)
 			// Check if this is a path approval request from the tools manager.
@@ -1168,6 +1324,17 @@ func (m Model) statusLines() (line1, line2 string) {
 			keyHintStyle.Render("[n]") + "o  " +
 			keyHintStyle.Render("[a]") + "lways"
 		return l1, l2
+	case stateAwaitingUserQuestion:
+		l1 := approvalPromptStyle.Render("  ❓ AI is asking a question")
+		l2 := "  "
+		if len(m.askUserChoices) > 0 {
+			l2 += keyHintStyle.Render("[↑/↓]") + " navigate  "
+		}
+		l2 += keyHintStyle.Render("[Enter]") + " confirm"
+		if m.askUserAllowFreeform {
+			l2 += "  " + keyHintStyle.Render("[type]") + " custom answer"
+		}
+		return l1, l2
 	default:
 		mouseHint := "  " + keyHintStyle.Render("alt+m") + " select text"
 		if !m.mouseEnabled {
@@ -1292,6 +1459,35 @@ func (m Model) renderItem(item displayItem) string {
 		// Raw output may contain ANSI codes, display as-is.
 		return prefix + "\n" + item.content
 
+	case itemAskUser:
+		var sb strings.Builder
+		sb.WriteString(approvalPromptStyle.Render("❓") + "  " + m.askUserQuestion)
+		for i, choice := range m.askUserChoices {
+			sb.WriteString("\n")
+			rec := choice == m.askUserRecommended
+			if i == m.askUserSelectedIdx {
+				line := choiceSelectedStyle.Render(fmt.Sprintf("  ▶ %d. %s", i+1, choice))
+				if rec {
+					line += "  " + choiceRecommendedStyle.Render("(Recommended)")
+				}
+				sb.WriteString(line)
+			} else {
+				line := fmt.Sprintf("  %d. %s", i+1, choice)
+				if rec {
+					line += "  " + choiceRecommendedStyle.Render("(Recommended)")
+				}
+				sb.WriteString(line)
+			}
+		}
+		if m.askUserAllowFreeform {
+			if m.askUserSelectedIdx == -1 {
+				sb.WriteString("\n  " + choiceSelectedStyle.Render("▶ Custom answer"))
+			} else {
+				sb.WriteString("\n  " + statusStyle.Render("(or type a custom answer)"))
+			}
+		}
+		return sb.String()
+
 	default:
 		return item.content
 	}
@@ -1306,6 +1502,21 @@ func (m *Model) approvePathRequest(req chat.PathAccessRequest) {
 	} else {
 		m.session.ApprovePathReadForSession(req.Path)
 	}
+}
+
+// teardownAskUser clears all ask_user state and restores the saved input draft.
+// Callers are responsible for updating the display item and setting m.state.
+func (m *Model) teardownAskUser() {
+	m.askUserCallID = ""
+	m.askUserQuestion = ""
+	m.askUserChoices = nil
+	m.askUserRecommended = ""
+	m.askUserResultCh = nil
+	m.askUserItemIdx = -1
+	m.askUserSelectedIdx = -1
+	m.input.SetValue(m.askUserSavedDraft)
+	m.askUserSavedDraft = ""
+	m.syncViewportHeight()
 }
 
 // processNextPath advances the path approval queue.
@@ -1365,7 +1576,9 @@ func (m *Model) processNextCall() tea.Cmd {
 	m.currentCall = &callCopy
 
 	debugLog("processNextCall: dispatching tool=%q id=%q approved=%v", call.Name, call.ID, m.session.IsApproved(call.Name))
-	if m.session.IsApproved(call.Name) {
+	// ask_user is always dispatched immediately — it suspends the goroutine and
+	// transfers control to the TUI directly, so no approval dialog is needed.
+	if m.session.IsApproved(call.Name) || call.Name == "ask_user" {
 		if idx, ok := m.toolCallIdx[call.ID]; ok {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
@@ -1652,6 +1865,25 @@ func RunTUI(
 	if toolMgr != nil {
 		toolMgr.SetOutputNotify(func(handle, raw, clean string) {
 			sendFn(processOutputMsg{handle: handle, raw: raw, clean: clean})
+		})
+		toolMgr.SetUserAsker(func(ctx context.Context, question string, choices []string, recommended string, allowFreeform bool) (string, error) {
+			resultCh := make(chan askUserResult, 1)
+			if m.executingCall != nil {
+				sendFn(askUserMsg{
+					callID:        m.executingCall.ID,
+					question:      question,
+					choices:       choices,
+					recommended:   recommended,
+					allowFreeform: allowFreeform,
+					resultCh:      resultCh,
+				})
+			}
+			select {
+			case r := <-resultCh:
+				return r.answer, r.err
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
 		})
 	}
 
