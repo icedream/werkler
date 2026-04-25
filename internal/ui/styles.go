@@ -90,6 +90,10 @@ var (
 	inputPrefixStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("244"))
 
+	processHandleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("36"))
+
 	queueCountStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39")).
 			Bold(true)

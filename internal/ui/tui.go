@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
+	"github.com/icedream/werkler/internal/tools"
 )
 
 // fixedLines is the number of terminal lines consumed by non-viewport UI elements:
@@ -44,8 +46,9 @@ const (
 	stateStreaming          // tokens arriving
 	stateCallingTool
 	stateAwaitingApproval
-	stateConnectingOAuth // running deferred OAuth server connections
-	statePickingModel    // model selection list is open
+	stateAwaitingPathApproval // waiting for user to approve a path access
+	stateConnectingOAuth      // running deferred OAuth server connections
+	statePickingModel         // model selection list is open
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -54,6 +57,8 @@ func inputPlaceholder(state tuiState) string {
 	switch state {
 	case stateAwaitingApproval:
 		return "Approve the tool call above (y / n / a)…"
+	case stateAwaitingPathApproval:
+		return "Approve path access (y / n / a)…"
 	case stateConnectingOAuth:
 		return "Waiting for authorization in browser…"
 	case statePickingModel:
@@ -68,11 +73,12 @@ func inputPlaceholder(state tuiState) string {
 // --- Display item kinds and statuses ---
 
 const (
-	itemUser      = "user"
-	itemAssistant = "assistant"
-	itemToolCall  = "tool_call"
-	itemError     = "error"
-	itemInfo      = "info" // neutral status/system messages
+	itemUser          = "user"
+	itemAssistant     = "assistant"
+	itemToolCall      = "tool_call"
+	itemError         = "error"
+	itemInfo          = "info"        // neutral status/system messages
+	itemProcessOutput = "proc_output" // live process output streamed into viewport
 )
 
 const (
@@ -89,6 +95,7 @@ type displayItem struct {
 	toolName   string
 	toolArgs   string // compact JSON args
 	toolStatus int
+	handle     string // process handle (itemProcessOutput only)
 }
 
 // --- Tea messages ---
@@ -128,6 +135,13 @@ type oauthConnectFailedMsg struct{ err error }
 
 type modelsLoadedMsg struct{ models []string }
 type modelsErrMsg struct{ err error }
+
+// processOutputMsg carries new output from a running process for live display.
+type processOutputMsg struct {
+	handle string
+	raw    string // ANSI-preserved for display
+	clean  string // ANSI-stripped (used for AI, not displayed)
+}
 
 // modelItem implements list.Item for a model name string.
 type modelItem string
@@ -235,6 +249,11 @@ type Model struct {
 	currentCall      *ai.ToolCall
 	callingToolName  string // name of tool currently executing (stateCallingTool)
 	streamingItemIdx int    // index into items of the in-progress assistant item; -1 if none
+
+	// Path approval state (stateAwaitingPathApproval).
+	pendingPathApprovals  []string     // remaining paths needing approval
+	currentPath           string       // path currently shown in the dialog
+	pendingCallAfterPaths *ai.ToolCall // tool call to dispatch once all paths are approved
 
 	// Queue of user prompts entered while the AI is busy.
 	// Processed FIFO after the current agent turn completes successfully.
@@ -428,6 +447,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch m.state {
+		case stateAwaitingPathApproval:
+			if m.currentPath != "" {
+				switch msg.String() {
+				case "y", "Y":
+					m.session.ApprovePathForSession(m.currentPath)
+					m.currentPath = ""
+					cmds = append(cmds, m.processNextPath())
+					needRebuild = true
+				case "a", "A":
+					// Approve all remaining paths at once.
+					m.session.ApprovePathForSession(m.currentPath)
+					for _, p := range m.pendingPathApprovals {
+						m.session.ApprovePathForSession(p)
+					}
+					m.pendingPathApprovals = nil
+					m.currentPath = ""
+					cmds = append(cmds, m.processNextPath())
+					needRebuild = true
+				case "n", "N":
+					// Deny: clear path queue, deny the pending tool call.
+					m.pendingPathApprovals = nil
+					m.currentPath = ""
+					if m.pendingCallAfterPaths != nil {
+						call := *m.pendingCallAfterPaths
+						m.pendingCallAfterPaths = nil
+						if idx, ok := m.toolCallIdx[call.ID]; ok {
+							m.items[idx].toolStatus = toolStatusDenied
+						}
+						m.messages = append(m.messages, ai.Message{
+							Role:       "tool",
+							ToolCallID: call.ID,
+							Content:    "(tool call was denied — path access was not approved)",
+						})
+						m.currentCall = nil
+						nextCmd := m.processNextCall()
+						needRebuild = true
+						cmds = append(cmds, nextCmd)
+					} else {
+						m.state = stateIdle
+					}
+				default:
+					var vpCmd tea.Cmd
+					m.viewport, vpCmd = m.viewport.Update(msg)
+					cmds = append(cmds, vpCmd)
+				}
+			}
+
 		case stateAwaitingApproval:
 			if m.currentCall != nil {
 				switch msg.String() {
@@ -667,6 +733,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 		}
 
+	case processOutputMsg:
+		// Live process output: append (or extend) a process output display item.
+		// Find the last item for this handle; if it exists and is the last item,
+		// extend it — otherwise create a new one.
+		found := false
+		if n := len(m.items); n > 0 {
+			last := &m.items[n-1]
+			if last.kind == itemProcessOutput && last.handle == msg.handle {
+				last.content += msg.raw
+				found = true
+			}
+		}
+		if !found {
+			m.items = append(m.items, displayItem{
+				kind:    itemProcessOutput,
+				handle:  msg.handle,
+				content: msg.raw,
+			})
+		}
+		needRebuild = true
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -750,17 +837,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolResultMsg:
 		if msg.err != nil {
 			debugLog("toolResult: error tool=%q err=%v", msg.toolName, msg.err)
-			// Tool execution error: go idle but keep queued prompts intact.
-			if idx, ok := m.toolCallIdx[msg.callID]; ok {
-				m.items[idx].toolStatus = toolStatusFailed
+			// Check if this is a path approval request from the tools manager.
+			var pathErr *tools.UnapprovedPathsError
+			if errors.As(msg.err, &pathErr) && m.currentCall != nil {
+				// Queue path approvals; once all paths are approved the call re-runs.
+				m.pendingCallAfterPaths = m.currentCall
+				m.currentCall = nil
+				m.pendingPathApprovals = pathErr.Paths[1:] // first path shown immediately
+				m.currentPath = pathErr.Paths[0]
+				m.state = stateAwaitingPathApproval
+				needRebuild = true
+			} else {
+				// Tool execution error: go idle but keep queued prompts intact.
+				if idx, ok := m.toolCallIdx[msg.callID]; ok {
+					m.items[idx].toolStatus = toolStatusFailed
+				}
+				m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
+				m.callingToolName = ""
+				m.pendingCalls = nil
+				m.currentCall = nil
+				m.state = stateIdle
+				needRebuild = true
+				cmds = append(cmds, m.input.Focus())
 			}
-			m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
-			m.callingToolName = ""
-			m.pendingCalls = nil
-			m.currentCall = nil
-			m.state = stateIdle
-			needRebuild = true
-			cmds = append(cmds, m.input.Focus())
 		} else {
 			debugLog("toolResult: ok tool=%q result=%q", msg.toolName, msg.result[:min(len(msg.result), 80)])
 			if idx, ok := m.toolCallIdx[msg.callID]; ok {
@@ -906,6 +1005,20 @@ func (m Model) statusLines() (line1, line2 string) {
 	case stateCallingTool:
 		name := toolNameStyle.Render(m.callingToolName)
 		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + queueHint, ""
+	case stateAwaitingPathApproval:
+		if m.currentPath == "" {
+			return "", ""
+		}
+		l1 := approvalPromptStyle.Render("  Allow path access: ") + m.currentPath
+		remaining := len(m.pendingPathApprovals)
+		if remaining > 0 {
+			l1 += statusStyle.Render(fmt.Sprintf(" (+%d more)", remaining))
+		}
+		l2 := approvalPromptStyle.Render("Allow? ") +
+			keyHintStyle.Render("[y]") + "es  " +
+			keyHintStyle.Render("[n]") + "o  " +
+			keyHintStyle.Render("[a]") + "ll remaining"
+		return l1, l2
 	case stateAwaitingApproval:
 		if m.currentCall == nil {
 			return "", ""
@@ -1026,12 +1139,42 @@ func (m Model) renderItem(item displayItem) string {
 	case itemInfo:
 		return infoStyle.Render(item.content)
 
+	case itemProcessOutput:
+		prefix := processHandleStyle.Render("[process:" + item.handle + "]")
+		// Raw output may contain ANSI codes, display as-is.
+		return prefix + "\n" + item.content
+
 	default:
 		return item.content
 	}
 }
 
 // --- Agent loop helpers ---
+
+// processNextPath advances the path approval queue.
+// When all paths are approved, dispatch the pending tool call.
+// Must only be called from Update.
+func (m *Model) processNextPath() tea.Cmd {
+	if len(m.pendingPathApprovals) > 0 {
+		m.currentPath = m.pendingPathApprovals[0]
+		m.pendingPathApprovals = m.pendingPathApprovals[1:]
+		m.state = stateAwaitingPathApproval
+		return nil
+	}
+	// All paths approved — proceed with the pending tool call.
+	m.state = stateIdle
+	if m.pendingCallAfterPaths != nil {
+		call := *m.pendingCallAfterPaths
+		m.pendingCallAfterPaths = nil
+		if idx, ok := m.toolCallIdx[call.ID]; ok {
+			m.items[idx].toolStatus = toolStatusRunning
+		}
+		m.callingToolName = call.Name
+		m.state = stateCallingTool
+		return doCallTool(m.ctx, m.session, call)
+	}
+	return m.input.Focus()
+}
 
 // processQueueOrIdle is called when an AI turn finishes successfully.
 // If queued prompts exist, the next one is dequeued and sent immediately,
@@ -1168,6 +1311,7 @@ func RunTUI(
 	ctx context.Context,
 	client ai.StreamCompleter,
 	session *chat.Session,
+	toolMgr *tools.Manager,
 	modelName string,
 	serverNames []string,
 ) error {
@@ -1211,6 +1355,13 @@ func RunTUI(
 	// Update the send field on the already-constructed model so it references the
 	// real function.
 	m.send = sendFn
+
+	// Wire live process output from the tools manager into the TUI.
+	if toolMgr != nil {
+		toolMgr.SetOutputNotify(func(handle, raw, clean string) {
+			sendFn(processOutputMsg{handle: handle, raw: raw, clean: clean})
+		})
+	}
 
 	prog = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = prog.Run()

@@ -35,17 +35,21 @@ type oauthManager interface {
 // Session manages tool approval state for a chat session.
 // It does not own conversation history; callers manage their own message lists.
 type Session struct {
-	tools           ToolManager
-	autoApprove     []string // glob patterns for pre-approved tools
-	sessionApproved map[string]bool
+	tools                ToolManager
+	autoApprove          []string // glob patterns for pre-approved tools
+	sessionApproved      map[string]bool
+	autoApprovePaths     []string // glob patterns for pre-approved paths
+	sessionApprovedPaths map[string]bool
 }
 
 // NewSession creates a Session with the given tool manager and auto-approve glob patterns.
-func NewSession(tools ToolManager, autoApproveGlobs []string) *Session {
+func NewSession(tools ToolManager, autoApproveGlobs []string, autoApprovePaths []string) *Session {
 	return &Session{
-		tools:           tools,
-		autoApprove:     autoApproveGlobs,
-		sessionApproved: make(map[string]bool),
+		tools:                tools,
+		autoApprove:          autoApproveGlobs,
+		sessionApproved:      make(map[string]bool),
+		autoApprovePaths:     autoApprovePaths,
+		sessionApprovedPaths: make(map[string]bool),
 	}
 }
 
@@ -73,6 +77,24 @@ func (s *Session) CallTool(ctx context.Context, tc ai.ToolCall) (string, error) 
 		return fmt.Sprintf("error: %v", err), nil
 	}
 	return result, nil
+}
+
+// IsPathApproved returns true if the path may be accessed without interactive approval.
+func (s *Session) IsPathApproved(path string) bool {
+	if s.sessionApprovedPaths[path] {
+		return true
+	}
+	for _, pattern := range s.autoApprovePaths {
+		if matched, _ := filepath.Match(pattern, path); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// ApprovePathForSession adds path to the session-level approved set.
+func (s *Session) ApprovePathForSession(path string) {
+	s.sessionApprovedPaths[path] = true
 }
 
 // IsApproved returns true if the tool can be called without interactive user approval.
