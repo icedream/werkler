@@ -251,9 +251,9 @@ type Model struct {
 	streamingItemIdx int    // index into items of the in-progress assistant item; -1 if none
 
 	// Path approval state (stateAwaitingPathApproval).
-	pendingPathApprovals  []string     // remaining paths needing approval
-	currentPath           string       // path currently shown in the dialog
-	pendingCallAfterPaths *ai.ToolCall // tool call to dispatch once all paths are approved
+	pendingPathApprovals  []chat.PathAccessRequest // remaining paths needing approval
+	currentPathRequest    chat.PathAccessRequest   // request currently shown in the dialog
+	pendingCallAfterPaths *ai.ToolCall             // tool call to dispatch once all paths are approved
 
 	// Queue of user prompts entered while the AI is busy.
 	// Processed FIFO after the current agent turn completes successfully.
@@ -448,27 +448,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch m.state {
 		case stateAwaitingPathApproval:
-			if m.currentPath != "" {
+			if m.currentPathRequest.Path != "" {
 				switch msg.String() {
 				case "y", "Y":
-					m.session.ApprovePathForSession(m.currentPath)
-					m.currentPath = ""
+					m.approvePathRequest(m.currentPathRequest)
+					m.currentPathRequest = chat.PathAccessRequest{}
 					cmds = append(cmds, m.processNextPath())
 					needRebuild = true
 				case "a", "A":
-					// Approve all remaining paths at once.
-					m.session.ApprovePathForSession(m.currentPath)
-					for _, p := range m.pendingPathApprovals {
-						m.session.ApprovePathForSession(p)
+					// Approve current and all remaining paths at once.
+					m.approvePathRequest(m.currentPathRequest)
+					for _, req := range m.pendingPathApprovals {
+						m.approvePathRequest(req)
 					}
 					m.pendingPathApprovals = nil
-					m.currentPath = ""
+					m.currentPathRequest = chat.PathAccessRequest{}
 					cmds = append(cmds, m.processNextPath())
 					needRebuild = true
 				case "n", "N":
 					// Deny: clear path queue, deny the pending tool call.
 					m.pendingPathApprovals = nil
-					m.currentPath = ""
+					m.currentPathRequest = chat.PathAccessRequest{}
 					if m.pendingCallAfterPaths != nil {
 						call := *m.pendingCallAfterPaths
 						m.pendingCallAfterPaths = nil
@@ -838,13 +838,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			debugLog("toolResult: error tool=%q err=%v", msg.toolName, msg.err)
 			// Check if this is a path approval request from the tools manager.
-			var pathErr *tools.UnapprovedPathsError
+			var pathErr chat.PathApprovalError
 			if errors.As(msg.err, &pathErr) && m.currentCall != nil {
+				reqs := pathErr.AccessRequests()
 				// Queue path approvals; once all paths are approved the call re-runs.
 				m.pendingCallAfterPaths = m.currentCall
 				m.currentCall = nil
-				m.pendingPathApprovals = pathErr.Paths[1:] // first path shown immediately
-				m.currentPath = pathErr.Paths[0]
+				m.currentPathRequest = reqs[0]
+				m.pendingPathApprovals = reqs[1:]
 				m.state = stateAwaitingPathApproval
 				needRebuild = true
 			} else {
@@ -1006,10 +1007,14 @@ func (m Model) statusLines() (line1, line2 string) {
 		name := toolNameStyle.Render(m.callingToolName)
 		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + queueHint, ""
 	case stateAwaitingPathApproval:
-		if m.currentPath == "" {
+		if m.currentPathRequest.Path == "" {
 			return "", ""
 		}
-		l1 := approvalPromptStyle.Render("  Allow path access: ") + m.currentPath
+		accessKind := "read"
+		if m.currentPathRequest.Write {
+			accessKind = "write"
+		}
+		l1 := approvalPromptStyle.Render(fmt.Sprintf("  Allow %s access: ", accessKind)) + m.currentPathRequest.Path
 		remaining := len(m.pendingPathApprovals)
 		if remaining > 0 {
 			l1 += statusStyle.Render(fmt.Sprintf(" (+%d more)", remaining))
@@ -1151,12 +1156,21 @@ func (m Model) renderItem(item displayItem) string {
 
 // --- Agent loop helpers ---
 
+// approvePathRequest calls the appropriate session approval method based on the request's Write flag.
+func (m *Model) approvePathRequest(req chat.PathAccessRequest) {
+	if req.Write {
+		m.session.ApprovePathWriteForSession(req.Path)
+	} else {
+		m.session.ApprovePathReadForSession(req.Path)
+	}
+}
+
 // processNextPath advances the path approval queue.
 // When all paths are approved, dispatch the pending tool call.
 // Must only be called from Update.
 func (m *Model) processNextPath() tea.Cmd {
 	if len(m.pendingPathApprovals) > 0 {
-		m.currentPath = m.pendingPathApprovals[0]
+		m.currentPathRequest = m.pendingPathApprovals[0]
 		m.pendingPathApprovals = m.pendingPathApprovals[1:]
 		m.state = stateAwaitingPathApproval
 		return nil

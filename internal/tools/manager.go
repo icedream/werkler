@@ -12,6 +12,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -19,26 +21,38 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/process"
 )
 
-// PathApprover checks and records path-level access approvals.
+// PathApprover checks path-level access approvals.
 type PathApprover interface {
-	IsPathApproved(path string) bool
-	ApprovePathForSession(path string)
+	IsPathReadApproved(path string) bool
+	IsPathWriteApproved(path string) bool
 }
 
 // UnapprovedPathsError is returned by CallTool when one or more paths accessed
-// by a process tool have not been approved by the user.
+// by a built-in tool have not been approved by the user.
+// It implements chat.PathApprovalError so Session.CallTool propagates it as a
+// structured error to the TUI.
 type UnapprovedPathsError struct {
-	Paths []string
+	Requests []chat.PathAccessRequest
 }
 
 func (e *UnapprovedPathsError) Error() string {
-	return fmt.Sprintf("path access not approved: %s", strings.Join(e.Paths, ", "))
+	paths := make([]string, len(e.Requests))
+	for i, r := range e.Requests {
+		paths[i] = r.Path
+	}
+	return fmt.Sprintf("path access not approved: %s", strings.Join(paths, ", "))
+}
+
+// AccessRequests implements chat.PathApprovalError.
+func (e *UnapprovedPathsError) AccessRequests() []chat.PathAccessRequest {
+	return e.Requests
 }
 
 // oauthManager mirrors the optional interface on mcp.Manager that Session delegates.
@@ -248,19 +262,65 @@ func resolvePath(p, baseDir string) string {
 	return filepath.Clean(p)
 }
 
-// checkPaths returns paths from ExtractPaths that are not yet approved.
-func (m *Manager) checkPaths(command string, args []string, cwd string) []string {
+// maxFileReadBytes is the maximum file size returned by file_read without a range.
+const maxFileReadBytes = 1 << 20 // 1 MiB
+
+// canonicalizePath returns the canonical absolute path for permission checks.
+// For existing paths it resolves symlinks; for non-existent paths (new files)
+// it resolves the parent directory's symlinks and appends the basename.
+func canonicalizePath(p string) string {
+	p = resolvePath(p, "")
+	if !filepath.IsAbs(p) {
+		if cwd, err := os.Getwd(); err == nil {
+			p = filepath.Join(cwd, p)
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	// Path does not exist yet — resolve parent and join.
+	if resolvedDir, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(resolvedDir, filepath.Base(p))
+	}
+	return filepath.Clean(p)
+}
+
+// checkWritePaths returns unapproved paths from ExtractPaths, requiring write access.
+// Used by process tools (unrestricted execution requires write-level approval).
+func (m *Manager) checkWritePaths(command string, args []string, cwd string) []chat.PathAccessRequest {
 	if m.pathApprover == nil {
 		return nil
 	}
 	paths := ExtractPaths(command, args, cwd)
-	var unapproved []string
+	var unapproved []chat.PathAccessRequest
 	for _, p := range paths {
-		if !m.pathApprover.IsPathApproved(p) {
-			unapproved = append(unapproved, p)
+		if !m.pathApprover.IsPathWriteApproved(p) {
+			unapproved = append(unapproved, chat.PathAccessRequest{Path: p, Write: true})
 		}
 	}
 	return unapproved
+}
+
+// checkSingleRead returns a non-nil error if path lacks read approval.
+func (m *Manager) checkSingleRead(path string) *UnapprovedPathsError {
+	if m.pathApprover == nil {
+		return nil
+	}
+	if !m.pathApprover.IsPathReadApproved(path) {
+		return &UnapprovedPathsError{Requests: []chat.PathAccessRequest{{Path: path, Write: false}}}
+	}
+	return nil
+}
+
+// checkSingleWrite returns a non-nil error if path lacks write approval.
+func (m *Manager) checkSingleWrite(path string) *UnapprovedPathsError {
+	if m.pathApprover == nil {
+		return nil
+	}
+	if !m.pathApprover.IsPathWriteApproved(path) {
+		return &UnapprovedPathsError{Requests: []chat.PathAccessRequest{{Path: path, Write: true}}}
+	}
+	return nil
 }
 
 // --- Built-in tool definitions ---
@@ -352,6 +412,90 @@ up, down, left, right, ctrl+a through ctrl+z, f1-f12.`,
 			},
 			handle: m.handleProcessStop,
 		},
+		// --- File tools ---
+		{
+			def: ai.ToolDefinition{
+				Name: "file_read",
+				Description: `Read the contents of a file.
+Returns the content with line numbers, total line count, and the range returned.
+For large files, use start_line and end_line to read sections (1-indexed, inclusive).
+Returns an error for binary files; use process_start to handle those.`,
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":       map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
+						"start_line": map[string]any{"type": "number", "description": "First line to return (1-indexed, default 1)"},
+						"end_line":   map[string]any{"type": "number", "description": "Last line to return (1-indexed, default: end of file or 1 MiB limit)"},
+					},
+					"required": []string{"path"},
+				},
+			},
+			handle: m.handleFileRead,
+		},
+		{
+			def: ai.ToolDefinition{
+				Name:        "file_list",
+				Description: "List the contents of a directory. Returns a JSON array of {name, type, size} objects.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string", "description": "Absolute or ~ path to the directory"},
+					},
+					"required": []string{"path"},
+				},
+			},
+			handle: m.handleFileList,
+		},
+		{
+			def: ai.ToolDefinition{
+				Name: "file_write",
+				Description: `Create or overwrite a file with the given content.
+To create a new file with parent directories, set create_parents to true.`,
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":           map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
+						"content":        map[string]any{"type": "string", "description": "File contents (UTF-8)"},
+						"create_parents": map[string]any{"type": "boolean", "description": "Create parent directories if they don't exist (default false)"},
+					},
+					"required": []string{"path", "content"},
+				},
+			},
+			handle: m.handleFileWrite,
+		},
+		{
+			def: ai.ToolDefinition{
+				Name: "file_edit",
+				Description: `Replace exactly one occurrence of old_str with new_str in a file.
+The match must be exact (including whitespace). Returns an error if old_str appears
+zero times (not found) or more than once (ambiguous — include more context).
+On success, returns the line number where the replacement was made.`,
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":    map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
+						"old_str": map[string]any{"type": "string", "description": "Exact text to find and replace"},
+						"new_str": map[string]any{"type": "string", "description": "Replacement text"},
+					},
+					"required": []string{"path", "old_str", "new_str"},
+				},
+			},
+			handle: m.handleFileEdit,
+		},
+		{
+			def: ai.ToolDefinition{
+				Name:        "file_delete",
+				Description: "Delete a file (not a directory).",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
+					},
+					"required": []string{"path"},
+				},
+			},
+			handle: m.handleFileDelete,
+		},
 	}
 }
 
@@ -416,8 +560,8 @@ func (m *Manager) handleProcessStart(ctx context.Context, args map[string]any) (
 	timeoutSecs := float64Arg(args, "timeout_seconds", 5)
 
 	// Check path permissions before starting.
-	if unapproved := m.checkPaths(command, cmdArgs, cwd); len(unapproved) > 0 {
-		return "", &UnapprovedPathsError{Paths: unapproved}
+	if unapproved := m.checkWritePaths(command, cmdArgs, cwd); len(unapproved) > 0 {
+		return "", &UnapprovedPathsError{Requests: unapproved}
 	}
 
 	handle, err := m.processes.Start(ctx, command, cmdArgs, cwd, env, usePTY)
@@ -507,6 +651,257 @@ func (m *Manager) handleProcessStop(_ context.Context, args map[string]any) (str
 		"exit_code": exitCode,
 		"output":    output,
 	}), nil
+}
+
+// --- File tool handlers ---
+
+func (m *Manager) handleFileRead(_ context.Context, args map[string]any) (string, error) {
+	rawPath := stringArg(args, "path")
+	if rawPath == "" {
+		return "", fmt.Errorf("file_read: path is required")
+	}
+	path := canonicalizePath(rawPath)
+
+	if err := m.checkSingleRead(path); err != nil {
+		return "", err
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("file_read: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("file_read: %s is a directory; use file_list to list directories", path)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("file_read: %w", err)
+	}
+
+	if !utf8.Valid(data) {
+		return "", fmt.Errorf("file_read: %s appears to be a binary file; use process_start to handle binary files", path)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	totalLines := len(lines)
+
+	startLine := int(float64Arg(args, "start_line", 1))
+	endLine := int(float64Arg(args, "end_line", float64(totalLines)))
+	if startLine < 1 {
+		startLine = 1
+	}
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+	if startLine > endLine {
+		return "", fmt.Errorf("file_read: start_line (%d) > end_line (%d)", startLine, endLine)
+	}
+
+	selected := lines[startLine-1 : endLine]
+
+	// Enforce size limit when reading without a range (full file).
+	if _, hasStart := args["start_line"]; !hasStart {
+		if _, hasEnd := args["end_line"]; !hasEnd {
+			if len(data) > maxFileReadBytes {
+				// Truncate to fit within maxFileReadBytes; find the last safe line.
+				size := 0
+				for i, l := range selected {
+					size += len(l) + 1
+					if size > maxFileReadBytes {
+						selected = selected[:i]
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Format with line numbers.
+	var sb strings.Builder
+	for i, l := range selected {
+		fmt.Fprintf(&sb, "%d\t%s\n", startLine+i, l)
+	}
+
+	return jsonResult(map[string]any{
+		"content":     sb.String(),
+		"total_lines": totalLines,
+		"start_line":  startLine,
+		"end_line":    startLine + len(selected) - 1,
+		"truncated":   startLine+len(selected)-1 < totalLines && len(data) > maxFileReadBytes,
+	}), nil
+}
+
+func (m *Manager) handleFileList(_ context.Context, args map[string]any) (string, error) {
+	rawPath := stringArg(args, "path")
+	if rawPath == "" {
+		return "", fmt.Errorf("file_list: path is required")
+	}
+	path := canonicalizePath(rawPath)
+
+	if err := m.checkSingleRead(path); err != nil {
+		return "", err
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("file_list: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("file_list: %s is not a directory; use file_read to read files", path)
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return "", fmt.Errorf("file_list: %w", err)
+	}
+
+	type entry struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		Size *int64 `json:"size,omitempty"`
+	}
+	result := make([]entry, 0, len(entries))
+	for _, e := range entries {
+		var kind string
+		var size *int64
+		switch {
+		case e.IsDir():
+			kind = "directory"
+		case e.Type()&fs.ModeSymlink != 0:
+			kind = "symlink"
+		default:
+			kind = "file"
+			if fi, err2 := e.Info(); err2 == nil {
+				s := fi.Size()
+				size = &s
+			}
+		}
+		result = append(result, entry{Name: e.Name(), Type: kind, Size: size})
+	}
+	return jsonResult(result), nil
+}
+
+func (m *Manager) handleFileWrite(_ context.Context, args map[string]any) (string, error) {
+	rawPath := stringArg(args, "path")
+	if rawPath == "" {
+		return "", fmt.Errorf("file_write: path is required")
+	}
+	path := canonicalizePath(rawPath)
+	content := stringArg(args, "content")
+	createParents := boolArg(args, "create_parents")
+
+	if err := m.checkSingleWrite(path); err != nil {
+		return "", err
+	}
+
+	if createParents {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return "", fmt.Errorf("file_write: creating parent directories: %w", err)
+		}
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("file_write: %w", err)
+	}
+
+	return jsonResult(map[string]any{
+		"path":  path,
+		"bytes": len(content),
+	}), nil
+}
+
+func (m *Manager) handleFileEdit(_ context.Context, args map[string]any) (string, error) {
+	rawPath := stringArg(args, "path")
+	if rawPath == "" {
+		return "", fmt.Errorf("file_edit: path is required")
+	}
+	path := canonicalizePath(rawPath)
+	oldStr := stringArg(args, "old_str")
+	newStr := stringArg(args, "new_str")
+
+	if oldStr == "" {
+		return "", fmt.Errorf("file_edit: old_str must not be empty; use file_write to overwrite entire files")
+	}
+
+	if err := m.checkSingleWrite(path); err != nil {
+		return "", err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("file_edit: %w", err)
+	}
+
+	if !utf8.Valid(data) {
+		return "", fmt.Errorf("file_edit: %s appears to be a binary file", path)
+	}
+
+	content := string(data)
+	count := strings.Count(content, oldStr)
+	switch {
+	case count == 0:
+		return "", fmt.Errorf("file_edit: old_str not found in %s", path)
+	case count > 1:
+		// Give the AI enough context to narrow down the match.
+		lineNums := findMatchLines(content, oldStr)
+		return "", fmt.Errorf("file_edit: old_str matches %d times in %s (at lines %v); include more surrounding context to make it unique",
+			count, path, lineNums)
+	}
+
+	newContent := strings.Replace(content, oldStr, newStr, 1)
+	if err := os.WriteFile(path, []byte(newContent), 0o644); err != nil {
+		return "", fmt.Errorf("file_edit: writing %s: %w", path, err)
+	}
+
+	// Report the line where the replacement occurred.
+	idx := strings.Index(content, oldStr)
+	line := strings.Count(content[:idx], "\n") + 1
+	return jsonResult(map[string]any{
+		"path": path,
+		"line": line,
+	}), nil
+}
+
+// findMatchLines returns the starting line numbers for all occurrences of substr in text.
+func findMatchLines(text, substr string) []int {
+	var lines []int
+	offset := 0
+	for {
+		idx := strings.Index(text[offset:], substr)
+		if idx < 0 {
+			break
+		}
+		abs := offset + idx
+		lines = append(lines, strings.Count(text[:abs], "\n")+1)
+		offset = abs + len(substr)
+	}
+	return lines
+}
+
+func (m *Manager) handleFileDelete(_ context.Context, args map[string]any) (string, error) {
+	rawPath := stringArg(args, "path")
+	if rawPath == "" {
+		return "", fmt.Errorf("file_delete: path is required")
+	}
+	path := canonicalizePath(rawPath)
+
+	if err := m.checkSingleWrite(path); err != nil {
+		return "", err
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("file_delete: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("file_delete: %s is a directory; use process_start with rm -r to delete directories", path)
+	}
+
+	if err := os.Remove(path); err != nil {
+		return "", fmt.Errorf("file_delete: %w", err)
+	}
+	return jsonResult(map[string]any{"deleted": path}), nil
 }
 
 // ensure Manager implements chat.ToolManager.

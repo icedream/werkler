@@ -2,11 +2,27 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/icedream/werkler/internal/ai"
 )
+
+// PathAccessRequest describes a single path access that needs user approval.
+type PathAccessRequest struct {
+	Path  string
+	Write bool // true = write (and read); false = read only
+}
+
+// PathApprovalError is implemented by errors that require interactive path
+// approval before a tool call can proceed. Callers that support a UI should
+// propagate these as structured errors rather than stringifying them, so the
+// TUI can present per-path approval dialogs.
+type PathApprovalError interface {
+	error
+	AccessRequests() []PathAccessRequest
+}
 
 // SystemPrompt is the default system message prepended to every conversation.
 const SystemPrompt = `You are Werkler, an AI assistant for software developers.
@@ -35,21 +51,23 @@ type oauthManager interface {
 // Session manages tool approval state for a chat session.
 // It does not own conversation history; callers manage their own message lists.
 type Session struct {
-	tools                ToolManager
-	autoApprove          []string // glob patterns for pre-approved tools
-	sessionApproved      map[string]bool
-	autoApprovePaths     []string // glob patterns for pre-approved paths
-	sessionApprovedPaths map[string]bool
+	tools             ToolManager
+	autoApprove       []string // glob patterns for pre-approved tools
+	sessionApproved   map[string]bool
+	autoApprovePaths  []string        // glob patterns for pre-approved paths (grants write+read)
+	sessionReadPaths  map[string]bool // paths approved for read access this session
+	sessionWritePaths map[string]bool // paths approved for write (+ read) access this session
 }
 
 // NewSession creates a Session with the given tool manager and auto-approve glob patterns.
 func NewSession(tools ToolManager, autoApproveGlobs []string, autoApprovePaths []string) *Session {
 	return &Session{
-		tools:                tools,
-		autoApprove:          autoApproveGlobs,
-		sessionApproved:      make(map[string]bool),
-		autoApprovePaths:     autoApprovePaths,
-		sessionApprovedPaths: make(map[string]bool),
+		tools:             tools,
+		autoApprove:       autoApproveGlobs,
+		sessionApproved:   make(map[string]bool),
+		autoApprovePaths:  autoApprovePaths,
+		sessionReadPaths:  make(map[string]bool),
+		sessionWritePaths: make(map[string]bool),
 	}
 }
 
@@ -67,21 +85,30 @@ func (s *Session) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 
 // CallTool dispatches a tool call via the ToolManager.
 // Tool execution errors are embedded in the returned string so the AI can handle
-// them; only context cancellation or internal invariant failures are returned as error.
+// them; only context cancellation, internal invariant failures, and PathApprovalError
+// are returned as actual errors. PathApprovalError is preserved as a structured error
+// so interactive callers (TUI) can present path approval dialogs.
 func (s *Session) CallTool(ctx context.Context, tc ai.ToolCall) (string, error) {
 	result, err := s.tools.CallTool(ctx, tc.Name, tc.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+		// Propagate PathApprovalError as a structured error so the TUI can
+		// present interactive approval dialogs rather than showing it as text.
+		var pathErr PathApprovalError
+		if errors.As(err, &pathErr) {
+			return "", pathErr
+		}
 		return fmt.Sprintf("error: %v", err), nil
 	}
 	return result, nil
 }
 
-// IsPathApproved returns true if the path may be accessed without interactive approval.
-func (s *Session) IsPathApproved(path string) bool {
-	if s.sessionApprovedPaths[path] {
+// IsPathReadApproved returns true if path may be read without interactive approval.
+// Write approval implies read approval.
+func (s *Session) IsPathReadApproved(path string) bool {
+	if s.sessionReadPaths[path] || s.sessionWritePaths[path] {
 		return true
 	}
 	for _, pattern := range s.autoApprovePaths {
@@ -92,9 +119,28 @@ func (s *Session) IsPathApproved(path string) bool {
 	return false
 }
 
-// ApprovePathForSession adds path to the session-level approved set.
-func (s *Session) ApprovePathForSession(path string) {
-	s.sessionApprovedPaths[path] = true
+// IsPathWriteApproved returns true if path may be written without interactive approval.
+func (s *Session) IsPathWriteApproved(path string) bool {
+	if s.sessionWritePaths[path] {
+		return true
+	}
+	for _, pattern := range s.autoApprovePaths {
+		if matched, _ := filepath.Match(pattern, path); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// ApprovePathReadForSession grants read-only access to path for this session.
+func (s *Session) ApprovePathReadForSession(path string) {
+	s.sessionReadPaths[path] = true
+}
+
+// ApprovePathWriteForSession grants write (and read) access to path for this session.
+func (s *Session) ApprovePathWriteForSession(path string) {
+	s.sessionWritePaths[path] = true
+	s.sessionReadPaths[path] = true
 }
 
 // IsApproved returns true if the tool can be called without interactive user approval.
