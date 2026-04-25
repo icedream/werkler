@@ -68,6 +68,10 @@ var (
 			Foreground(lipgloss.Color("196")).
 			Bold(true)
 
+	infoStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244")).
+			Italic(true)
+
 	inputPrefixStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("244"))
 

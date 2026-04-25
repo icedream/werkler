@@ -28,8 +28,11 @@ type MCPServerConfig struct {
 	Command string            `mapstructure:"command"`
 	Args    []string          `mapstructure:"args"`
 	Env     map[string]string `mapstructure:"env"`
-	// For sse transport:
+	// For sse/streamable transport:
 	URL string `mapstructure:"url"`
+	// OAuth enables OAuth 2.1 + PKCE authentication for streamable transport.
+	// Authentication is deferred: the browser flow runs the first time a prompt is submitted.
+	OAuth bool `mapstructure:"oauth"`
 }
 
 // MCPConfig holds all MCP-related settings.
