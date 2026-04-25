@@ -72,6 +72,21 @@ var (
 			Foreground(lipgloss.Color("244")).
 			Italic(true)
 
+	completionItemStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("250"))
+
+	completionSelectedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("212"))
+
+	completionNameStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("39")).
+				Bold(true)
+
+	completionSelectedNameStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("212")).
+					Bold(true)
+
 	inputPrefixStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("244"))
 
