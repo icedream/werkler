@@ -255,6 +255,11 @@ type Model struct {
 	currentPathRequest    chat.PathAccessRequest   // request currently shown in the dialog
 	pendingCallAfterPaths *ai.ToolCall             // tool call to dispatch once all paths are approved
 
+	// executingCall is the tool call currently running in a doCallTool goroutine.
+	// Set just before doCallTool; cleared when toolResultMsg arrives.
+	// Distinct from currentCall, which is the call awaiting user confirmation.
+	executingCall *ai.ToolCall
+
 	// Queue of user prompts entered while the AI is busy.
 	// Processed FIFO after the current agent turn completes successfully.
 	queuedPrompts []string
@@ -504,6 +509,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.callingToolName = call.Name
 					m.currentCall = nil
+					m.executingCall = &call
 					m.state = stateCallingTool
 					needRebuild = true
 					cmds = append(cmds, doCallTool(m.ctx, m.session, call))
@@ -515,6 +521,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.callingToolName = call.Name
 					m.currentCall = nil
+					m.executingCall = &call
 					m.state = stateCallingTool
 					needRebuild = true
 					cmds = append(cmds, doCallTool(m.ctx, m.session, call))
@@ -839,11 +846,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			debugLog("toolResult: error tool=%q err=%v", msg.toolName, msg.err)
 			// Check if this is a path approval request from the tools manager.
 			var pathErr chat.PathApprovalError
-			if errors.As(msg.err, &pathErr) && m.currentCall != nil {
+			if errors.As(msg.err, &pathErr) && m.executingCall != nil {
 				reqs := pathErr.AccessRequests()
 				// Queue path approvals; once all paths are approved the call re-runs.
-				m.pendingCallAfterPaths = m.currentCall
-				m.currentCall = nil
+				m.pendingCallAfterPaths = m.executingCall
+				m.executingCall = nil
 				m.currentPathRequest = reqs[0]
 				m.pendingPathApprovals = reqs[1:]
 				m.state = stateAwaitingPathApproval
@@ -855,6 +862,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
 				m.callingToolName = ""
+				m.executingCall = nil
 				m.pendingCalls = nil
 				m.currentCall = nil
 				m.state = stateIdle
@@ -872,6 +880,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content:    msg.result,
 			})
 			m.callingToolName = ""
+			m.executingCall = nil
 			nextCmd := m.processNextCall()
 			needRebuild = true
 			cmds = append(cmds, nextCmd)
@@ -1184,6 +1193,7 @@ func (m *Model) processNextPath() tea.Cmd {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
 		m.callingToolName = call.Name
+		m.executingCall = &call
 		m.state = stateCallingTool
 		return doCallTool(m.ctx, m.session, call)
 	}
@@ -1227,6 +1237,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		}
 		m.callingToolName = call.Name
 		m.currentCall = nil
+		m.executingCall = &callCopy
 		m.state = stateCallingTool
 		return doCallTool(m.ctx, m.session, call)
 	}
