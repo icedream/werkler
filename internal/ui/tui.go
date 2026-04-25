@@ -43,6 +43,7 @@ const (
 	stateStreaming          // tokens arriving
 	stateCallingTool
 	stateAwaitingApproval
+	stateConnectingOAuth // running deferred OAuth server connections
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -51,6 +52,8 @@ func inputPlaceholder(state tuiState) string {
 	switch state {
 	case stateAwaitingApproval:
 		return "Approve the tool call above (y / n / a)…"
+	case stateConnectingOAuth:
+		return "Waiting for authorization in browser…"
 	case stateIdle:
 		return "Type a message, press Enter to send…"
 	default:
@@ -65,6 +68,7 @@ const (
 	itemAssistant = "assistant"
 	itemToolCall  = "tool_call"
 	itemError     = "error"
+	itemInfo      = "info" // neutral status/system messages
 )
 
 const (
@@ -101,6 +105,21 @@ type toolResultMsg struct {
 
 type contextDoneMsg struct{}
 
+// --- OAuth messages ---
+
+// oauthNeedAuthMsg is sent when an OAuth server requires browser authorization.
+// The TUI updates the info item in the viewport to show the URL.
+type oauthNeedAuthMsg struct {
+	serverName string
+	authURL    string
+}
+
+// oauthConnectedMsg is sent when all pending OAuth servers have been connected.
+type oauthConnectedMsg struct{}
+
+// oauthConnectFailedMsg is sent when OAuth connection fails.
+type oauthConnectFailedMsg struct{ err error }
+
 // --- Model ---
 
 // Model is the bubbletea model for the interactive TUI.
@@ -109,6 +128,10 @@ type Model struct {
 	client  ai.StreamCompleter
 	session *chat.Session
 	tools   []ai.ToolDefinition
+
+	// send dispatches messages to this bubbletea program from goroutines.
+	// Set in RunTUI before the program starts.
+	send func(tea.Msg)
 
 	// Conversation history (managed only in Update, never in tea.Cmd goroutines).
 	messages []ai.Message
@@ -125,8 +148,9 @@ type Model struct {
 	queuedPrompts []string
 
 	// Display items for the viewport.
-	items       []displayItem
-	toolCallIdx map[string]int // callID → index in items
+	items        []displayItem
+	toolCallIdx  map[string]int // callID → index in items
+	oauthInfoIdx int            // index of the OAuth status item; -1 if none
 
 	// UI components.
 	viewport     viewport.Model
@@ -152,6 +176,7 @@ func initialModel(
 	modelName string,
 	serverNames []string,
 	glamourStyle string,
+	send func(tea.Msg),
 ) Model {
 	sp := spinner.New()
 	sp.Spinner = thinkingSpinner
@@ -167,9 +192,11 @@ func initialModel(
 		client:           client,
 		session:          session,
 		tools:            tools,
+		send:             send,
 		messages:         chat.NewConversation(),
 		state:            stateIdle,
 		streamingItemIdx: -1,
+		oauthInfoIdx:     -1,
 		toolCallIdx:      make(map[string]int),
 		viewport:         viewport.New(0, 0),
 		input:            ti,
@@ -251,11 +278,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text := strings.TrimSpace(m.input.Value())
 				if text != "" {
 					m.input.Reset()
-					m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
 					m.items = append(m.items, displayItem{kind: itemUser, content: text})
-					m.state = stateThinking
 					needRebuild = true
-					cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
+
+					if m.session.HasPendingOAuth() {
+						// Defer the user prompt until OAuth servers are connected.
+						m.queuedPrompts = append([]string{text}, m.queuedPrompts...)
+						m.oauthInfoIdx = len(m.items)
+						names := strings.Join(m.session.PendingOAuthNames(), ", ")
+						m.items = append(m.items, displayItem{
+							kind:    itemInfo,
+							content: "Connecting to " + names + "…",
+						})
+						m.state = stateConnectingOAuth
+						cmds = append(cmds, doConnectOAuth(m.ctx, m.session, m.send))
+					} else {
+						m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
+						m.state = stateThinking
+						cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
+					}
 				}
 			} else {
 				// Forward to both: textinput handles text entry; viewport handles
@@ -268,7 +309,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, vpCmd)
 			}
 
-		case stateThinking, stateStreaming, stateCallingTool:
+		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth:
 			switch msg.Type {
 			case tea.KeyEnter:
 				text := strings.TrimSpace(m.input.Value())
@@ -416,6 +457,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, nextCmd)
 		}
 
+	case oauthNeedAuthMsg:
+		debugLog("oauthNeedAuth: server=%q", msg.serverName)
+		// Update the OAuth info item to show the auth URL.
+		text := fmt.Sprintf(
+			"To connect to %s, open this URL in your browser:\n%s\n\nWaiting for authorization…",
+			msg.serverName, msg.authURL,
+		)
+		if m.oauthInfoIdx >= 0 {
+			m.items[m.oauthInfoIdx].content = text
+		} else {
+			m.oauthInfoIdx = len(m.items)
+			m.items = append(m.items, displayItem{kind: itemInfo, content: text})
+		}
+		needRebuild = true
+
+	case oauthConnectedMsg:
+		debugLog("oauthConnected: refreshing tools")
+		// Refresh the tool list and add all newly available tools.
+		newTools, err := m.session.Tools(m.ctx)
+		if err != nil {
+			m.items = append(m.items, displayItem{kind: itemError, content: "refreshing tools after OAuth: " + err.Error()})
+		} else {
+			m.tools = newTools
+		}
+		// Update info item to show success.
+		if m.oauthInfoIdx >= 0 {
+			m.items[m.oauthInfoIdx].content = "✓ Connected"
+		}
+		m.oauthInfoIdx = -1
+		// Process the queued user prompt now that servers are ready.
+		needRebuild = true
+		cmds = append(cmds, m.processQueueOrIdle())
+
+	case oauthConnectFailedMsg:
+		debugLog("oauthConnectFailed: %v", msg.err)
+		if m.oauthInfoIdx >= 0 {
+			m.items[m.oauthInfoIdx].content = "OAuth connection failed: " + msg.err.Error()
+			m.items[m.oauthInfoIdx].kind = itemError
+		} else {
+			m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
+		}
+		m.oauthInfoIdx = -1
+		// Keep the user's queued prompt but return to idle so they can retry.
+		m.state = stateIdle
+		needRebuild = true
+		cmds = append(cmds, m.input.Focus())
+
 	case contextDoneMsg:
 		return m, tea.Quit
 	}
@@ -482,6 +570,8 @@ func (m Model) statusLines() (line1, line2 string) {
 	switch m.state {
 	case stateThinking:
 		return statusStyle.Render(m.spinner.View()+" Thinking…") + queueHint, ""
+	case stateConnectingOAuth:
+		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint, ""
 	case stateStreaming:
 		return statusStyle.Render(m.spinner.View()+" Streaming…") + queueHint, ""
 	case stateCallingTool:
@@ -561,6 +651,9 @@ func (m Model) renderItem(item displayItem) string {
 
 	case itemError:
 		return errorStyle.Render("Error: ") + item.content
+
+	case itemInfo:
+		return infoStyle.Render(item.content)
 
 	default:
 		return item.content
@@ -654,6 +747,20 @@ func watchContext(ctx context.Context) tea.Cmd {
 	}
 }
 
+// doConnectOAuth runs pending OAuth server connections in a goroutine.
+// The send function is used to notify the TUI when an auth URL is ready to display.
+func doConnectOAuth(ctx context.Context, session *chat.Session, send func(tea.Msg)) tea.Cmd {
+	return func() tea.Msg {
+		display := func(serverName, authURL string) {
+			send(oauthNeedAuthMsg{serverName: serverName, authURL: authURL})
+		}
+		if err := session.ConnectPendingOAuth(ctx, display); err != nil {
+			return oauthConnectFailedMsg{err: err}
+		}
+		return oauthConnectedMsg{}
+	}
+}
+
 // --- Formatting helpers ---
 
 func formatArgsCompact(args map[string]any) string {
@@ -701,9 +808,30 @@ func RunTUI(
 		}
 	}
 
-	m := initialModel(ctx, client, session, tools, modelName, serverNames, glamourStyle)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	_, err = p.Run()
+	// sendFn is a closure that forwards messages to the bubbletea program.
+	// It is set after tea.NewProgram so that the model owns the same function pointer.
+	var sendFn func(tea.Msg)
+	sendFn = func(msg tea.Msg) {
+		// no-op until prog is assigned below
+	}
+
+	m := initialModel(ctx, client, session, tools, modelName, serverNames, glamourStyle, sendFn)
+
+	// Wire p.Send so goroutines (OAuth, etc.) can post messages back to the TUI.
+	// tea.NewProgram copies m, so the closure captures prog by pointer and prog is
+	// non-nil by the time any cmd goroutine fires (after p.Run starts the event loop).
+	var prog *tea.Program
+	sendFn = func(msg tea.Msg) {
+		if prog != nil {
+			prog.Send(msg)
+		}
+	}
+	// Update the send field on the already-constructed model so it references the
+	// real function.
+	m.send = sendFn
+
+	prog = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	_, err = prog.Run()
 	return err
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/charmbracelet/glamour"
@@ -64,6 +65,10 @@ func runChat(_ *cobra.Command, _ []string) error {
 	session := chat.NewSession(manager, cfg.MCP.AutoApproveTools)
 
 	if chatPrompt != "" {
+		if session.HasPendingOAuth() {
+			names := strings.Join(session.PendingOAuthNames(), ", ")
+			return fmt.Errorf("OAuth authentication required for: %s — run `werkler chat` to authenticate interactively", names)
+		}
 		return runPromptMode(ctx, aiClient, session)
 	}
 	return runInteractiveMode(ctx, aiClient, session)

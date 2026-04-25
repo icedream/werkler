@@ -24,6 +24,14 @@ type ToolManager interface {
 	CallTool(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
+// oauthManager is the optional interface that ToolManager implementations may satisfy
+// to support deferred OAuth server connections.
+type oauthManager interface {
+	HasPendingOAuth() bool
+	PendingOAuthNames() []string
+	ConnectPendingOAuth(ctx context.Context, display func(serverName, authURL string)) error
+}
+
 // Session manages tool approval state for a chat session.
 // It does not own conversation history; callers manage their own message lists.
 type Session struct {
@@ -89,4 +97,30 @@ func (s *Session) ApproveForSession(toolName string) {
 // ResetApprovals clears all session-level approvals.
 func (s *Session) ResetApprovals() {
 	s.sessionApproved = make(map[string]bool)
+}
+
+// HasPendingOAuth reports whether there are OAuth MCP servers not yet connected.
+// Returns false when the underlying ToolManager does not support OAuth.
+func (s *Session) HasPendingOAuth() bool {
+	if m, ok := s.tools.(oauthManager); ok {
+		return m.HasPendingOAuth()
+	}
+	return false
+}
+
+// PendingOAuthNames returns the display names of OAuth servers awaiting connection.
+func (s *Session) PendingOAuthNames() []string {
+	if m, ok := s.tools.(oauthManager); ok {
+		return m.PendingOAuthNames()
+	}
+	return nil
+}
+
+// ConnectPendingOAuth connects deferred OAuth servers.
+// display is called (non-blocking) with the URL the user must open in a browser.
+func (s *Session) ConnectPendingOAuth(ctx context.Context, display func(serverName, authURL string)) error {
+	if m, ok := s.tools.(oauthManager); ok {
+		return m.ConnectPendingOAuth(ctx, display)
+	}
+	return nil
 }

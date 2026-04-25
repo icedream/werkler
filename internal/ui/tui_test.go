@@ -68,6 +68,7 @@ func baseModel() Model {
 		"test-model",
 		nil,
 		"dark",
+		nil, // send not needed for state-machine tests
 	)
 }
 
@@ -152,7 +153,7 @@ func TestUpdate_StreamDone_NoToolCalls_GoesIdle(t *testing.T) {
 func TestUpdate_StreamDone_WithToolCalls_AwaitingApproval(t *testing.T) {
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil) // no auto-approve
-	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark", nil)
 	m.state = stateStreaming
 
 	tc := ai.ToolCall{ID: "c1", Name: "my_tool", Arguments: map[string]any{"x": 1}}
@@ -173,7 +174,7 @@ func TestUpdate_StreamDone_WithToolCalls_AwaitingApproval(t *testing.T) {
 func TestUpdate_StreamDone_WithApprovedToolCall_StartsCallingTool(t *testing.T) {
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, []string{"approved_tool"})
-	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark", nil)
 	m.state = stateStreaming
 
 	tc := ai.ToolCall{ID: "c1", Name: "approved_tool", Arguments: nil}
@@ -222,7 +223,7 @@ func TestUpdate_StreamError_DuringStreaming_EmbedsInExistingItem(t *testing.T) {
 func TestUpdate_ToolApproval_Y_StartsCallingTool(t *testing.T) {
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil)
-	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark", nil)
 	tc := ai.ToolCall{ID: "c1", Name: "some_tool"}
 	m.state = stateAwaitingApproval
 	m.currentCall = &tc
@@ -240,7 +241,7 @@ func TestUpdate_ToolApproval_Y_StartsCallingTool(t *testing.T) {
 func TestUpdate_ToolApproval_A_ApprovesForSessionAndCalls(t *testing.T) {
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil)
-	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark", nil)
 	tc := ai.ToolCall{ID: "c1", Name: "some_tool"}
 	m.state = stateAwaitingApproval
 	m.currentCall = &tc
@@ -262,7 +263,7 @@ func TestUpdate_ToolApproval_N_DeniesAndProcessesNext(t *testing.T) {
 
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil)
-	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark", nil)
 	tc := ai.ToolCall{ID: "c1", Name: "some_tool"}
 	m.state = stateAwaitingApproval
 	m.currentCall = &tc
@@ -291,7 +292,7 @@ func TestUpdate_ToolResult_Success_ProcessesNext(t *testing.T) {
 
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil)
-	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark", nil)
 	m.state = stateCallingTool
 	m.callingToolName = "my_tool"
 	m.toolCallIdx["c1"] = 0
@@ -310,7 +311,7 @@ func TestUpdate_ToolResult_Success_ProcessesNext(t *testing.T) {
 func TestUpdate_ToolResult_Failure_GoesIdle_KeepsQueue(t *testing.T) {
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil)
-	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark", nil)
 	m.state = stateCallingTool
 	m.callingToolName = "bad_tool"
 	m.toolCallIdx["c1"] = 0
@@ -347,7 +348,7 @@ func TestUpdate_Enter_InIdle_SendsMessage(t *testing.T) {
 
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil)
-	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark", nil)
 	m.state = stateIdle
 
 	// Simulate typing "hello" then pressing Enter.
@@ -455,7 +456,7 @@ func TestUpdate_ProcessQueueOrIdle_WithQueue_StartsNextTurn(t *testing.T) {
 
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil)
-	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark", nil)
 	m.state = stateStreaming
 	m.queuedPrompts = []string{"next question"}
 
@@ -499,7 +500,7 @@ func TestUpdate_Queue_SurvivesToolCalls(t *testing.T) {
 	sc := &mockStreamCompleter{}
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, []string{"my_tool"})
-	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark")
+	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark", nil)
 
 	// 1. Queue a follow-up while the first stream is in-flight.
 	m.state = stateStreaming

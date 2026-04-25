@@ -14,6 +14,7 @@ import (
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/config"
+	oauthpkg "github.com/icedream/werkler/internal/oauth"
 )
 
 // toolNameSep is the separator used between server name and tool name in the
@@ -46,10 +47,11 @@ type toolEntry struct {
 
 // Manager owns all MCP server connections for the lifetime of a chat session.
 type Manager struct {
-	mu      sync.Mutex
-	conns   []*serverConn
-	toolMap map[string]toolEntry // AI-facing name → {conn, original name}
-	mcpImpl *mcp.Implementation
+	mu           sync.Mutex
+	conns        []*serverConn
+	toolMap      map[string]toolEntry // AI-facing name → {conn, original name}
+	mcpImpl      *mcp.Implementation
+	pendingOAuth []config.MCPServerConfig // streamable+oauth servers deferred until first prompt
 }
 
 // NewManager creates an uninitialised Manager.
@@ -61,6 +63,8 @@ func NewManager() *Manager {
 }
 
 // Connect establishes connections to all configured MCP servers.
+// Streamable servers with OAuth enabled are deferred: they are not connected here
+// but instead queued for [ConnectPendingOAuth].
 // Call Close when done.
 func (m *Manager) Connect(ctx context.Context, servers []config.MCPServerConfig) error {
 	seen := make(map[string]bool)
@@ -70,9 +74,93 @@ func (m *Manager) Connect(ctx context.Context, servers []config.MCPServerConfig)
 			return fmt.Errorf("duplicate MCP server safe-name %q (from %q)", safe, srv.Name)
 		}
 		seen[safe] = true
+
+		if srv.Transport == config.MCPTransportStreamable && srv.OAuth {
+			m.mu.Lock()
+			m.pendingOAuth = append(m.pendingOAuth, srv)
+			m.mu.Unlock()
+			continue
+		}
+
 		if err := m.connectOne(ctx, srv, safe); err != nil {
 			return fmt.Errorf("connecting to MCP server %q: %w", srv.Name, err)
 		}
+	}
+	return nil
+}
+
+// HasPendingOAuth reports whether there are OAuth MCP servers not yet connected.
+func (m *Manager) HasPendingOAuth() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pendingOAuth) > 0
+}
+
+// PendingOAuthNames returns the display names of OAuth servers awaiting connection.
+func (m *Manager) PendingOAuthNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	names := make([]string, len(m.pendingOAuth))
+	for i, s := range m.pendingOAuth {
+		names[i] = s.Name
+	}
+	return names
+}
+
+// ConnectPendingOAuth connects all deferred OAuth servers in order.
+// display is called (without blocking) when the user must open a browser URL
+// for each server; the manager handles the HTTP callback internally.
+// On success the server's tools become available via [Tools] and [CallTool].
+func (m *Manager) ConnectPendingOAuth(ctx context.Context, display func(serverName, authURL string)) error {
+	m.mu.Lock()
+	pending := make([]config.MCPServerConfig, len(m.pendingOAuth))
+	copy(pending, m.pendingOAuth)
+	m.mu.Unlock()
+
+	for _, srv := range pending {
+		cbSrv, err := oauthpkg.StartCallbackServer()
+		if err != nil {
+			return fmt.Errorf("starting OAuth callback server for %q: %w", srv.Name, err)
+		}
+
+		// localNotifier is called from inside handler.Authorize.
+		// It shows the URL to the user and blocks until the browser callback arrives.
+		localNotifier := func(ctx context.Context, serverName, authURL string) (string, string, error) {
+			display(serverName, authURL)
+			result, waitErr := cbSrv.Wait(ctx)
+			if waitErr != nil {
+				return "", "", waitErr
+			}
+			return result.Code, result.State, nil
+		}
+
+		handler := oauthpkg.NewHandler(srv.Name, cbSrv.RedirectURI(), localNotifier)
+		transport := &mcp.StreamableClientTransport{
+			Endpoint:     srv.URL,
+			OAuthHandler: handler,
+		}
+		client := mcp.NewClient(m.mcpImpl, nil)
+		session, connErr := client.Connect(ctx, transport, nil)
+		cbSrv.Close()
+		if connErr != nil {
+			return fmt.Errorf("connecting to OAuth MCP server %q: %w", srv.Name, connErr)
+		}
+
+		safe := sanitize(srv.Name)
+		m.mu.Lock()
+		m.conns = append(m.conns, &serverConn{
+			name:     srv.Name,
+			safeName: safe,
+			session:  session,
+		})
+		remaining := m.pendingOAuth[:0]
+		for _, p := range m.pendingOAuth {
+			if p.Name != srv.Name {
+				remaining = append(remaining, p)
+			}
+		}
+		m.pendingOAuth = remaining
+		m.mu.Unlock()
 	}
 	return nil
 }
