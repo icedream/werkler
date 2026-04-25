@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
+	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/tools"
 )
 
@@ -49,6 +51,7 @@ const (
 	stateAwaitingPathApproval // waiting for user to approve a path access
 	stateConnectingOAuth      // running deferred OAuth server connections
 	statePickingModel         // model selection list is open
+	statePickingSession       // session picker list is open
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -61,7 +64,7 @@ func inputPlaceholder(state tuiState) string {
 		return "Approve path access (y / n / a)…"
 	case stateConnectingOAuth:
 		return "Waiting for authorization in browser…"
-	case statePickingModel:
+	case statePickingModel, statePickingSession:
 		return ""
 	case stateIdle:
 		return "Type a message, press Enter to send…"
@@ -143,12 +146,40 @@ type processOutputMsg struct {
 	clean  string // ANSI-stripped (used for AI, not displayed)
 }
 
+// sessionHintMsg delivers the latest CWD-matching session found on startup.
+type sessionHintMsg struct{ sess *sessionstore.Session }
+
+// sessionSavedMsg signals that a background save completed (errors are silent).
+type sessionSavedMsg struct{}
+
+// sessionsListMsg delivers the list of sessions for the picker.
+type sessionsListMsg struct {
+	sessions []sessionstore.Session
+	err      error
+}
+
 // modelItem implements list.Item for a model name string.
 type modelItem string
 
 func (m modelItem) FilterValue() string { return string(m) }
 func (m modelItem) Title() string       { return string(m) }
 func (m modelItem) Description() string { return "" }
+
+// sessionItem implements list.Item for the session picker.
+type sessionItem struct{ sess sessionstore.Session }
+
+func (s sessionItem) FilterValue() string { return s.sess.Title }
+func (s sessionItem) Title() string       { return s.sess.Title }
+func (s sessionItem) Description() string {
+	return formatAge(s.sess.UpdatedAt) + "  " + shortenHomePath(s.sess.CWD)
+}
+
+// SessionOptions configures optional session persistence behaviour for RunTUI.
+type SessionOptions struct {
+	Store      *sessionstore.Store   // nil = session persistence disabled
+	Initial    *sessionstore.Session // non-nil = load this session on startup
+	OpenPicker bool                  // open session picker immediately on launch
+}
 
 // --- Slash commands ---
 
@@ -272,6 +303,18 @@ type Model struct {
 	// Model picker (only valid during statePickingModel).
 	modelPicker list.Model
 
+	// Session picker (only valid during statePickingSession).
+	sessionPicker list.Model
+
+	// Session persistence.
+	sessionStore     *sessionstore.Store
+	sessionID        string    // current session's ID; empty until first save
+	sessionCreatedAt time.Time // set on first save
+	sessionCWD       string    // cwd at TUI startup (used for resume hint + new session)
+	// resumeHint is the latest CWD-matching session found on startup.
+	// Shown in the status bar until the first message is sent.
+	resumeHint *sessionstore.Session
+
 	// UI components.
 	viewport     viewport.Model
 	input        textinput.Model
@@ -325,11 +368,21 @@ func initialModel(
 	picker.SetFilteringEnabled(true)
 	picker.DisableQuitKeybindings()
 
+	// Session picker: same style as model picker.
+	sessDel := list.NewDefaultDelegate()
+	sessPicker := list.New(nil, sessDel, 0, 0)
+	sessPicker.Title = "Resume session"
+	sessPicker.SetShowStatusBar(false)
+	sessPicker.SetFilteringEnabled(true)
+	sessPicker.DisableQuitKeybindings()
+
 	// Use modelManager when the client also implements ModelManager.
 	var mm ai.ModelManager
 	if m, ok := client.(ai.ModelManager); ok {
 		mm = m
 	}
+
+	cwd, _ := os.Getwd()
 
 	return Model{
 		ctx:              ctx,
@@ -345,12 +398,14 @@ func initialModel(
 		toolCallIdx:      make(map[string]int),
 		viewport:         viewport.New(0, 0),
 		modelPicker:      picker,
+		sessionPicker:    sessPicker,
 		input:            ti,
 		spinner:          sp,
 		modelName:        modelName,
 		serverNames:      serverNames,
 		glamourStyle:     glamourStyle,
 		mouseEnabled:     true,
+		sessionCWD:       cwd,
 	}
 }
 
@@ -424,11 +479,15 @@ func (m *Model) runCompletion(selected slashCommand) []tea.Cmd {
 // --- Tea interface ---
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		textinput.Blink, // cursor blink; Focus() state is set in initialModel
+	cmds := []tea.Cmd{
+		textinput.Blink,
 		m.spinner.Tick,
 		watchContext(m.ctx),
-	)
+	}
+	if m.sessionStore != nil {
+		cmds = append(cmds, doLoadSessionHint(m.sessionStore, m.sessionCWD))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -585,6 +644,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							cmds = append(cmds, doConnectOAuth(m.ctx, m.session, m.send))
 						} else {
 							m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
+							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.state = stateThinking
 							cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
 						}
@@ -648,6 +708,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, doListModels(m.ctx, m.modelManager))
 				}
 
+			case tea.KeyCtrlR:
+				if m.sessionStore != nil {
+					m.showCompletion = false
+					m.state = statePickingSession
+					m.sessionPicker.SetItems(nil)
+					m.sessionPicker.SetSize(m.width, m.height-fixedLines)
+					cmds = append(cmds, doLoadSessions(m.sessionStore))
+				}
+
 			default:
 				// Forward to textinput; do NOT forward to viewport when completion is
 				// showing (Up/Down are captured above; other nav keys close completion).
@@ -679,6 +748,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				var pickerCmd tea.Cmd
 				m.modelPicker, pickerCmd = m.modelPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			}
+
+		case statePickingSession:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.state = stateIdle
+				m.updateCompletion()
+			case tea.KeyEnter:
+				if sel := m.sessionPicker.SelectedItem(); sel != nil {
+					sess := sel.(sessionItem).sess
+					m.resumeHint = nil
+					m.applySession(&sess)
+					needRebuild = true
+				}
+				m.state = stateIdle
+				m.updateCompletion()
+			default:
+				var pickerCmd tea.Cmd
+				m.sessionPicker, pickerCmd = m.sessionPicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
 			}
 
@@ -738,6 +827,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateIdle
 			m.updateCompletion()
 			needRebuild = true
+		}
+
+	case sessionHintMsg:
+		m.resumeHint = msg.sess
+		needRebuild = true
+
+	case sessionSavedMsg:
+		// Auto-save completed; nothing to do (errors silently dropped).
+
+	case sessionsListMsg:
+		if m.state == statePickingSession {
+			if msg.err != nil {
+				m.items = append(m.items, displayItem{kind: itemError, content: "listing sessions: " + msg.err.Error()})
+				m.state = stateIdle
+				m.updateCompletion()
+				needRebuild = true
+			} else {
+				items := make([]list.Item, len(msg.sessions))
+				for i, s := range msg.sessions {
+					items[i] = sessionItem{sess: s}
+				}
+				m.sessionPicker.SetItems(items)
+				m.sessionPicker.SetSize(m.width, m.height-fixedLines)
+			}
 		}
 
 	case processOutputMsg:
@@ -802,8 +915,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case chunk.Done:
 			debugLog("streamChunk: done, toolCalls=%d, streamingItemIdx=%d, content=%q", len(chunk.Msg.ToolCalls), m.streamingItemIdx, chunk.Msg.Content)
 			// Stream finished — append the full message to history and handle tool calls.
-			// If no delta chunks arrived but the message has content (e.g. the model
-			// returned a full response without streaming tokens), create the display item now.
 			if m.streamingItemIdx < 0 && chunk.Msg.Content != "" {
 				m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content})
 			}
@@ -812,6 +923,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(chunk.Msg.ToolCalls) == 0 {
 				// Turn complete: drain queued prompts or go idle.
 				needRebuild = true
+				if m.sessionStore != nil {
+					snap := m.currentSessionSnapshot()
+					m.sessionID = snap.ID
+					m.sessionCreatedAt = snap.CreatedAt
+					cmds = append(cmds, doSaveSession(m.sessionStore, snap))
+				}
 				cmds = append(cmds, m.processQueueOrIdle())
 			} else {
 				for _, tc := range chunk.Msg.ToolCalls {
@@ -952,9 +1069,12 @@ func (m Model) View() string {
 		return "" // not yet initialised — avoid rendering before first WindowSizeMsg
 	}
 
-	// Model picker takes over the full screen.
+	// Pickers take over the full screen.
 	if m.state == statePickingModel {
 		return m.modelPicker.View()
+	}
+	if m.state == statePickingSession {
+		return m.sessionPicker.View()
 	}
 
 	var b strings.Builder
@@ -1056,7 +1176,20 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.modelManager != nil {
 			pickerHint = "  " + keyHintStyle.Render("ctrl+p") + " switch model"
 		}
-		return mouseHint + pickerHint, ""
+		sessionHint := ""
+		if m.sessionStore != nil {
+			sessionHint = "  " + keyHintStyle.Render("ctrl+r") + " sessions"
+		}
+		line1 := mouseHint + pickerHint + sessionHint
+		// Show resume hint on line2 until the user sends their first message.
+		line2 := ""
+		if m.resumeHint != nil && m.sessionStore != nil {
+			line2 = statusStyle.Render(fmt.Sprintf(
+				"  Last session: %q (%s) — ctrl+r to resume",
+				m.resumeHint.Title, formatAge(m.resumeHint.UpdatedAt),
+			))
+		}
+		return line1, line2
 	}
 }
 
@@ -1328,6 +1461,141 @@ func formatArgsCompact(args map[string]any) string {
 	return s
 }
 
+// --- Session helpers ---
+
+// formatAge returns a human-friendly relative age string.
+func formatAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 48*time.Hour:
+		return "yesterday"
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%d days ago", int(d.Hours()/24))
+	default:
+		return t.Format("2006-01-02")
+	}
+}
+
+// shortenHomePath replaces the home directory prefix with ~.
+func shortenHomePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if strings.HasPrefix(p, home+"/") || strings.HasPrefix(p, home+"\\") {
+		return "~" + p[len(home):]
+	}
+	if p == home {
+		return "~"
+	}
+	return p
+}
+
+// applySession restores a previously saved session into the model,
+// rebuilding the display items from the stored message history.
+func (m *Model) applySession(sess *sessionstore.Session) {
+	m.sessionID = sess.ID
+	m.sessionCreatedAt = sess.CreatedAt
+	m.sessionCWD = sess.CWD
+	m.messages = sess.Messages
+	m.items = rebuildItemsFromMessages(sess.Messages)
+	// Show a resume banner as the first visible item.
+	banner := displayItem{
+		kind:    itemInfo,
+		content: fmt.Sprintf("Resumed session: %q  (%s)", sess.Title, sess.UpdatedAt.Format("2006-01-02 15:04")),
+	}
+	m.items = append([]displayItem{banner}, m.items...)
+}
+
+// rebuildItemsFromMessages converts a stored message history back into display items.
+// System messages and tool-result messages are skipped; assistant/user messages are shown.
+func rebuildItemsFromMessages(msgs []ai.Message) []displayItem {
+	var items []displayItem
+	for _, msg := range msgs {
+		switch msg.Role {
+		case "user":
+			items = append(items, displayItem{kind: itemUser, content: msg.Content})
+		case "assistant":
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					args := formatArgsCompact(tc.Arguments)
+					label := tc.Name
+					if args != "" {
+						label += "  " + args
+					}
+					items = append(items, displayItem{
+						kind:       itemToolCall,
+						toolName:   tc.Name,
+						content:    label,
+						toolStatus: toolStatusDone, // historical calls are done
+					})
+				}
+			} else if msg.Content != "" {
+				items = append(items, displayItem{kind: itemAssistant, content: msg.Content})
+			}
+		}
+	}
+	return items
+}
+
+// doSaveSession saves the current session state asynchronously.
+// Errors are ignored (returns sessionSavedMsg regardless).
+func doSaveSession(store *sessionstore.Store, sess sessionstore.Session) tea.Cmd {
+	return func() tea.Msg {
+		_ = store.Save(&sess)
+		return sessionSavedMsg{}
+	}
+}
+
+// doLoadSessionHint loads the most recent session for the given CWD asynchronously.
+func doLoadSessionHint(store *sessionstore.Store, cwd string) tea.Cmd {
+	return func() tea.Msg {
+		sess, err := store.LoadLatestForCWD(cwd)
+		if err != nil || sess == nil {
+			return sessionHintMsg{}
+		}
+		return sessionHintMsg{sess: sess}
+	}
+}
+
+// doLoadSessions loads all sessions for the picker asynchronously.
+func doLoadSessions(store *sessionstore.Store) tea.Cmd {
+	return func() tea.Msg {
+		sessions, err := store.List()
+		return sessionsListMsg{sessions: sessions, err: err}
+	}
+}
+
+// currentSessionSnapshot returns a sessionstore.Session reflecting the model's
+// current state; used for auto-save.
+func (m *Model) currentSessionSnapshot() sessionstore.Session {
+	now := time.Now()
+	createdAt := m.sessionCreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	id := m.sessionID
+	if id == "" {
+		id = sessionstore.NewID()
+	}
+	// Generate a title from the first user message if possible.
+	title := sessionstore.GenerateTitle(m.messages)
+	return sessionstore.Session{
+		ID:        id,
+		Title:     title,
+		CWD:       m.sessionCWD,
+		Messages:  m.messages,
+		CreatedAt: createdAt,
+		UpdatedAt: now,
+	}
+}
+
 // --- Entry point ---
 
 // RunTUI starts the full-screen interactive TUI. It blocks until the user exits
@@ -1339,15 +1607,14 @@ func RunTUI(
 	toolMgr *tools.Manager,
 	modelName string,
 	serverNames []string,
+	opts SessionOptions,
 ) error {
-	tools, err := session.Tools(ctx)
+	sessionTools, err := session.Tools(ctx)
 	if err != nil {
 		return fmt.Errorf("fetching tools: %w", err)
 	}
 
-	// Resolve glamour style before starting bubbletea. WithAutoStyle() sends an
-	// OSC 11 query to stdout; the terminal's response arrives on stdin and would
-	// be swallowed by bubbletea as garbage key input if done after p.Run().
+	// Resolve glamour style before starting bubbletea.
 	glamourStyle := resolveGlamourStyle()
 
 	// Enable debug logging to a file if WERKLER_DEBUG_LOG is set.
@@ -1359,29 +1626,28 @@ func RunTUI(
 		}
 	}
 
-	// sendFn is a closure that forwards messages to the bubbletea program.
-	// It is set after tea.NewProgram so that the model owns the same function pointer.
 	var sendFn func(tea.Msg)
-	sendFn = func(msg tea.Msg) {
-		// no-op until prog is assigned below
+	sendFn = func(msg tea.Msg) {}
+
+	m := initialModel(ctx, client, session, sessionTools, modelName, serverNames, glamourStyle, sendFn)
+
+	// Apply session persistence options.
+	m.sessionStore = opts.Store
+	if opts.Initial != nil {
+		m.applySession(opts.Initial)
+	} else if opts.OpenPicker && opts.Store != nil {
+		// Pre-schedule opening the session picker as the first action.
+		m.state = statePickingSession
 	}
 
-	m := initialModel(ctx, client, session, tools, modelName, serverNames, glamourStyle, sendFn)
-
-	// Wire p.Send so goroutines (OAuth, etc.) can post messages back to the TUI.
-	// tea.NewProgram copies m, so the closure captures prog by pointer and prog is
-	// non-nil by the time any cmd goroutine fires (after p.Run starts the event loop).
 	var prog *tea.Program
 	sendFn = func(msg tea.Msg) {
 		if prog != nil {
 			prog.Send(msg)
 		}
 	}
-	// Update the send field on the already-constructed model so it references the
-	// real function.
 	m.send = sendFn
 
-	// Wire live process output from the tools manager into the TUI.
 	if toolMgr != nil {
 		toolMgr.SetOutputNotify(func(handle, raw, clean string) {
 			sendFn(processOutputMsg{handle: handle, raw: raw, clean: clean})
