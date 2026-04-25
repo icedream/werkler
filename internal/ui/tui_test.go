@@ -230,7 +230,13 @@ func TestUpdate_ToolApproval_Y_StartsCallingTool(t *testing.T) {
 	m.toolCallIdx[tc.ID] = 0
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusPending})
 
-	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	// First key press stages the choice.
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	assert.Equal(t, "y", m.pendingApprovalChoice)
+	assert.Equal(t, stateAwaitingApproval, m.state)
+
+	// Enter confirms.
+	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateCallingTool, m.state)
 	assert.Nil(t, m.currentCall)
@@ -248,7 +254,10 @@ func TestUpdate_ToolApproval_A_ApprovesForSessionAndCalls(t *testing.T) {
 	m.toolCallIdx[tc.ID] = 0
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusPending})
 
-	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	// Stage "a" then confirm with Enter.
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	assert.Equal(t, "a", m.pendingApprovalChoice)
+	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateCallingTool, m.state)
 	assert.True(t, session.IsApproved("some_tool"), "tool should now be session-approved")
@@ -270,7 +279,9 @@ func TestUpdate_ToolApproval_N_DeniesAndProcessesNext(t *testing.T) {
 	m.toolCallIdx[tc.ID] = 0
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusPending})
 
+	// Stage "n" then confirm.
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, toolStatusDenied, m.items[0].toolStatus)
 	assert.Nil(t, m.currentCall)

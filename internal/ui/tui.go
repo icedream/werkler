@@ -278,10 +278,9 @@ func init() {
 				lines = append(lines, "- `↑/↓ pgup/pgdn` — scroll conversation history")
 				lines = append(lines, "")
 				lines = append(lines, "**Tool approval keys** (when prompted)")
-				lines = append(lines, "- `y` — allow once")
-				lines = append(lines, "- `a` — allow for this session")
-				lines = append(lines, "- `p` — allow permanently (saves to config)")
-				lines = append(lines, "- `n` — deny")
+				lines = append(lines, "- press a key to stage a choice, then `Enter` to confirm:")
+				lines = append(lines, "- `y` → allow once  `a` → allow for session  `p` → allow permanently  `n` → deny")
+				lines = append(lines, "- `Esc` — clear staged choice")
 				lines = append(lines, "")
 				lines = append(lines, "**Slash commands** — type `/` to see autocomplete")
 				for _, cmd := range slashCommands {
@@ -363,6 +362,10 @@ type Model struct {
 	persistToolApproval func(toolName string) error
 	// persistPathApproval, if non-nil, saves a path to auto_approve_paths.
 	persistPathApproval func(path string, write bool) error
+
+	// pendingApprovalChoice is the staged choice in an approval dialog ("y", "a",
+	// "p", or "n"). Empty means nothing is staged yet. Confirmed with Enter.
+	pendingApprovalChoice string
 
 	// ask_user state (stateAwaitingUserQuestion).
 	askUserCallID        string
@@ -576,23 +579,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateAwaitingPathApproval:
 			if m.currentPathRequest.Path != "" {
 				switch msg.String() {
-				case "y", "Y":
-					m.approvePathRequest(m.currentPathRequest)
-					m.currentPathRequest = chat.PathAccessRequest{}
-					cmds = append(cmds, m.processNextPath())
-					needRebuild = true
-				case "a", "A":
-					// Approve current and all remaining paths at once.
-					m.approvePathRequest(m.currentPathRequest)
-					for _, req := range m.pendingPathApprovals {
-						m.approvePathRequest(req)
+				case "y", "Y", "a", "A", "n", "N":
+					key := strings.ToLower(msg.String())
+					if m.pendingApprovalChoice == key {
+						m.pendingApprovalChoice = "" // toggle off
+					} else {
+						m.pendingApprovalChoice = key
 					}
-					m.pendingPathApprovals = nil
-					m.currentPathRequest = chat.PathAccessRequest{}
-					cmds = append(cmds, m.processNextPath())
 					needRebuild = true
 				case "p", "P":
 					if m.persistPathApproval != nil {
+						if m.pendingApprovalChoice == "p" {
+							m.pendingApprovalChoice = ""
+						} else {
+							m.pendingApprovalChoice = "p"
+						}
+						needRebuild = true
+					}
+				case "enter":
+					switch m.pendingApprovalChoice {
+					case "y":
+						m.approvePathRequest(m.currentPathRequest)
+						m.currentPathRequest = chat.PathAccessRequest{}
+						cmds = append(cmds, m.processNextPath())
+						needRebuild = true
+					case "a":
+						m.approvePathRequest(m.currentPathRequest)
+						for _, req := range m.pendingPathApprovals {
+							m.approvePathRequest(req)
+						}
+						m.pendingPathApprovals = nil
+						m.currentPathRequest = chat.PathAccessRequest{}
+						cmds = append(cmds, m.processNextPath())
+						needRebuild = true
+					case "p":
 						req := m.currentPathRequest
 						m.approvePathRequest(req)
 						if err := m.persistPathApproval(req.Path, req.Write); err != nil {
@@ -604,29 +624,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.currentPathRequest = chat.PathAccessRequest{}
 						cmds = append(cmds, m.processNextPath())
 						needRebuild = true
-					}
-				case "n", "N":
-					// Deny: clear path queue, deny the pending tool call.
-					m.pendingPathApprovals = nil
-					m.currentPathRequest = chat.PathAccessRequest{}
-					if m.pendingCallAfterPaths != nil {
-						call := *m.pendingCallAfterPaths
-						m.pendingCallAfterPaths = nil
-						if idx, ok := m.toolCallIdx[call.ID]; ok {
-							m.items[idx].toolStatus = toolStatusDenied
+					case "n":
+						m.pendingPathApprovals = nil
+						m.currentPathRequest = chat.PathAccessRequest{}
+						if m.pendingCallAfterPaths != nil {
+							call := *m.pendingCallAfterPaths
+							m.pendingCallAfterPaths = nil
+							if idx, ok := m.toolCallIdx[call.ID]; ok {
+								m.items[idx].toolStatus = toolStatusDenied
+							}
+							m.messages = append(m.messages, ai.Message{
+								Role:       "tool",
+								ToolCallID: call.ID,
+								Content:    "(tool call was denied — path access was not approved)",
+							})
+							m.currentCall = nil
+							nextCmd := m.processNextCall()
+							needRebuild = true
+							cmds = append(cmds, nextCmd)
+						} else {
+							m.state = stateIdle
 						}
-						m.messages = append(m.messages, ai.Message{
-							Role:       "tool",
-							ToolCallID: call.ID,
-							Content:    "(tool call was denied — path access was not approved)",
-						})
-						m.currentCall = nil
-						nextCmd := m.processNextCall()
-						needRebuild = true
-						cmds = append(cmds, nextCmd)
-					} else {
-						m.state = stateIdle
 					}
+				case "esc":
+					m.pendingApprovalChoice = ""
+					needRebuild = true
 				default:
 					var vpCmd tea.Cmd
 					m.viewport, vpCmd = m.viewport.Update(msg)
@@ -637,31 +659,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateAwaitingApproval:
 			if m.currentCall != nil {
 				switch msg.String() {
-				case "y", "Y":
-					call := *m.currentCall
-					if idx, ok := m.toolCallIdx[call.ID]; ok {
-						m.items[idx].toolStatus = toolStatusRunning
+				case "y", "Y", "a", "A", "n", "N":
+					key := strings.ToLower(msg.String())
+					if m.pendingApprovalChoice == key {
+						m.pendingApprovalChoice = ""
+					} else {
+						m.pendingApprovalChoice = key
 					}
-					m.callingToolName = call.Name
-					m.currentCall = nil
-					m.executingCall = &call
-					m.state = stateCallingTool
 					needRebuild = true
-					cmds = append(cmds, doCallTool(m.ctx, m.session, call))
-				case "a", "A":
-					call := *m.currentCall
-					m.session.ApproveForSession(call.Name)
-					if idx, ok := m.toolCallIdx[call.ID]; ok {
-						m.items[idx].toolStatus = toolStatusRunning
-					}
-					m.callingToolName = call.Name
-					m.currentCall = nil
-					m.executingCall = &call
-					m.state = stateCallingTool
-					needRebuild = true
-					cmds = append(cmds, doCallTool(m.ctx, m.session, call))
 				case "p", "P":
 					if m.persistToolApproval != nil {
+						if m.pendingApprovalChoice == "p" {
+							m.pendingApprovalChoice = ""
+						} else {
+							m.pendingApprovalChoice = "p"
+						}
+						needRebuild = true
+					}
+				case "enter":
+					switch m.pendingApprovalChoice {
+					case "y":
+						call := *m.currentCall
+						if idx, ok := m.toolCallIdx[call.ID]; ok {
+							m.items[idx].toolStatus = toolStatusRunning
+						}
+						m.callingToolName = call.Name
+						m.currentCall = nil
+						m.executingCall = &call
+						m.state = stateCallingTool
+						needRebuild = true
+						cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+					case "a":
+						call := *m.currentCall
+						m.session.ApproveForSession(call.Name)
+						if idx, ok := m.toolCallIdx[call.ID]; ok {
+							m.items[idx].toolStatus = toolStatusRunning
+						}
+						m.callingToolName = call.Name
+						m.currentCall = nil
+						m.executingCall = &call
+						m.state = stateCallingTool
+						needRebuild = true
+						cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+					case "p":
 						call := *m.currentCall
 						m.session.ApproveForSession(call.Name)
 						if err := m.persistToolApproval(call.Name); err != nil {
@@ -679,21 +719,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.state = stateCallingTool
 						needRebuild = true
 						cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+					case "n":
+						call := *m.currentCall
+						if idx, ok := m.toolCallIdx[call.ID]; ok {
+							m.items[idx].toolStatus = toolStatusDenied
+						}
+						m.messages = append(m.messages, ai.Message{
+							Role:       "tool",
+							ToolCallID: call.ID,
+							Content:    "(tool call was denied by the user)",
+						})
+						m.currentCall = nil
+						nextCmd := m.processNextCall()
+						needRebuild = true
+						cmds = append(cmds, nextCmd)
 					}
-				case "n", "N":
-					call := *m.currentCall
-					if idx, ok := m.toolCallIdx[call.ID]; ok {
-						m.items[idx].toolStatus = toolStatusDenied
-					}
-					m.messages = append(m.messages, ai.Message{
-						Role:       "tool",
-						ToolCallID: call.ID,
-						Content:    "(tool call was denied by the user)",
-					})
-					m.currentCall = nil
-					nextCmd := m.processNextCall()
+				case "esc":
+					m.pendingApprovalChoice = ""
 					needRebuild = true
-					cmds = append(cmds, nextCmd)
 				default:
 					var vpCmd tea.Cmd
 					m.viewport, vpCmd = m.viewport.Update(msg)
@@ -1189,6 +1232,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentPathRequest = reqs[0]
 				m.pendingPathApprovals = reqs[1:]
 				m.state = stateAwaitingPathApproval
+				m.pendingApprovalChoice = ""
 				needRebuild = true
 			default:
 				// Tool execution error: go idle but keep queued prompts intact.
@@ -1342,6 +1386,16 @@ func (m Model) headerView() string {
 	return headerStyle.Width(m.width).Render(text)
 }
 
+// approvalKey renders a single key hint for an approval dialog.
+// When key == selected it uses the highlighted style; otherwise the normal hint style.
+func (m Model) approvalKey(key, selected string) string {
+	label := "[" + key + "]"
+	if key == selected {
+		return approvalSelectedStyle.Render(label)
+	}
+	return keyHintStyle.Render(label)
+}
+
 func (m Model) statusLines() (line1, line2 string) {
 	queueHint := ""
 	if n := len(m.queuedPrompts); n > 0 {
@@ -1375,12 +1429,16 @@ func (m Model) statusLines() (line1, line2 string) {
 		if remaining > 0 {
 			l1 += statusStyle.Render(fmt.Sprintf(" (+%d more)", remaining))
 		}
+		ch := m.pendingApprovalChoice
 		l2 := approvalPromptStyle.Render("Allow? ") +
-			keyHintStyle.Render("[y]") + "es  " +
-			keyHintStyle.Render("[n]") + "o  " +
-			keyHintStyle.Render("[a]") + "ll remaining"
+			m.approvalKey("y", ch) + "es  " +
+			m.approvalKey("n", ch) + "o  " +
+			m.approvalKey("a", ch) + "ll remaining"
 		if m.persistPathApproval != nil {
-			l2 += "  " + keyHintStyle.Render("[p]") + "ermanent"
+			l2 += "  " + m.approvalKey("p", ch) + "ermanent"
+		}
+		if ch != "" {
+			l2 += "  " + keyHintStyle.Render("[↵]") + " confirm  " + keyHintStyle.Render("[esc]") + " cancel"
 		}
 		return l1 + allowAllIndicator, l2
 	case stateAwaitingApproval:
@@ -1392,12 +1450,16 @@ func (m Model) statusLines() (line1, line2 string) {
 		if args != "" {
 			l1 += "  " + args
 		}
+		ch := m.pendingApprovalChoice
 		l2 := approvalPromptStyle.Render("Allow? ") +
-			keyHintStyle.Render("[y]") + "es  " +
-			keyHintStyle.Render("[n]") + "o  " +
-			keyHintStyle.Render("[a]") + "lways"
+			m.approvalKey("y", ch) + "es  " +
+			m.approvalKey("n", ch) + "o  " +
+			m.approvalKey("a", ch) + "lways"
 		if m.persistToolApproval != nil {
-			l2 += "  " + keyHintStyle.Render("[p]") + "ermanent"
+			l2 += "  " + m.approvalKey("p", ch) + "ermanent"
+		}
+		if ch != "" {
+			l2 += "  " + keyHintStyle.Render("[↵]") + " confirm  " + keyHintStyle.Render("[esc]") + " cancel"
 		}
 		return l1 + allowAllIndicator, l2
 	case stateAwaitingUserQuestion:
@@ -1603,6 +1665,7 @@ func (m *Model) processNextPath() tea.Cmd {
 		m.currentPathRequest = m.pendingPathApprovals[0]
 		m.pendingPathApprovals = m.pendingPathApprovals[1:]
 		m.state = stateAwaitingPathApproval
+		m.pendingApprovalChoice = ""
 		return nil
 	}
 	// All paths approved — proceed with the pending tool call.
@@ -1667,6 +1730,7 @@ func (m *Model) processNextCall() tea.Cmd {
 	}
 
 	m.state = stateAwaitingApproval
+	m.pendingApprovalChoice = ""
 	return nil
 }
 
