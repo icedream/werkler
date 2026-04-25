@@ -197,14 +197,9 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any
 		return "", fmt.Errorf("unknown tool %q (call Tools first to populate the tool map)", name)
 	}
 
-	rawArgs, err := json.Marshal(args)
-	if err != nil {
-		return "", fmt.Errorf("marshalling tool arguments: %w", err)
-	}
-
 	result, err := entry.conn.session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      entry.origName,
-		Arguments: rawArgs,
+		Arguments: args,
 	})
 	if err != nil {
 		return "", fmt.Errorf("calling tool %q on %q: %w", entry.origName, entry.conn.name, err)
