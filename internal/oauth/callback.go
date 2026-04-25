@@ -22,10 +22,11 @@ type CallbackServer struct {
 	resultCh chan CallbackResult
 }
 
-// StartCallbackServer starts a callback server on a random loopback port and
+// StartCallbackServer starts a callback server on the given loopback port and
 // returns immediately; the server handles the callback in the background.
-func StartCallbackServer() (*CallbackServer, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// Use port 0 to let the OS pick a random available port.
+func StartCallbackServer(port int) (*CallbackServer, error) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("starting OAuth callback server: %w", err)
 	}

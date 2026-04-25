@@ -147,7 +147,11 @@ func (m *Manager) ConnectPendingOAuth(ctx context.Context, display func(serverNa
 	m.mu.Unlock()
 
 	for _, srv := range pending {
-		cbSrv, err := oauthpkg.StartCallbackServer()
+		cbPort := srv.OAuthCallbackPort
+		if cbPort == 0 {
+			cbPort = 34217
+		}
+		cbSrv, err := oauthpkg.StartCallbackServer(cbPort)
 		if err != nil {
 			return fmt.Errorf("starting OAuth callback server for %q: %w", srv.Name, err)
 		}
