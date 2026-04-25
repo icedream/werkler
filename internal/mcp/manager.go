@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -17,7 +18,31 @@ import (
 	oauthpkg "github.com/icedream/werkler/internal/oauth"
 )
 
-// toolNameSep is the separator used between server name and tool name in the
+// headerTransport is an http.RoundTripper that injects static headers into every request.
+type headerTransport struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone the request so the original is not mutated.
+	r := req.Clone(req.Context())
+	for k, v := range t.headers {
+		r.Header.Set(k, v)
+	}
+	return t.base.RoundTrip(r)
+}
+
+// httpClientWithHeaders returns an *http.Client whose transport injects the given headers.
+// Returns nil when headers is empty (the transport will use its default client).
+func httpClientWithHeaders(headers map[string]string) *http.Client {
+	if len(headers) == 0 {
+		return nil
+	}
+	base := http.DefaultTransport
+	return &http.Client{Transport: &headerTransport{base: base, headers: headers}}
+}
+
 // AI-facing tool name. Double underscore keeps names safe for OpenAI's
 // function name regex ([a-zA-Z0-9_-]{1,64}).
 const toolNameSep = "__"
@@ -137,6 +162,7 @@ func (m *Manager) ConnectPendingOAuth(ctx context.Context, display func(serverNa
 		handler := oauthpkg.NewHandler(srv.Name, cbSrv.RedirectURI(), localNotifier)
 		transport := &mcp.StreamableClientTransport{
 			Endpoint:     srv.URL,
+			HTTPClient:   httpClientWithHeaders(srv.Headers),
 			OAuthHandler: handler,
 		}
 		client := mcp.NewClient(m.mcpImpl, nil)
@@ -207,7 +233,10 @@ func (m *Manager) connectOne(ctx context.Context, srv config.MCPServerConfig, sa
 		if srv.URL == "" {
 			return fmt.Errorf("streamable transport requires a url")
 		}
-		transport = &mcp.StreamableClientTransport{Endpoint: srv.URL}
+		transport = &mcp.StreamableClientTransport{
+			Endpoint:   srv.URL,
+			HTTPClient: httpClientWithHeaders(srv.Headers),
+		}
 
 	default:
 		return fmt.Errorf("unknown transport %q", srv.Transport)

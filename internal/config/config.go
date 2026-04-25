@@ -29,7 +29,8 @@ type MCPServerConfig struct {
 	Args    []string          `mapstructure:"args"`
 	Env     map[string]string `mapstructure:"env"`
 	// For sse/streamable transport:
-	URL string `mapstructure:"url"`
+	URL     string            `mapstructure:"url"`
+	Headers map[string]string `mapstructure:"headers"` // extra HTTP request headers (e.g. Authorization)
 	// OAuth enables OAuth 2.1 + PKCE authentication for streamable transport.
 	// Authentication is deferred: the browser flow runs the first time a prompt is submitted.
 	OAuth bool `mapstructure:"oauth"`
