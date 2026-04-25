@@ -37,10 +37,18 @@ type serverConn struct {
 	serverSession *mcp.ServerSession // non-nil for builtin servers
 }
 
+// toolEntry maps an AI-facing tool name back to the originating connection and
+// the original (unsanitized) tool name as registered on the MCP server.
+type toolEntry struct {
+	conn     *serverConn
+	origName string
+}
+
 // Manager owns all MCP server connections for the lifetime of a chat session.
 type Manager struct {
 	mu      sync.Mutex
 	conns   []*serverConn
+	toolMap map[string]toolEntry // AI-facing name → {conn, original name}
 	mcpImpl *mcp.Implementation
 }
 
@@ -48,6 +56,7 @@ type Manager struct {
 func NewManager() *Manager {
 	return &Manager{
 		mcpImpl: &mcp.Implementation{Name: "werkler", Version: "v0.1.0"},
+		toolMap: make(map[string]toolEntry),
 	}
 }
 
@@ -141,13 +150,15 @@ func (m *Manager) connectOne(ctx context.Context, srv config.MCPServerConfig, sa
 
 // Tools returns all tools available across connected MCP servers as AI tool definitions.
 // Tool names are formatted as "<safe-server-name>__<tool-name>" to satisfy
-// OpenAI's function name constraints.
+// OpenAI's function name constraints. The original tool names are stored internally
+// so CallTool can dispatch correctly even when names contain unsafe characters.
 func (m *Manager) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 	m.mu.Lock()
 	conns := m.conns
 	m.mu.Unlock()
 
 	var tools []ai.ToolDefinition
+	newMap := make(map[string]toolEntry)
 	for _, conn := range conns {
 		for t, err := range conn.session.Tools(ctx, nil) {
 			if err != nil {
@@ -157,6 +168,7 @@ func (m *Manager) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 			if len(aiName) > 64 {
 				aiName = aiName[:64]
 			}
+			newMap[aiName] = toolEntry{conn: conn, origName: t.Name}
 			tools = append(tools, ai.ToolDefinition{
 				Name:        aiName,
 				Description: t.Description,
@@ -164,29 +176,25 @@ func (m *Manager) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 			})
 		}
 	}
+
+	m.mu.Lock()
+	m.toolMap = newMap
+	m.mu.Unlock()
+
 	return tools, nil
 }
 
 // CallTool dispatches a tool call to the appropriate MCP server.
 // Tool names must be in the format returned by Tools ("<safe-server-name>__<tool-name>").
+// The original (unsanitized) tool name is looked up from the internal map built
+// by the most recent Tools() call, so original names with unsafe characters are
+// preserved correctly.
 func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
-	safeName, toolName, ok := splitToolName(name)
-	if !ok {
-		return "", fmt.Errorf("tool name %q missing server prefix", name)
-	}
-
 	m.mu.Lock()
-	var conn *serverConn
-	for _, c := range m.conns {
-		if c.safeName == safeName {
-			conn = c
-			break
-		}
-	}
+	entry, ok := m.toolMap[name]
 	m.mu.Unlock()
-
-	if conn == nil {
-		return "", fmt.Errorf("no MCP server with safe-name %q", safeName)
+	if !ok {
+		return "", fmt.Errorf("unknown tool %q (call Tools first to populate the tool map)", name)
 	}
 
 	rawArgs, err := json.Marshal(args)
@@ -194,12 +202,12 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any
 		return "", fmt.Errorf("marshalling tool arguments: %w", err)
 	}
 
-	result, err := conn.session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      toolName,
+	result, err := entry.conn.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      entry.origName,
 		Arguments: rawArgs,
 	})
 	if err != nil {
-		return "", fmt.Errorf("calling tool %q on %q: %w", toolName, conn.name, err)
+		return "", fmt.Errorf("calling tool %q on %q: %w", entry.origName, entry.conn.name, err)
 	}
 
 	return renderResult(result), nil

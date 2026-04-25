@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -59,7 +60,62 @@ type StreamChunk struct {
 	Err   error   // non-nil on error; stream is terminated
 }
 
-// Complete sends the conversation to the AI and returns the next message.
+// Completer can perform a non-streaming chat completion.
+type Completer interface {
+	Complete(ctx context.Context, messages []Message, tools []ToolDefinition) (Message, error)
+}
+
+// StreamCompleter can perform a streaming chat completion.
+type StreamCompleter interface {
+	CompleteStream(ctx context.Context, messages []Message, tools []ToolDefinition) <-chan StreamChunk
+}
+
+// Compile-time assertions: *Client satisfies both interfaces.
+var _ Completer = (*Client)(nil)
+var _ StreamCompleter = (*Client)(nil)
+
+// accumTool holds incrementally received fragments of one tool call.
+type accumTool struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
+// buildFinalMessage assembles the complete assistant Message from accumulated
+// streaming fragments. toolAccum maps tool-call index → accumulated data.
+// Indexes are iterated in sorted order to handle sparse or out-of-order indexes.
+func buildFinalMessage(content string, toolAccum map[int]*accumTool) (Message, error) {
+	msg := Message{
+		Role:    "assistant",
+		Content: content,
+	}
+	if len(toolAccum) == 0 {
+		return msg, nil
+	}
+
+	indexes := make([]int, 0, len(toolAccum))
+	for idx := range toolAccum {
+		indexes = append(indexes, idx)
+	}
+	sort.Ints(indexes)
+
+	for _, idx := range indexes {
+		acc := toolAccum[idx]
+		var args map[string]any
+		if s := acc.args.String(); s != "" {
+			if err := json.Unmarshal([]byte(s), &args); err != nil {
+				return Message{}, fmt.Errorf("parsing tool call arguments for %q: %w", acc.name, err)
+			}
+		}
+		msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+			ID:        acc.id,
+			Name:      acc.name,
+			Arguments: args,
+		})
+	}
+	return msg, nil
+}
+
 // The returned message may contain ToolCalls that the caller must execute.
 func (c *Client) Complete(ctx context.Context, messages []Message, tools []ToolDefinition) (Message, error) {
 	req := openai.ChatCompletionRequest{
@@ -114,11 +170,6 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 		// Accumulate the full response across chunks.
 		var contentBuf strings.Builder
 		// toolAccum maps tool-call index → accumulated data.
-		type accumTool struct {
-			id   string
-			name string
-			args strings.Builder
-		}
 		toolAccum := map[int]*accumTool{}
 
 		for {
@@ -163,30 +214,11 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			}
 		}
 
-		// Build the final message.
-		msg := Message{
-			Role:    "assistant",
-			Content: contentBuf.String(),
+		msg, err := buildFinalMessage(contentBuf.String(), toolAccum)
+		if err != nil {
+			send(StreamChunk{Err: err})
+			return
 		}
-		for i := 0; ; i++ {
-			acc, ok := toolAccum[i]
-			if !ok {
-				break
-			}
-			var args map[string]any
-			if s := acc.args.String(); s != "" {
-				if err := json.Unmarshal([]byte(s), &args); err != nil {
-					send(StreamChunk{Err: fmt.Errorf("parsing tool call arguments for %q: %w", acc.name, err)})
-					return
-				}
-			}
-			msg.ToolCalls = append(msg.ToolCalls, ToolCall{
-				ID:        acc.id,
-				Name:      acc.name,
-				Arguments: args,
-			})
-		}
-
 		send(StreamChunk{Done: true, Msg: msg})
 	}()
 	return ch

@@ -82,7 +82,7 @@ type contextDoneMsg struct{}
 // Model is the bubbletea model for the interactive TUI.
 type Model struct {
 	ctx     context.Context
-	client  *ai.Client
+	client  ai.StreamCompleter
 	session *chat.Session
 	tools   []ai.ToolDefinition
 
@@ -118,7 +118,7 @@ type Model struct {
 
 func initialModel(
 	ctx context.Context,
-	client *ai.Client,
+	client ai.StreamCompleter,
 	session *chat.Session,
 	tools []ai.ToolDefinition,
 	modelName string,
@@ -516,7 +516,7 @@ func (m *Model) processNextCall() tea.Cmd {
 
 // doStartStream kicks off a streaming completion in a goroutine and returns
 // the first chunk as a streamChunkMsg (carrying the channel for further reads).
-func doStartStream(ctx context.Context, client *ai.Client, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
+func doStartStream(ctx context.Context, client ai.StreamCompleter, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
 	snapshot := make([]ai.Message, len(messages))
 	copy(snapshot, messages)
 	return func() tea.Msg {
@@ -575,7 +575,7 @@ func formatArgsCompact(args map[string]any) string {
 // or ctx is cancelled.
 func RunTUI(
 	ctx context.Context,
-	client *ai.Client,
+	client ai.StreamCompleter,
 	session *chat.Session,
 	modelName string,
 	serverNames []string,
