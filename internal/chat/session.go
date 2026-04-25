@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/icedream/werkler/internal/ai"
 )
@@ -60,6 +61,11 @@ type Session struct {
 	sessionWritePaths map[string]bool // paths approved for write (+ read) access this session
 	allowAll          bool            // when true, all tools and paths are approved without prompting
 	cwdReadPrefix     string          // if non-empty, reads under this absolute path are auto-approved
+
+	// mu protects disabledTools only; the other maps are only accessed from
+	// the TUI main goroutine and therefore do not need synchronisation.
+	mu            sync.RWMutex
+	disabledTools map[string]bool // tool names explicitly disabled for this session
 }
 
 // NewSession creates a Session with the given tool manager and auto-approve glob patterns.
@@ -71,6 +77,7 @@ func NewSession(tools ToolManager, autoApproveGlobs []string, autoApprovePaths [
 		autoApprovePaths:  autoApprovePaths,
 		sessionReadPaths:  make(map[string]bool),
 		sessionWritePaths: make(map[string]bool),
+		disabledTools:     make(map[string]bool),
 	}
 }
 
@@ -81,9 +88,32 @@ func NewConversation() []ai.Message {
 	}
 }
 
-// Tools delegates tool listing to the ToolManager.
-func (s *Session) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
+// AllTools returns all tools from the ToolManager without filtering disabled tools.
+// Use this to populate a tool picker UI.
+func (s *Session) AllTools(ctx context.Context) ([]ai.ToolDefinition, error) {
 	return s.tools.Tools(ctx)
+}
+
+// Tools delegates tool listing to the ToolManager, filtering out any tools
+// that have been explicitly disabled for this session.
+func (s *Session) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
+	all, err := s.tools.Tools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	nDisabled := len(s.disabledTools)
+	s.mu.RUnlock()
+	if nDisabled == 0 {
+		return all, nil
+	}
+	filtered := make([]ai.ToolDefinition, 0, len(all))
+	for _, t := range all {
+		if s.IsToolEnabled(t.Name) {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered, nil
 }
 
 // CallTool dispatches a tool call via the ToolManager.
@@ -92,6 +122,9 @@ func (s *Session) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 // are returned as actual errors. PathApprovalError is preserved as a structured error
 // so interactive callers (TUI) can present path approval dialogs.
 func (s *Session) CallTool(ctx context.Context, tc ai.ToolCall) (string, error) {
+	if !s.IsToolEnabled(tc.Name) {
+		return "(tool call was rejected — tool is disabled for this session)", nil
+	}
 	result, err := s.tools.CallTool(ctx, tc.Name, tc.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -211,6 +244,25 @@ func (s *Session) SetAllowAll(v bool) { s.allowAll = v }
 
 // AllowAll reports whether allow-all mode is currently active.
 func (s *Session) AllowAll() bool { return s.allowAll }
+
+// SetToolEnabled enables or disables a specific tool for this session.
+// Disabled tools are hidden from the AI and rejected if called directly.
+func (s *Session) SetToolEnabled(name string, enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if enabled {
+		delete(s.disabledTools, name)
+	} else {
+		s.disabledTools[name] = true
+	}
+}
+
+// IsToolEnabled reports whether the named tool is currently enabled.
+func (s *Session) IsToolEnabled(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.disabledTools[name]
+}
 
 // SetCWDReadPrefix sets an absolute path prefix under which reads are
 // auto-approved without prompting. Intended to be called once at startup

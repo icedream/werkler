@@ -53,6 +53,7 @@ const (
 	stateConnectingOAuth      // running deferred OAuth server connections
 	statePickingModel         // model selection list is open
 	statePickingSession       // session picker list is open
+	statePickingTools         // tool enable/disable picker is open
 	stateAwaitingUserQuestion // AI asked a question; waiting for the user's reply
 )
 
@@ -68,7 +69,7 @@ func inputPlaceholder(state tuiState) string {
 		return "Use ↑/↓ to select a choice, Enter to confirm…"
 	case stateConnectingOAuth:
 		return "Waiting for authorization in browser…"
-	case statePickingModel, statePickingSession:
+	case statePickingModel, statePickingSession, statePickingTools:
 		return ""
 	case stateIdle:
 		return "Type a message, press Enter to send…"
@@ -144,6 +145,11 @@ type oauthConnectFailedMsg struct{ err error }
 type modelsLoadedMsg struct{ models []ai.ModelItem }
 type modelsErrMsg struct{ err error }
 
+// --- Tool picker messages ---
+
+type allToolsMsg struct{ tools []ai.ToolDefinition }
+type allToolsErrMsg struct{ err error }
+
 // processOutputMsg carries new output from a running process for live display.
 type processOutputMsg struct {
 	handle string
@@ -197,6 +203,49 @@ func (s sessionItem) Description() string {
 	return formatAge(s.sess.UpdatedAt) + "  " + shortenHomePath(s.sess.CWD)
 }
 
+// toolItem implements list.Item for the tool picker.
+// The name field holds the full AI-facing tool name (e.g. "github__get_file_contents").
+type toolItem struct {
+	name        string
+	description string
+	enabled     bool
+}
+
+func toolServerName(name string) string {
+	if i := strings.Index(name, "__"); i >= 0 {
+		return name[:i]
+	}
+	return "(built-in)"
+}
+
+func toolBaseName(name string) string {
+	if i := strings.Index(name, "__"); i >= 0 {
+		return name[i+2:]
+	}
+	return name
+}
+
+func (t toolItem) FilterValue() string { return t.name }
+func (t toolItem) Title() string {
+	check := "[ ]"
+	if t.enabled {
+		check = "[✓]"
+	}
+	return check + " " + toolBaseName(t.name)
+}
+func (t toolItem) Description() string {
+	server := toolServerName(t.name)
+	desc := t.description
+	const maxDesc = 80
+	if len(desc) > maxDesc {
+		desc = desc[:maxDesc] + "…"
+	}
+	if desc == "" {
+		return "[" + server + "]"
+	}
+	return "[" + server + "] " + desc
+}
+
 // SessionOptions configures optional session persistence behaviour for RunTUI.
 type SessionOptions struct {
 	Store      *sessionstore.Store   // nil = session persistence disabled
@@ -236,6 +285,16 @@ func init() {
 				m.modelPicker.SetItems(nil)
 				m.modelPicker.SetSize(m.width, m.height-fixedLines)
 				return []tea.Cmd{doListModels(m.ctx, m.modelManager)}
+			},
+		},
+		{
+			name:        "tools",
+			description: "Enable or disable individual tools for this session",
+			action: func(m *Model) []tea.Cmd {
+				m.state = statePickingTools
+				m.toolPicker.SetItems(nil)
+				m.toolPicker.SetSize(m.width, m.height-fixedLines)
+				return []tea.Cmd{doListAllTools(m.ctx, m.session)}
 			},
 		},
 		{
@@ -350,6 +409,10 @@ type Model struct {
 	// Session picker (only valid during statePickingSession).
 	sessionPicker list.Model
 
+	// Tool picker (only valid during statePickingTools).
+	toolPicker  list.Model
+	allToolDefs []ai.ToolDefinition // full unfiltered list, set on allToolsMsg
+
 	// Session persistence.
 	sessionStore     *sessionstore.Store
 	sessionID        string    // current session's ID; empty until first save
@@ -440,6 +503,14 @@ func initialModel(
 	sessPicker.SetFilteringEnabled(true)
 	sessPicker.DisableQuitKeybindings()
 
+	// Tool picker: space to toggle, filtering enabled.
+	toolDel := list.NewDefaultDelegate()
+	toolPickerM := list.New(nil, toolDel, 0, 0)
+	toolPickerM.Title = "Toggle tools  [space] enable/disable"
+	toolPickerM.SetShowStatusBar(false)
+	toolPickerM.SetFilteringEnabled(true)
+	toolPickerM.DisableQuitKeybindings()
+
 	// Use modelManager when the client also implements ModelManager.
 	var mm ai.ModelManager
 	if m, ok := client.(ai.ModelManager); ok {
@@ -465,6 +536,7 @@ func initialModel(
 		viewport:           viewport.New(0, 0),
 		modelPicker:        picker,
 		sessionPicker:      sessPicker,
+		toolPicker:         toolPickerM,
 		input:              ti,
 		spinner:            sp,
 		modelName:          modelName,
@@ -928,6 +1000,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, pickerCmd)
 			}
 
+		case statePickingTools:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				// Refresh m.tools from the (possibly updated) disabled set and go back.
+				m.tools = m.filteredFromAllDefs()
+				m.state = stateIdle
+				m.updateCompletion()
+			case tea.KeyRunes:
+				if msg.String() == " " {
+					// Toggle the currently selected tool.
+					if sel := m.toolPicker.SelectedItem(); sel != nil {
+						item := sel.(toolItem)
+						item.enabled = !item.enabled
+						m.session.SetToolEnabled(item.name, item.enabled)
+						m.toolPicker.SetItem(m.toolPicker.Index(), item)
+					}
+					break
+				}
+				var pickerCmd tea.Cmd
+				m.toolPicker, pickerCmd = m.toolPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			default:
+				var pickerCmd tea.Cmd
+				m.toolPicker, pickerCmd = m.toolPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			}
+
 		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth:
 			switch msg.Type {
 			case tea.KeyEnter:
@@ -1056,6 +1155,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 		}
 
+	case allToolsMsg:
+		if m.state == statePickingTools {
+			m.allToolDefs = msg.tools
+			items := make([]list.Item, len(msg.tools))
+			for i, t := range msg.tools {
+				items[i] = toolItem{
+					name:        t.Name,
+					description: t.Description,
+					enabled:     m.session.IsToolEnabled(t.Name),
+				}
+			}
+			m.toolPicker.SetItems(items)
+			m.toolPicker.SetSize(m.width, m.height-fixedLines)
+		}
+
+	case allToolsErrMsg:
+		if m.state == statePickingTools {
+			m.items = append(m.items, displayItem{kind: itemError, content: "listing tools: " + msg.err.Error()})
+			m.state = stateIdle
+			m.updateCompletion()
+			needRebuild = true
+		}
+
 	case sessionHintMsg:
 		m.resumeHint = msg.sess
 		needRebuild = true
@@ -1151,6 +1273,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = m.width
 		m.input.Width = m.width - 5 // 5 = len("You> ")
 		m.modelPicker.SetSize(m.width, m.height-fixedLines)
+		m.toolPicker.SetSize(m.width, m.height-fixedLines)
 		m.syncViewportHeight() // accounts for completion popup if visible
 		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
 		needRebuild = true
@@ -1354,6 +1477,9 @@ func (m Model) View() string {
 	}
 	if m.state == statePickingSession {
 		return m.sessionPicker.View()
+	}
+	if m.state == statePickingTools {
+		return m.toolPicker.View()
 	}
 
 	sep := separator(m.width)
@@ -1819,6 +1945,32 @@ func doListModels(ctx context.Context, mm ai.ModelManager) tea.Cmd {
 		}
 		return modelsLoadedMsg{models: models}
 	}
+}
+
+// doListAllTools fetches the full (unfiltered) tool list for the tool picker.
+func doListAllTools(ctx context.Context, session *chat.Session) tea.Cmd {
+	return func() tea.Msg {
+		tools, err := session.AllTools(ctx)
+		if err != nil {
+			return allToolsErrMsg{err: err}
+		}
+		return allToolsMsg{tools: tools}
+	}
+}
+
+// filteredFromAllDefs returns the enabled subset of m.allToolDefs according to
+// the current session disabled set. Used to refresh m.tools after picker changes.
+func (m *Model) filteredFromAllDefs() []ai.ToolDefinition {
+	if len(m.allToolDefs) == 0 {
+		return m.tools // nothing was loaded; keep existing slice
+	}
+	out := make([]ai.ToolDefinition, 0, len(m.allToolDefs))
+	for _, t := range m.allToolDefs {
+		if m.session.IsToolEnabled(t.Name) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // --- Formatting helpers ---
