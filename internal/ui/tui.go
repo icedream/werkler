@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -279,7 +280,7 @@ func init() {
 				lines = append(lines, "")
 				lines = append(lines, "**Tool approval keys** (when prompted)")
 				lines = append(lines, "- press a key to stage a choice, then `Enter` to confirm:")
-				lines = append(lines, "- `y` → allow once  `a` → allow for session  `p` → allow permanently  `n` → deny")
+				lines = append(lines, "- `y` → allow once  `d` → allow directory  `a` → allow for session  `p` → allow permanently  `n` → deny")
 				lines = append(lines, "- `Esc` — clear staged choice")
 				lines = append(lines, "")
 				lines = append(lines, "**Slash commands** — type `/` to see autocomplete")
@@ -587,6 +588,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.pendingApprovalChoice = key
 					}
 					needRebuild = true
+				case "d", "D":
+					if m.pendingApprovalChoice == "d" {
+						m.pendingApprovalChoice = ""
+					} else {
+						m.pendingApprovalChoice = "d"
+					}
+					needRebuild = true
 				case "p", "P":
 					if m.persistPathApproval != nil {
 						if m.pendingApprovalChoice == "p" {
@@ -600,6 +608,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch m.pendingApprovalChoice {
 					case "y":
 						m.approvePathRequest(m.currentPathRequest)
+						m.currentPathRequest = chat.PathAccessRequest{}
+						cmds = append(cmds, m.processNextPath())
+						needRebuild = true
+					case "d":
+						// Approve the whole containing directory.
+						dirReq := chat.PathAccessRequest{
+							Path:  filepath.Dir(m.currentPathRequest.Path),
+							Write: m.currentPathRequest.Write,
+						}
+						m.approvePathRequest(dirReq)
 						m.currentPathRequest = chat.PathAccessRequest{}
 						cmds = append(cmds, m.processNextPath())
 						needRebuild = true
@@ -1423,14 +1441,19 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.currentPathRequest.Write {
 			accessKind = "write"
 		}
-		l1 := approvalPromptStyle.Render(fmt.Sprintf("  Allow %s access: ", accessKind)) + m.currentPathRequest.Path
+		ch := m.pendingApprovalChoice
+		displayPath := m.currentPathRequest.Path
+		if ch == "d" {
+			displayPath = filepath.Dir(m.currentPathRequest.Path) + string(filepath.Separator) + "…"
+		}
+		l1 := approvalPromptStyle.Render(fmt.Sprintf("  Allow %s access: ", accessKind)) + displayPath
 		remaining := len(m.pendingPathApprovals)
 		if remaining > 0 {
 			l1 += statusStyle.Render(fmt.Sprintf(" (+%d more)", remaining))
 		}
-		ch := m.pendingApprovalChoice
 		l2 := approvalPromptStyle.Render("Allow? ") +
 			m.approvalKey("y", ch) + "es  " +
+			m.approvalKey("d", ch) + "irectory  " +
 			m.approvalKey("n", ch) + "o  " +
 			m.approvalKey("a", ch) + "ll remaining"
 		if m.persistPathApproval != nil {

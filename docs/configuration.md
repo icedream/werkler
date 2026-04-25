@@ -563,6 +563,7 @@ TUI as a separate dialog before the tool is executed.
 | Key | Effect |
 |-----|--------|
 | `y` | Allow this path access once |
+| `d` | Allow the whole containing directory for this session (covers all files beneath it) |
 | `a` | Allow all remaining paths in this batch |
 | `p` | Allow permanently — appends the path to `auto_approve_paths` in your config file |
 | `n` | Deny and cancel the current tool call |
