@@ -631,9 +631,10 @@ Set recommended_choice to highlight a suggested option.`,
 
 	if m.reviewer != nil {
 		reviewerDesc := fmt.Sprintf(
-			"Submit a plan, code, or reasoning to a separate reviewer AI for critical feedback.\n"+
+			"Submit your own pre-drafted plan or implementation to a separate reviewer AI for critical feedback.\n"+
 				"Reviewer: %s\n"+
-				"Use before implementing something non-trivial to catch bugs, logic errors, or design flaws early.\n"+
+				"You MUST have a concrete plan of your own before calling this tool — do NOT use it to brainstorm or ask the reviewer to generate a plan.\n"+
+				"Use it to catch bugs, logic errors, design flaws, or missing edge cases before implementing.\n"+
 				"Provide complete context so the reviewer can give useful feedback.",
 			m.reviewerLabel,
 		)
