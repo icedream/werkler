@@ -1133,12 +1133,16 @@ func (m *Manager) handleFileEdit(_ context.Context, args map[string]any) (string
 		return "", fmt.Errorf("file_edit: writing %s: %w", path, err)
 	}
 
-	// Report the line where the replacement occurred.
+	// Report the line where the replacement occurred and line-count delta.
 	idx := strings.Index(content, oldStr)
 	line := strings.Count(content[:idx], "\n") + 1
+	removed := strings.Count(oldStr, "\n") + 1
+	added := strings.Count(newStr, "\n") + 1
 	return jsonResult(map[string]any{
-		"path": path,
-		"line": line,
+		"path":    path,
+		"line":    line,
+		"added":   added,
+		"removed": removed,
 	}), nil
 }
 

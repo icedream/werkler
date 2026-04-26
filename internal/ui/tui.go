@@ -129,12 +129,13 @@ Work autonomously toward the given goal. Use todo_add, todo_update, and todo_lis
 Call task_complete(summary) when all work is done. Call ask_user only if you are completely blocked and cannot proceed without human input.`
 
 type displayItem struct {
-	kind       string
-	content    string
-	toolName   string
-	toolArgs   string // compact JSON args
-	toolStatus int
-	handle     string // process handle (itemProcessOutput only)
+	kind         string
+	content      string
+	toolName     string
+	toolArgs     string // compact JSON args
+	toolStatus   int
+	handle       string // process handle (itemProcessOutput only)
+	fileEditNote string // post-result annotation for file_edit items
 }
 
 // --- Tea messages ---
@@ -1982,7 +1983,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.items = append(m.items, displayItem{
 						kind:       itemToolCall,
 						toolName:   tc.Name,
-						toolArgs:   formatArgsCompact(tc.Arguments),
+						toolArgs:   toolCallDisplayArgs(tc.Name, tc.Arguments),
 						toolStatus: toolStatusPending,
 					})
 				}
@@ -2068,6 +2069,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// not-executed and let the AI respond via a new stream.
 				if idx, ok := m.toolCallIdx[msg.callID]; ok {
 					m.items[idx].toolStatus = toolStatusFailed
+					if msg.toolName == "file_edit" {
+						m.items[idx].fileEditNote = fileEditErrorNote(msg.err)
+					}
 				}
 				m.messages = append(m.messages, ai.Message{
 					Role:       "tool",
@@ -2095,6 +2099,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			debugLog("toolResult: ok tool=%q result=%q", msg.toolName, msg.result[:min(len(msg.result), 80)])
 			if idx, ok := m.toolCallIdx[msg.callID]; ok {
 				m.items[idx].toolStatus = toolStatusDone
+				if msg.toolName == "file_edit" {
+					m.items[idx].fileEditNote = parseFileEditNote(msg.result)
+				}
 			}
 			m.messages = append(m.messages, ai.Message{
 				Role:       "tool",
@@ -2575,6 +2582,15 @@ func (m Model) renderItem(item displayItem) string {
 		}
 		if item.toolStatus == toolStatusDenied {
 			line += "  " + toolDeniedStyle.Render("(denied)")
+		}
+		if item.fileEditNote != "" {
+			var noteStyle lipgloss.Style
+			if item.toolStatus == toolStatusFailed {
+				noteStyle = errorStyle
+			} else {
+				noteStyle = statusStyle
+			}
+			line += "\n    " + noteStyle.Render(item.fileEditNote)
 		}
 		return line
 
@@ -3249,6 +3265,53 @@ func formatArgsCompact(args map[string]any) string {
 		s = s[:120] + "…"
 	}
 	return s
+}
+
+// toolCallDisplayArgs returns a compact display string for tool call arguments.
+// For file_edit it shows just the path; for other tools it falls back to compact JSON.
+func toolCallDisplayArgs(toolName string, args map[string]any) string {
+	if toolName == "file_edit" {
+		if path, ok := args["path"].(string); ok && path != "" {
+			return shortenHomePath(path)
+		}
+	}
+	return formatArgsCompact(args)
+}
+
+// parseFileEditNote extracts a human-readable annotation from a successful
+// file_edit result JSON: e.g. "+3 -2 lines @ line 42".
+func parseFileEditNote(result string) string {
+	var data map[string]any
+	if err := json.Unmarshal([]byte(result), &data); err != nil {
+		return ""
+	}
+	added, _ := data["added"].(float64)
+	removed, _ := data["removed"].(float64)
+	line, _ := data["line"].(float64)
+	if added == 0 && removed == 0 {
+		return ""
+	}
+	add := diffAddedStyle.Render(fmt.Sprintf("+%d", int(added)))
+	rem := diffRemovedStyle.Render(fmt.Sprintf("-%d", int(removed)))
+	return fmt.Sprintf("%s %s lines @ line %d", add, rem, int(line))
+}
+
+// fileEditErrorNote returns a short, user-readable summary of a file_edit error.
+func fileEditErrorNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	// Strip "file_edit: " prefix.
+	msg = strings.TrimPrefix(msg, "file_edit: ")
+	// Truncate verbose recovery hints after " — ".
+	if i := strings.Index(msg, " — "); i > 0 {
+		msg = msg[:i]
+	}
+	if len(msg) > 100 {
+		msg = msg[:100] + "…"
+	}
+	return msg
 }
 
 // formatUsage renders token usage stats as a short human-readable string.

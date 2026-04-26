@@ -154,6 +154,12 @@ var (
 	autopilotStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("214")).
 			Bold(true)
+
+	diffAddedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("42")) // green
+
+	diffRemovedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("196")) // red
 )
 
 func separator(width int) string {
