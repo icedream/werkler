@@ -2543,8 +2543,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.executingCall = nil
 			// connect_server: refresh tool list before resuming so newly available
 			// tools are visible to the AI on the next stream.
+			// Also clear any OAuth display item that was shown during OAuth flow.
 			var nextCmd tea.Cmd
 			if msg.toolName == "connect_server" {
+				if m.oauthInfoIdx >= 0 {
+					m.items[m.oauthInfoIdx].content = "✓ Connected"
+					m.oauthInfoIdx = -1
+				}
 				nextCmd = doRefreshMCPTools(m.ctx, m.session, true)
 			} else {
 				nextCmd = m.processNextCall()
@@ -4206,6 +4211,14 @@ func RunTUI(
 		}
 	}
 	m.send = sendFn
+
+	// Wire up the OAuth display callback so ConnectByName can show auth URLs
+	// in the TUI when the AI calls connect_server for an OAuth server.
+	if opts.MCPManager != nil {
+		opts.MCPManager.SetOAuthDisplay(func(serverName, authURL string) {
+			sendFn(oauthNeedAuthMsg{serverName: serverName, authURL: authURL})
+		})
+	}
 
 	if toolMgr != nil {
 		toolMgr.SetOutputNotify(func(handle, raw, clean string) {

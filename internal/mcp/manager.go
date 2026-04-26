@@ -81,9 +81,10 @@ type Manager struct {
 	conns        []*serverConn
 	toolMap      map[string]toolEntry // AI-facing name → {conn, original name}
 	mcpImpl      *mcp.Implementation
-	pendingOAuth []config.MCPServerConfig // streamable+oauth servers deferred until first prompt
-	configured   []config.MCPServerConfig // servers registered for lazy connect (non-OAuth)
-	connecting   map[string]bool          // display names currently being connected (TOCTOU guard)
+	pendingOAuth []config.MCPServerConfig         // legacy: streamable+oauth servers deferred until first prompt (ConnectOne path)
+	configured   []config.MCPServerConfig         // servers registered for lazy connect (AI calls connect_server)
+	connecting   map[string]bool                  // display names currently being connected (TOCTOU guard)
+	oauthDisplay func(serverName, authURL string) // TUI callback: show auth URL to user; nil in non-interactive contexts
 }
 
 // NewManager creates an uninitialised Manager.
@@ -110,8 +111,8 @@ func ValidateServerNames(servers []config.MCPServerConfig) error {
 }
 
 // Register stores servers for lazy on-demand connection without connecting them
-// immediately. Non-OAuth servers go into the configured pool; OAuth servers are
-// queued in pendingOAuth so the existing first-prompt OAuth flow still works.
+// immediately. All servers go into the configured pool so the AI can connect
+// them explicitly via connect_server (including OAuth servers).
 // Register validates server names upfront and returns an error on duplicates.
 func (m *Manager) Register(servers []config.MCPServerConfig) error {
 	if err := ValidateServerNames(servers); err != nil {
@@ -119,13 +120,9 @@ func (m *Manager) Register(servers []config.MCPServerConfig) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, srv := range servers {
-		if srv.Transport == config.MCPTransportStreamable && srv.OAuth {
-			m.pendingOAuth = append(m.pendingOAuth, srv)
-		} else {
-			m.configured = append(m.configured, srv)
-		}
-	}
+	// All servers go to configured regardless of OAuth; the AI connects them
+	// on-demand via connect_server (which handles the OAuth flow when needed).
+	m.configured = append(m.configured, servers...)
 	return nil
 }
 
@@ -151,10 +148,20 @@ func (m *Manager) IsConnected(name string) bool {
 	return false
 }
 
+// SetOAuthDisplay sets the callback used to show an OAuth auth URL to the user
+// during ConnectByName for OAuth servers. It must be set before the first
+// OAuth server connection. In non-interactive contexts (e.g. prompt mode) leave
+// it nil — ConnectByName will return a clear error if OAuth interaction is needed.
+func (m *Manager) SetOAuthDisplay(fn func(serverName, authURL string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.oauthDisplay = fn
+}
+
 // ConnectByName connects a single server from the configured pool by its display
 // name. Returns (true, nil) when the server is already connected.
-// Returns an error for OAuth servers (they must be connected via the OAuth flow)
-// or when the name is not found.
+// OAuth servers are connected inline using the registered oauthDisplay callback;
+// returns an error if no callback was set and the token is not cached.
 // Safe to call concurrently: a TOCTOU guard prevents two goroutines from
 // connecting the same server simultaneously.
 func (m *Manager) ConnectByName(ctx context.Context, name string) (alreadyConnected bool, err error) {
@@ -183,11 +190,11 @@ func (m *Manager) ConnectByName(ctx context.Context, name string) (alreadyConnec
 		}
 	}
 	if found == nil {
-		// Check if it's a pending OAuth server.
+		// Check legacy pendingOAuth pool (ConnectOne path, e.g. prompt mode).
 		for _, p := range m.pendingOAuth {
 			if p.Name == name {
 				m.mu.Unlock()
-				return false, fmt.Errorf("server %q uses OAuth authentication — it will be connected automatically on your first prompt", name)
+				return false, fmt.Errorf("server %q is pending OAuth connection via the legacy flow", name)
 			}
 		}
 		m.mu.Unlock()
@@ -199,7 +206,12 @@ func (m *Manager) ConnectByName(ctx context.Context, name string) (alreadyConnec
 	m.mu.Unlock()
 
 	// Connect outside the lock to avoid blocking other callers.
-	connErr := m.connectOne(ctx, srv, sanitize(srv.Name))
+	var connErr error
+	if srv.Transport == config.MCPTransportStreamable && srv.OAuth {
+		connErr = m.connectOAuthServer(ctx, srv)
+	} else {
+		connErr = m.connectOne(ctx, srv, sanitize(srv.Name))
+	}
 
 	m.mu.Lock()
 	delete(m.connecting, name)
@@ -270,6 +282,8 @@ func (m *Manager) PendingOAuthNames() []string {
 }
 
 // ConnectPendingOAuth connects all deferred OAuth servers in order.
+// This handles servers added via ConnectOne (e.g. prompt mode).
+// For TUI lazy-connect, use ConnectByName instead.
 // display is called (without blocking) when the user must open a browser URL
 // for each server; the manager handles the HTTP callback internally.
 // On success the server's tools become available via [Tools] and [CallTool].
@@ -279,48 +293,12 @@ func (m *Manager) ConnectPendingOAuth(ctx context.Context, display func(serverNa
 	copy(pending, m.pendingOAuth)
 	m.mu.Unlock()
 
+	m.SetOAuthDisplay(display)
 	for _, srv := range pending {
-		cbPort := srv.OAuthCallbackPort
-		if cbPort == 0 {
-			cbPort = 34217
+		if err := m.connectOAuthServer(ctx, srv); err != nil {
+			return err
 		}
-		cbSrv, err := oauthpkg.StartCallbackServer(cbPort)
-		if err != nil {
-			return fmt.Errorf("starting OAuth callback server for %q: %w", srv.Name, err)
-		}
-
-		// localNotifier is called from inside handler.Authorize.
-		// It shows the URL to the user and blocks until the browser callback arrives.
-		localNotifier := func(ctx context.Context, serverName, authURL string) (string, string, error) {
-			display(serverName, authURL)
-			result, waitErr := cbSrv.Wait(ctx)
-			if waitErr != nil {
-				return "", "", waitErr
-			}
-			return result.Code, result.State, nil
-		}
-
-		handler := oauthpkg.NewHandler(srv.Name, cbSrv.RedirectURI(), localNotifier, srv.OAuthClientID, srv.OAuthClientSecret)
-		transport := &mcp.StreamableClientTransport{
-			Endpoint:     srv.URL,
-			HTTPClient:   httpClientWithHeaders(srv.Headers),
-			OAuthHandler: handler,
-		}
-		client := mcp.NewClient(m.mcpImpl, nil)
-		session, connErr := client.Connect(ctx, transport, nil)
-		cbSrv.Close()
-		if connErr != nil {
-			return fmt.Errorf("connecting to OAuth MCP server %q: %w", srv.Name, connErr)
-		}
-
-		safe := sanitize(srv.Name)
 		m.mu.Lock()
-		m.conns = append(m.conns, &serverConn{
-			name:     srv.Name,
-			safeName: safe,
-			cfg:      srv,
-			session:  session,
-		})
 		remaining := m.pendingOAuth[:0]
 		for _, p := range m.pendingOAuth {
 			if p.Name != srv.Name {
@@ -330,6 +308,62 @@ func (m *Manager) ConnectPendingOAuth(ctx context.Context, display func(serverNa
 		m.pendingOAuth = remaining
 		m.mu.Unlock()
 	}
+	return nil
+}
+
+// connectOAuthServer establishes an OAuth-authenticated MCP connection for srv.
+// It uses m.oauthDisplay to show the auth URL when user interaction is required.
+// If m.oauthDisplay is nil and the cached token is expired/missing, returns an error.
+func (m *Manager) connectOAuthServer(ctx context.Context, srv config.MCPServerConfig) error {
+	m.mu.Lock()
+	displayFn := m.oauthDisplay
+	m.mu.Unlock()
+
+	cbPort := srv.OAuthCallbackPort
+	if cbPort == 0 {
+		cbPort = 34217
+	}
+	cbSrv, err := oauthpkg.StartCallbackServer(cbPort)
+	if err != nil {
+		return fmt.Errorf("starting OAuth callback server for %q: %w", srv.Name, err)
+	}
+
+	// localNotifier is called from inside handler.Authorize only when the
+	// cached token is absent or expired.
+	localNotifier := func(ctx context.Context, serverName, authURL string) (string, string, error) {
+		if displayFn == nil {
+			return "", "", fmt.Errorf("server %q requires OAuth browser authentication but no interactive display is available", serverName)
+		}
+		displayFn(serverName, authURL)
+		result, waitErr := cbSrv.Wait(ctx)
+		if waitErr != nil {
+			return "", "", waitErr
+		}
+		return result.Code, result.State, nil
+	}
+
+	handler := oauthpkg.NewHandler(srv.Name, cbSrv.RedirectURI(), localNotifier, srv.OAuthClientID, srv.OAuthClientSecret)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:     srv.URL,
+		HTTPClient:   httpClientWithHeaders(srv.Headers),
+		OAuthHandler: handler,
+	}
+	client := mcp.NewClient(m.mcpImpl, nil)
+	session, connErr := client.Connect(ctx, transport, nil)
+	cbSrv.Close()
+	if connErr != nil {
+		return fmt.Errorf("connecting to OAuth MCP server %q: %w", srv.Name, connErr)
+	}
+
+	safe := sanitize(srv.Name)
+	m.mu.Lock()
+	m.conns = append(m.conns, &serverConn{
+		name:     srv.Name,
+		safeName: safe,
+		cfg:      srv,
+		session:  session,
+	})
+	m.mu.Unlock()
 	return nil
 }
 
@@ -524,6 +558,7 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any
 // reconnectConn closes a dropped connection and establishes a fresh one using
 // the same config. OAuth servers are skipped since they need user interaction.
 // After a successful reconnect the caller should refresh the tool map via Tools.
+// On failure the server config is re-added to configured so connect_server can retry.
 func (m *Manager) reconnectConn(ctx context.Context, old *serverConn) error {
 	if old.cfg.Transport == config.MCPTransportStreamable && old.cfg.OAuth {
 		return fmt.Errorf("server %q uses OAuth — reconnect requires user interaction", old.cfg.Name)
@@ -546,7 +581,14 @@ func (m *Manager) reconnectConn(ctx context.Context, old *serverConn) error {
 	m.conns = remaining
 	m.mu.Unlock()
 
-	return m.connectOne(ctx, old.cfg, old.safeName)
+	if err := m.connectOne(ctx, old.cfg, old.safeName); err != nil {
+		// Reconnect failed — re-add to configured so connect_server remains available.
+		m.mu.Lock()
+		m.configured = append(m.configured, old.cfg)
+		m.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // Close shuts down all MCP server connections.
