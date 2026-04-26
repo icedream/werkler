@@ -301,13 +301,14 @@ This is useful for servers that authenticate via a static token in the
 expansion:
 
 ```toml
+# GitHub MCP via PAT
 [[mcp.servers]]
-name      = "cloud-tools"
+name      = "github"
 transport = "streamable"
-url       = "https://mcp.example.com/mcp"
+url       = "https://api.githubcopilot.com/mcp/"
 
 [mcp.servers.headers]
-Authorization = "Bearer $CLOUD_TOOLS_TOKEN"
+Authorization = "Bearer $GITHUB_TOKEN"
 ```
 
 ### Streamable HTTP server with OAuth authentication
@@ -323,6 +324,21 @@ transport = "streamable"
 url       = "https://mcp.atlassian.com/v1/mcp"
 oauth     = true
 ```
+
+Or for servers like GitHub's MCP in OAuth mode which require an explicit client ID & secret:
+
+```toml
+[[mcp.servers]]
+name                = "github"
+transport           = "streamable"
+url                 = "https://api.githubcopilot.com/mcp/"
+oauth               = true
+oauth_client_id     = "$GITHUB_MCP_CLIENT_ID"
+oauth_client_secret = "$GITHUB_MCP_CLIENT_SECRET"
+# oauth_callback_port defaults to 34217 — must match your OAuth App's callback URL
+```
+
+Make sure to use `http://localhost:34217/callback` as callback URL. Adjust the port as configured.
 
 `oauth` is only valid with `transport = "streamable"`.
 
@@ -366,77 +382,6 @@ revoked.
 > `--prompt` freely afterwards.
 
 ---
-
-## GitHub MCP server
-
-[GitHub's MCP server](https://github.com/github/github-mcp-server) gives the
-AI access to repositories, issues, pull requests, GitHub Actions, and more.
-
-There are two ways to run it: a **remote** hosted server and a **local** server
-that you run yourself.
-
-### Remote server — OAuth (recommended)
-
-The remote server at `https://api.githubcopilot.com/mcp/` supports standard
-OAuth 2.1, but GitHub does not support Dynamic Client Registration — you must
-create a **GitHub OAuth App** first (free, takes about a minute):
-
-1. Go to **GitHub → Settings → Developer settings → OAuth Apps → New OAuth App**
-2. Set **Application name** to anything (e.g. `werkler`)
-3. Set **Homepage URL** to `http://localhost`
-4. Set **Authorization callback URL** to `http://localhost:34217/callback`
-   (werkler's default callback port — see `oauth_callback_port` below)
-5. Click **Register application**, then note the **Client ID**
-6. Click **Generate a new client secret** and note the secret
-
-Then configure werkler:
-
-```toml
-[[mcp.servers]]
-name                = "github"
-transport           = "streamable"
-url                 = "https://api.githubcopilot.com/mcp/"
-oauth               = true
-oauth_client_id     = "$GITHUB_MCP_CLIENT_ID"
-oauth_client_secret = "$GITHUB_MCP_CLIENT_SECRET"
-# oauth_callback_port defaults to 34217 — must match your OAuth App's callback URL
-```
-
-Set the environment variables before starting werkler:
-
-```sh
-export GITHUB_MCP_CLIENT_ID=Ov23li...
-export GITHUB_MCP_CLIENT_SECRET=...
-werkler chat
-```
-
-The first time you submit a prompt, werkler shows an authorization URL in the
-chat. After you approve in the browser, the token is saved and future sessions
-re-use it automatically.
-
-### Remote server — Personal Access Token
-
-If you prefer not to use the browser OAuth flow, create a
-[GitHub PAT](https://github.com/settings/tokens) with the scopes your use case
-requires (e.g. `repo`, `read:org`) and pass it as a header. Use an environment
-variable so the token is not stored in the config file:
-
-```toml
-[[mcp.servers]]
-name      = "github"
-transport = "streamable"
-url       = "https://api.githubcopilot.com/mcp/"
-
-[mcp.servers.headers]
-Authorization = "Bearer $GITHUB_TOKEN"
-```
-
-Then set the token in your shell before starting werkler:
-
-```sh
-export GITHUB_TOKEN=ghp_your_token_here
-werkler chat
-```
 
 ### Local server — stdio (Docker)
 
