@@ -474,7 +474,13 @@ type Model struct {
 	askUserSelectedIdx   int // index of highlighted choice; -1 = freeform input active
 	askUserItemIdx       int // index of the question display item in items; -1 if none
 	askUserResultCh      chan<- askUserResult
-	askUserSavedDraft    string // input text saved on entry, restored on exit
+	askUserSavedDraft string // input text saved on entry, restored on exit
+
+	// Per-operation cancellation for in-flight streams and tool calls.
+	// cancelOp is nil when idle. cancelPending is true after the first Esc
+	// press, waiting for a second Esc to actually cancel.
+	cancelOp      context.CancelFunc
+	cancelPending bool
 
 	// UI components.
 	viewport     viewport.Model
@@ -861,7 +867,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.executingCall = &call
 						m.state = stateCallingTool
 						needRebuild = true
-						cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+						cmds = append(cmds, doCallTool(m.newOpCtx(), m.session, call))
 					case "a":
 						call := *m.currentCall
 						m.session.ApproveForSession(call.Name)
@@ -873,7 +879,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.executingCall = &call
 						m.state = stateCallingTool
 						needRebuild = true
-						cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+						cmds = append(cmds, doCallTool(m.newOpCtx(), m.session, call))
 					case "p":
 						call := *m.currentCall
 						m.session.ApproveForSession(call.Name)
@@ -891,7 +897,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.executingCall = &call
 						m.state = stateCallingTool
 						needRebuild = true
-						cmds = append(cmds, doCallTool(m.ctx, m.session, call))
+						cmds = append(cmds, doCallTool(m.newOpCtx(), m.session, call))
 					case "n":
 						call := *m.currentCall
 						if idx, ok := m.toolCallIdx[call.ID]; ok {
@@ -958,7 +964,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
 							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.state = stateThinking
-							cmds = append(cmds, doStartStream(m.ctx, m.client, m.messages, m.tools))
+							cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
 						}
 					}
 				}
@@ -1152,13 +1158,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					needRebuild = true
 				}
 			case tea.KeyEsc:
-				if m.input.Value() != "" {
+				switch {
+				case m.input.Value() != "":
 					m.input.Reset()
-				} else if len(m.queuedPrompts) > 0 {
+					m.cancelPending = false
+				case len(m.queuedPrompts) > 0:
 					m.queuedPrompts = m.queuedPrompts[:len(m.queuedPrompts)-1]
+					m.cancelPending = false
 					needRebuild = true
+				case m.state != stateConnectingOAuth && m.cancelOp != nil:
+					if m.cancelPending {
+						// Second Esc — cancel the operation.
+						m.cancelOp()
+						m.cancelOp = nil
+						m.cancelPending = false
+					} else {
+						// First Esc — arm cancellation.
+						m.cancelPending = true
+						needRebuild = true
+					}
 				}
 			default:
+				m.cancelPending = false
 				// Forward to both: textinput handles text-entry keys (runes, backspace,
 				// cursor movement); viewport handles navigation keys (Up/Down/PgUp/PgDn).
 				// Single-line textinput ignores directional keys, so double-routing is safe.
@@ -1459,17 +1480,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case chunk.Err != nil:
 			debugLog("streamChunk: error: %v", chunk.Err)
-			// Stream error: go idle but keep queued prompts intact.
-			// The user can retry from idle state.
-			if m.streamingItemIdx >= 0 {
-				m.items[m.streamingItemIdx].content += "\n[stream error: " + chunk.Err.Error() + "]"
-				m.streamingItemIdx = -1
+			if errors.Is(chunk.Err, context.Canceled) {
+				// User-initiated cancellation: go idle cleanly.
+				// Roll back the last user message since it got no response.
+				if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "user" {
+					m.messages = m.messages[:len(m.messages)-1]
+				}
+				if m.streamingItemIdx >= 0 {
+					m.items[m.streamingItemIdx].content += " ✗"
+					m.streamingItemIdx = -1
+				}
+				m.cancelOp = nil
+				m.cancelPending = false
+				m.state = stateIdle
+				needRebuild = true
+				cmds = append(cmds, m.input.Focus())
 			} else {
-				m.items = append(m.items, displayItem{kind: itemError, content: chunk.Err.Error()})
+				// Stream error: go idle but keep queued prompts intact.
+				// The user can retry from idle state.
+				if m.streamingItemIdx >= 0 {
+					m.items[m.streamingItemIdx].content += "\n[stream error: " + chunk.Err.Error() + "]"
+					m.streamingItemIdx = -1
+				} else {
+					m.items = append(m.items, displayItem{kind: itemError, content: chunk.Err.Error()})
+				}
+				m.state = stateIdle
+				needRebuild = true
+				cmds = append(cmds, m.input.Focus())
 			}
-			m.state = stateIdle
-			needRebuild = true
-			cmds = append(cmds, m.input.Focus())
 		case chunk.Done:
 			debugLog("streamChunk: done, toolCalls=%d, streamingItemIdx=%d, content=%q", len(chunk.Msg.ToolCalls), m.streamingItemIdx, chunk.Msg.Content)
 			// Stream finished — append the full message to history and handle tool calls.
@@ -1548,6 +1586,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateAwaitingPathApproval
 				m.pendingApprovalChoice = ""
 				needRebuild = true
+			case errors.Is(msg.err, context.Canceled):
+				// User-initiated cancellation: add synthetic results so the
+				// assistant tool_calls message has matching tool results, then
+				// go idle without triggering a new stream.
+				if idx, ok := m.toolCallIdx[msg.callID]; ok {
+					m.items[idx].toolStatus = toolStatusDenied
+				}
+				m.messages = append(m.messages, ai.Message{
+					Role:       "tool",
+					ToolCallID: msg.callID,
+					Content:    "(cancelled by user)",
+				})
+				for _, pc := range m.pendingCalls {
+					if idx, ok := m.toolCallIdx[pc.ID]; ok {
+						m.items[idx].toolStatus = toolStatusDenied
+					}
+					m.messages = append(m.messages, ai.Message{
+						Role:       "tool",
+						ToolCallID: pc.ID,
+						Content:    "(not executed — cancelled by user)",
+					})
+				}
+				m.pendingCalls = nil
+				m.executingCall = nil
+				m.currentCall = nil
+				m.callingToolName = ""
+				m.cancelOp = nil
+				m.cancelPending = false
+				m.state = stateIdle
+				needRebuild = true
+				cmds = append(cmds, m.input.Focus())
 			default:
 				// Tool execution error: add the error as a tool result so the AI
 				// can see it and decide how to recover. Mark remaining calls as
@@ -1740,16 +1809,28 @@ func (m Model) statusLines() (line1, line2 string) {
 
 	switch m.state {
 	case stateThinking:
-		return statusStyle.Render(m.spinner.View()+" Thinking…") + queueHint + allowAllIndicator, ""
+		cancelHint := ""
+		if m.cancelPending {
+			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
+		}
+		return statusStyle.Render(m.spinner.View()+" Thinking…") + cancelHint + queueHint + allowAllIndicator, ""
 	case stateConnectingMCP:
 		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + allowAllIndicator, ""
 	case stateConnectingOAuth:
 		return statusStyle.Render(m.spinner.View()+" Waiting for OAuth authorization…") + queueHint + allowAllIndicator, ""
 	case stateStreaming:
-		return statusStyle.Render(m.spinner.View()+" Streaming…") + queueHint + allowAllIndicator, ""
+		cancelHint := ""
+		if m.cancelPending {
+			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
+		}
+		return statusStyle.Render(m.spinner.View()+" Streaming…") + cancelHint + queueHint + allowAllIndicator, ""
 	case stateCallingTool:
 		name := toolNameStyle.Render(m.callingToolName)
-		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + queueHint + allowAllIndicator, ""
+		cancelHint := ""
+		if m.cancelPending {
+			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
+		}
+		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + cancelHint + queueHint + allowAllIndicator, ""
 	case stateAwaitingPathApproval:
 		if m.currentPathRequest.Path == "" {
 			return "", ""
@@ -2021,7 +2102,7 @@ func (m *Model) processNextPath() tea.Cmd {
 		m.callingToolName = call.Name
 		m.executingCall = &call
 		m.state = stateCallingTool
-		return doCallTool(m.ctx, m.session, call)
+		return doCallTool(m.newOpCtx(), m.session, call)
 	}
 	return m.input.Focus()
 }
@@ -2036,9 +2117,11 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 		m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
 		m.items = append(m.items, displayItem{kind: itemUser, content: text})
 		m.state = stateThinking
-		return doStartStream(m.ctx, m.client, m.messages, m.tools)
+		return doStartStream(m.newOpCtx(), m.client, m.messages, m.tools)
 	}
 	m.state = stateIdle
+	m.cancelOp = nil
+	m.cancelPending = false
 	return m.input.Focus()
 }
 
@@ -2048,7 +2131,7 @@ func (m *Model) processNextCall() tea.Cmd {
 	if len(m.pendingCalls) == 0 {
 		debugLog("processNextCall: no more pending calls, starting new stream (messages=%d)", len(m.messages))
 		m.state = stateThinking
-		return doStartStream(m.ctx, m.client, m.messages, m.tools)
+		return doStartStream(m.newOpCtx(), m.client, m.messages, m.tools)
 	}
 
 	call := m.pendingCalls[0]
@@ -2069,7 +2152,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		m.currentCall = nil
 		m.executingCall = &callCopy
 		m.state = stateCallingTool
-		return doCallTool(m.ctx, m.session, call)
+		return doCallTool(m.newOpCtx(), m.session, call)
 	}
 
 	m.state = stateAwaitingApproval
@@ -2078,6 +2161,20 @@ func (m *Model) processNextCall() tea.Cmd {
 }
 
 // --- Tea commands ---
+
+// newOpCtx creates a cancellable child context for the current operation and
+// stores the cancel function in m.cancelOp. Any previous cancel func is called
+// first as a safety measure. Resets the cancelPending arm.
+// Must only be called from Update.
+func (m *Model) newOpCtx() context.Context {
+	if m.cancelOp != nil {
+		m.cancelOp()
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.cancelOp = cancel
+	m.cancelPending = false
+	return ctx
+}
 
 // doStartStream kicks off a streaming completion in a goroutine and returns
 // the first chunk as a streamChunkMsg (carrying the channel for further reads).
