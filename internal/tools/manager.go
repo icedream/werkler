@@ -223,6 +223,18 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any
 	return m.wrapped.CallTool(ctx, name, args)
 }
 
+// callBuiltin dispatches only to built-in tool handlers, returning an error if
+// the named tool is not a registered built-in. Used by the rubber duck loop to
+// restrict the reviewer to read-only built-ins.
+func (m *Manager) callBuiltin(ctx context.Context, name string, args map[string]any) (string, error) {
+	for _, b := range m.builtins {
+		if b.def.Name == name {
+			return b.handle(ctx, args)
+		}
+	}
+	return "", fmt.Errorf("tool %q is not available to the reviewer", name)
+}
+
 // --- Path extraction ---
 
 // knownShells is the set of command basenames that accept inline scripts via -c.
@@ -1256,7 +1268,27 @@ const rubberDuckSystemPrompt = `You are a technical reviewer. Critically evaluat
 Identify: correctness issues, bugs, logic errors, edge cases, security concerns, design flaws.
 Be concise. Only surface issues that genuinely matter.
 If you find no significant issues, say so briefly.
-Do NOT comment on style, formatting, naming conventions, or other minor matters.`
+Do NOT comment on style, formatting, naming conventions, or other minor matters.
+You have access to file reading tools. Use them to look up referenced files or paths when relevant.`
+
+// rubberDuckMaxSteps caps the tool-call iterations the reviewer can make.
+const rubberDuckMaxSteps = 10
+
+// reviewerTools returns the subset of built-in tools the rubber duck reviewer
+// is allowed to call: read-only file and directory operations only.
+func (m *Manager) reviewerTools() []ai.ToolDefinition {
+	allowed := map[string]bool{
+		"file_read": true,
+		"file_list": true,
+	}
+	var out []ai.ToolDefinition
+	for _, b := range m.builtins {
+		if allowed[b.def.Name] {
+			out = append(out, b.def)
+		}
+	}
+	return out
+}
 
 func (m *Manager) handleRubberDuck(ctx context.Context, args map[string]any) (string, error) {
 	plan := stringArg(args, "context")
@@ -1267,15 +1299,42 @@ func (m *Manager) handleRubberDuck(ctx context.Context, args map[string]any) (st
 	if focus := stringArg(args, "focus"); focus != "" {
 		userContent += "\n\nFocus particularly on: " + focus
 	}
+
 	messages := []ai.Message{
 		{Role: "system", Content: rubberDuckSystemPrompt},
 		{Role: "user", Content: userContent},
 	}
-	msg, err := m.reviewer.Complete(ctx, messages, nil)
-	if err != nil {
-		return "", fmt.Errorf("rubber duck review failed: %w", err)
+	tools := m.reviewerTools()
+
+	for range rubberDuckMaxSteps {
+		msg, err := m.reviewer.Complete(ctx, messages, tools)
+		if err != nil {
+			return "", fmt.Errorf("rubber duck review failed: %w", err)
+		}
+		messages = append(messages, msg)
+
+		// No tool calls → reviewer is done; return its text response.
+		if len(msg.ToolCalls) == 0 {
+			if msg.Content == "" {
+				return "", fmt.Errorf("rubber duck review produced no response")
+			}
+			return msg.Content, nil
+		}
+
+		// Execute each tool call (read-only builtins only).
+		for _, tc := range msg.ToolCalls {
+			result, callErr := m.callBuiltin(ctx, tc.Name, tc.Arguments)
+			if callErr != nil {
+				result = "error: " + callErr.Error()
+			}
+			messages = append(messages, ai.Message{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: tc.ID,
+			})
+		}
 	}
-	return msg.Content, nil
+	return "", fmt.Errorf("rubber duck review exceeded %d steps without producing a response", rubberDuckMaxSteps)
 }
 
 func (m *Manager) handleUseSkill(_ context.Context, args map[string]any) (string, error) {
