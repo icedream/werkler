@@ -502,6 +502,10 @@ type Model struct {
 	// the system prompt for new conversations.
 	modelInfo ai.ModelInfo
 
+	// lastRateLimits holds the most recent rate limit headers from the provider.
+	// Zero when the provider has not returned rate limit data (e.g. Ollama).
+	lastRateLimits ai.RateLimits
+
 	// mouseEnabled tracks whether the terminal mouse reporting mode is active.
 	// When false, the terminal handles mouse events natively (text selection works).
 	mouseEnabled bool
@@ -1510,6 +1514,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case chunk.Done:
 			debugLog("streamChunk: done, toolCalls=%d, streamingItemIdx=%d, content=%q", len(chunk.Msg.ToolCalls), m.streamingItemIdx, chunk.Msg.Content)
+			// Capture rate limit headers reported by the provider.
+			if chunk.RateLimits.IsKnown() {
+				m.lastRateLimits = chunk.RateLimits
+			}
 			// Stream finished — append the full message to history and handle tool calls.
 			if m.streamingItemIdx < 0 && chunk.Msg.Content != "" {
 				m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content})
@@ -1909,6 +1917,19 @@ func (m Model) statusLines() (line1, line2 string) {
 			sessionHint = "  " + keyHintStyle.Render("ctrl+r") + " sessions"
 		}
 		line1 := mouseHint + pickerHint + sessionHint + allowAllIndicator
+		// Show rate limit info when the provider has reported it.
+		if m.lastRateLimits.IsKnown() {
+			parts := []string{}
+			if t := m.lastRateLimits.FormatTokens(); t != "" {
+				parts = append(parts, t+" tok")
+			}
+			if r := m.lastRateLimits.FormatRequests(); r != "" {
+				parts = append(parts, r+" req")
+			}
+			if len(parts) > 0 {
+				line1 += "  " + statusStyle.Render(strings.Join(parts, " · ")+" remaining")
+			}
+		}
 		// Show resume hint on line2 until the user sends their first message.
 		line2 := ""
 		if m.resumeHint != nil && m.sessionStore != nil {

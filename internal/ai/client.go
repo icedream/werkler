@@ -57,10 +57,11 @@ type ToolCall struct {
 // StreamChunk is one event from a streaming completion.
 // Either Delta (incremental text) or Done (final message + tool calls) or Err is set.
 type StreamChunk struct {
-	Delta string  // non-empty for incremental text chunks
-	Done  bool    // true on the final chunk; Msg is valid
-	Msg   Message // valid only when Done && Err == nil
-	Err   error   // non-nil on error; stream is terminated
+	Delta      string     // non-empty for incremental text chunks
+	Done       bool       // true on the final chunk; Msg is valid
+	Msg        Message    // valid only when Done && Err == nil
+	Err        error      // non-nil on error; stream is terminated
+	RateLimits RateLimits // populated on Done; zero when provider doesn't report limits
 }
 
 // Completer can perform a non-streaming chat completion.
@@ -246,6 +247,15 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 		}
 		defer func() { _ = stream.Close() }()
 
+		// Capture rate limit headers from the HTTP response (available immediately).
+		rl := stream.GetRateLimitHeaders()
+		rateLimits := RateLimits{
+			LimitRequests:     rl.LimitRequests,
+			LimitTokens:       rl.LimitTokens,
+			RemainingRequests: rl.RemainingRequests,
+			RemainingTokens:   rl.RemainingTokens,
+		}
+
 		// Accumulate the full response across chunks.
 		var contentBuf strings.Builder
 		// toolAccum maps tool-call index → accumulated data.
@@ -298,7 +308,7 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			send(StreamChunk{Err: err})
 			return
 		}
-		send(StreamChunk{Done: true, Msg: msg})
+		send(StreamChunk{Done: true, Msg: msg, RateLimits: rateLimits})
 	}()
 	return ch
 }
