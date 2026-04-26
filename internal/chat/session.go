@@ -46,7 +46,15 @@ After receiving the review:
 - Read the feedback carefully.
 - If it identifies bugs, logic errors, design flaws, or missing edge cases, STOP and revise your plan to address them before proceeding.
 - Only proceed to implementation once you have incorporated the feedback. Do not treat the review as a formality.
-- If the feedback is clean (no significant issues), state that briefly and then proceed.
+- Once the plan is finalised (review passed or issues resolved), present the plan summary to the user and STOP. Use ask_user to ask whether to proceed with implementation. Do NOT start implementing unless the user explicitly approves.
+
+## Key checkpoints — always stop and ask the user
+These are moments where you MUST pause and use ask_user before continuing:
+- After finalising a plan — confirm the user wants you to implement it.
+- Before making changes that go significantly beyond the original request.
+- When you discover the task is substantially more complex or risky than expected.
+- When you are unsure which of several valid approaches to take.
+Do not treat these as optional. Proceeding without confirmation at a checkpoint is a mistake.
 
 ## File operations
 Always use these built-in tools for file operations — do NOT use any fs__* MCP tools for writing:
