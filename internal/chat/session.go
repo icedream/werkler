@@ -71,6 +71,8 @@ Always use these built-in tools for file operations — do NOT use any fs__* MCP
 Always call file_read on a file before calling file_edit — copy old_str verbatim from the file_read output, including exact whitespace and indentation.
 file_read output has line numbers like "   1│<line>" — these are decorative display only. Do NOT include them in file_write or file_edit content.
 
+To search for patterns across many files, use process_start to run rg (ripgrep) or grep rather than reading files one by one. This is significantly faster for exploring a codebase.
+
 ## Project memory
 If a "Project memory" section appears in this prompt, it contains notes about this project saved in previous sessions.
 Use it to inform your work: apply known conventions, avoid known pitfalls, build on prior decisions.

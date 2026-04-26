@@ -38,6 +38,34 @@ type PathApprover interface {
 	IsPathWriteApproved(path string) bool
 }
 
+// reviewerApprover is used by the rubber duck agentic loop.
+// It approves all reads and command execution so the reviewer can grep and
+// explore the codebase freely, while write-capable tools (file_write,
+// file_edit, etc.) are simply excluded from the reviewer's tool set.
+type reviewerApprover struct{}
+
+func (reviewerApprover) IsPathReadApproved(_ string) bool  { return true }
+func (reviewerApprover) IsPathWriteApproved(_ string) bool { return true }
+
+// reviewModeKey is used as a context key to signal that the current call is
+// executing on behalf of the rubber duck reviewer.
+type reviewModeKey struct{}
+
+// withReviewMode returns a child context that marks tool calls as reviewer-initiated.
+func withReviewMode(ctx context.Context) context.Context {
+	return context.WithValue(ctx, reviewModeKey{}, true)
+}
+
+// activeApprover returns the path approver in effect for ctx.
+// When ctx carries the review-mode marker and a reviewer approver is configured,
+// that approver is returned instead of the default one.
+func (m *Manager) activeApprover(ctx context.Context) PathApprover {
+	if _, ok := ctx.Value(reviewModeKey{}).(bool); ok {
+		return reviewerApprover{}
+	}
+	return m.pathApprover
+}
+
 // UnapprovedPathsError is returned by CallTool when one or more paths accessed
 // by a built-in tool have not been approved by the user.
 // It implements chat.PathApprovalError so Session.CallTool propagates it as a
@@ -386,14 +414,16 @@ func canonicalizePath(p string) string {
 // checkWritePaths returns unapproved paths from ExtractPaths.
 // The command binary (first path) requires execute-level approval; all other
 // paths (cwd, file arguments) require write-level approval.
-func (m *Manager) checkWritePaths(command string, args []string, cwd string) []chat.PathAccessRequest {
-	if m.pathApprover == nil {
+// The active approver is resolved from ctx (reviewer vs. normal).
+func (m *Manager) checkWritePaths(ctx context.Context, command string, args []string, cwd string) []chat.PathAccessRequest {
+	approver := m.activeApprover(ctx)
+	if approver == nil {
 		return nil
 	}
 	paths := ExtractPaths(command, args, cwd)
 	var unapproved []chat.PathAccessRequest
 	for i, p := range paths {
-		if !m.pathApprover.IsPathWriteApproved(p) {
+		if !approver.IsPathWriteApproved(p) {
 			req := chat.PathAccessRequest{Path: p}
 			if i == 0 {
 				req.Execute = true
@@ -407,22 +437,24 @@ func (m *Manager) checkWritePaths(command string, args []string, cwd string) []c
 }
 
 // checkSingleRead returns a non-nil error if path lacks read approval.
-func (m *Manager) checkSingleRead(path string) *UnapprovedPathsError {
-	if m.pathApprover == nil {
+func (m *Manager) checkSingleRead(ctx context.Context, path string) *UnapprovedPathsError {
+	approver := m.activeApprover(ctx)
+	if approver == nil {
 		return nil
 	}
-	if !m.pathApprover.IsPathReadApproved(path) {
+	if !approver.IsPathReadApproved(path) {
 		return &UnapprovedPathsError{Requests: []chat.PathAccessRequest{{Path: path, Write: false}}}
 	}
 	return nil
 }
 
 // checkSingleWrite returns a non-nil error if path lacks write approval.
-func (m *Manager) checkSingleWrite(path string) *UnapprovedPathsError {
-	if m.pathApprover == nil {
+func (m *Manager) checkSingleWrite(ctx context.Context, path string) *UnapprovedPathsError {
+	approver := m.activeApprover(ctx)
+	if approver == nil {
 		return nil
 	}
-	if !m.pathApprover.IsPathWriteApproved(path) {
+	if !approver.IsPathWriteApproved(path) {
 		return &UnapprovedPathsError{Requests: []chat.PathAccessRequest{{Path: path, Write: true}}}
 	}
 	return nil
@@ -874,7 +906,7 @@ func (m *Manager) handleProcessStart(ctx context.Context, args map[string]any) (
 	timeoutSecs := float64Arg(args, "timeout_seconds", 5)
 
 	// Check path permissions before starting.
-	if unapproved := m.checkWritePaths(command, cmdArgs, cwd); len(unapproved) > 0 {
+	if unapproved := m.checkWritePaths(ctx, command, cmdArgs, cwd); len(unapproved) > 0 {
 		return "", &UnapprovedPathsError{Requests: unapproved}
 	}
 
@@ -969,14 +1001,14 @@ func (m *Manager) handleProcessStop(_ context.Context, args map[string]any) (str
 
 // --- File tool handlers ---
 
-func (m *Manager) handleFileRead(_ context.Context, args map[string]any) (string, error) {
+func (m *Manager) handleFileRead(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := stringArg(args, "path")
 	if rawPath == "" {
 		return "", fmt.Errorf("file_read: path is required")
 	}
 	path := canonicalizePath(rawPath)
 
-	if err := m.checkSingleRead(path); err != nil {
+	if err := m.checkSingleRead(ctx, path); err != nil {
 		return "", err
 	}
 
@@ -1047,14 +1079,14 @@ func (m *Manager) handleFileRead(_ context.Context, args map[string]any) (string
 	}), nil
 }
 
-func (m *Manager) handleFileList(_ context.Context, args map[string]any) (string, error) {
+func (m *Manager) handleFileList(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := stringArg(args, "path")
 	if rawPath == "" {
 		return "", fmt.Errorf("file_list: path is required")
 	}
 	path := canonicalizePath(rawPath)
 
-	if err := m.checkSingleRead(path); err != nil {
+	if err := m.checkSingleRead(ctx, path); err != nil {
 		return "", err
 	}
 
@@ -1097,7 +1129,7 @@ func (m *Manager) handleFileList(_ context.Context, args map[string]any) (string
 	return jsonResult(result), nil
 }
 
-func (m *Manager) handleFileWrite(_ context.Context, args map[string]any) (string, error) {
+func (m *Manager) handleFileWrite(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := stringArg(args, "path")
 	if rawPath == "" {
 		return "", fmt.Errorf("file_write: path is required")
@@ -1106,7 +1138,7 @@ func (m *Manager) handleFileWrite(_ context.Context, args map[string]any) (strin
 	content := stringArg(args, "content")
 	createParents := boolArg(args, "create_parents")
 
-	if err := m.checkSingleWrite(path); err != nil {
+	if err := m.checkSingleWrite(ctx, path); err != nil {
 		return "", err
 	}
 
@@ -1126,7 +1158,7 @@ func (m *Manager) handleFileWrite(_ context.Context, args map[string]any) (strin
 	}), nil
 }
 
-func (m *Manager) handleFileEdit(_ context.Context, args map[string]any) (string, error) {
+func (m *Manager) handleFileEdit(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := stringArg(args, "path")
 	if rawPath == "" {
 		return "", fmt.Errorf("file_edit: path is required")
@@ -1139,7 +1171,7 @@ func (m *Manager) handleFileEdit(_ context.Context, args map[string]any) (string
 		return "", fmt.Errorf("file_edit: old_str must not be empty; use file_write to overwrite entire files")
 	}
 
-	if err := m.checkSingleWrite(path); err != nil {
+	if err := m.checkSingleWrite(ctx, path); err != nil {
 		return "", err
 	}
 
@@ -1198,14 +1230,14 @@ func findMatchLines(text, substr string) []int {
 	return lines
 }
 
-func (m *Manager) handleFileDelete(_ context.Context, args map[string]any) (string, error) {
+func (m *Manager) handleFileDelete(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := stringArg(args, "path")
 	if rawPath == "" {
 		return "", fmt.Errorf("file_delete: path is required")
 	}
 	path := canonicalizePath(rawPath)
 
-	if err := m.checkSingleWrite(path); err != nil {
+	if err := m.checkSingleWrite(ctx, path); err != nil {
 		return "", err
 	}
 
@@ -1269,25 +1301,44 @@ Identify: correctness issues, bugs, logic errors, edge cases, security concerns,
 Be concise. Only surface issues that genuinely matter.
 If you find no significant issues, say so briefly.
 Do NOT comment on style, formatting, naming conventions, or other minor matters.
-You have access to file reading tools. Use them to look up referenced files or paths when relevant.`
+You have access to file reading and process execution tools. Use them to look up referenced files,
+search the codebase with rg or grep (via process_start), or inspect directory structure when relevant.`
 
 // rubberDuckMaxSteps caps the tool-call iterations the reviewer can make.
 const rubberDuckMaxSteps = 10
 
-// reviewerTools returns the subset of built-in tools the rubber duck reviewer
-// is allowed to call: read-only file and directory operations only.
+// reviewerAllowedTools is the set of built-in tool names the rubber duck reviewer
+// may call. These are read-only or process-query tools; write tools are excluded.
+var reviewerAllowedTools = map[string]bool{
+	"file_read":    true,
+	"file_list":    true,
+	"process_start": true,
+	"process_read":  true,
+	"process_stop":  true,
+}
+
+// reviewerTools returns the tool definitions the rubber duck reviewer may call.
 func (m *Manager) reviewerTools() []ai.ToolDefinition {
-	allowed := map[string]bool{
-		"file_read": true,
-		"file_list": true,
-	}
 	var out []ai.ToolDefinition
 	for _, b := range m.builtins {
-		if allowed[b.def.Name] {
+		if reviewerAllowedTools[b.def.Name] {
 			out = append(out, b.def)
 		}
 	}
 	return out
+}
+
+// callBuiltinAsReviewer dispatches a built-in tool call on behalf of the rubber
+// duck reviewer. It uses withReviewMode so path checks use the permissive
+// reviewerApprover instead of the normal session approver.
+func (m *Manager) callBuiltinAsReviewer(ctx context.Context, name string, args map[string]any) (string, error) {
+	reviewCtx := withReviewMode(ctx)
+	for _, b := range m.builtins {
+		if b.def.Name == name {
+			return b.handle(reviewCtx, args)
+		}
+	}
+	return "", fmt.Errorf("tool %q is not available to the reviewer", name)
 }
 
 func (m *Manager) handleRubberDuck(ctx context.Context, args map[string]any) (string, error) {
@@ -1321,9 +1372,9 @@ func (m *Manager) handleRubberDuck(ctx context.Context, args map[string]any) (st
 			return msg.Content, nil
 		}
 
-		// Execute each tool call (read-only builtins only).
+		// Execute each tool call through the reviewer permission set.
 		for _, tc := range msg.ToolCalls {
-			result, callErr := m.callBuiltin(ctx, tc.Name, tc.Arguments)
+			result, callErr := m.callBuiltinAsReviewer(ctx, tc.Name, tc.Arguments)
 			if callErr != nil {
 				result = "error: " + callErr.Error()
 			}
