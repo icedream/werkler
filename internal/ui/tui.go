@@ -1496,10 +1496,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tools = msg.tools
 			m.allToolDefs = msg.tools
 		}
-		m.state = stateIdle
-		m.input.Placeholder = inputPlaceholder(stateIdle)
 		m.updateCompletion()
 		needRebuild = true
+		// Drain any prompts queued while MCP servers were still connecting.
+		cmds = append(cmds, m.processQueueOrIdle())
 
 	case modelInfoMsg:
 		if msg.err == nil && msg.info.HasContext() {
