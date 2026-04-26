@@ -43,6 +43,7 @@ type ToolDefinition struct {
 type Message struct {
 	Role       string
 	Content    string
+	Reasoning  string     // reasoning/thinking content emitted by reasoning models (not sent back to the API)
 	ToolCallID string     // set for tool result messages
 	ToolCalls  []ToolCall // set for assistant messages that invoke tools
 }
@@ -55,15 +56,16 @@ type ToolCall struct {
 }
 
 // StreamChunk is one event from a streaming completion.
-// Either Delta (incremental text) or Done (final message + tool calls) or Err is set.
+// Either Delta/ReasoningDelta (incremental text) or Done (final message + tool calls) or Err is set.
 type StreamChunk struct {
-	Delta        string     // non-empty for incremental text chunks
-	Done         bool       // true on the final chunk; Msg is valid
-	Msg          Message    // valid only when Done && Err == nil
-	Err          error      // non-nil on error; stream is terminated
-	RateLimits   RateLimits // populated on Done; zero when provider doesn't report limits
-	FinishReason string     // "stop", "length", "tool_calls", etc.; populated on Done
-	Usage        Usage      // token usage; populated on Done when provider reports it
+	Delta          string     // non-empty for incremental content text chunks
+	ReasoningDelta string     // non-empty for incremental reasoning/thinking chunks
+	Done           bool       // true on the final chunk; Msg is valid
+	Msg            Message    // valid only when Done && Err == nil
+	Err            error      // non-nil on error; stream is terminated
+	RateLimits     RateLimits // populated on Done; zero when provider doesn't report limits
+	FinishReason   string     // "stop", "length", "tool_calls", etc.; populated on Done
+	Usage          Usage      // token usage; populated on Done when provider reports it
 }
 
 // Usage holds token consumption statistics for a single AI turn.
@@ -173,10 +175,11 @@ type accumTool struct {
 // buildFinalMessage assembles the complete assistant Message from accumulated
 // streaming fragments. toolAccum maps tool-call index → accumulated data.
 // Indexes are iterated in sorted order to handle sparse or out-of-order indexes.
-func buildFinalMessage(content string, toolAccum map[int]*accumTool) (Message, error) {
+func buildFinalMessage(content, reasoning string, toolAccum map[int]*accumTool) (Message, error) {
 	msg := Message{
-		Role:    "assistant",
-		Content: content,
+		Role:      "assistant",
+		Content:   content,
+		Reasoning: reasoning,
 	}
 	if len(toolAccum) == 0 {
 		return msg, nil
@@ -268,6 +271,7 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 
 		// Accumulate the full response across chunks.
 		var contentBuf strings.Builder
+		var reasoningBuf strings.Builder
 		// toolAccum maps tool-call index → accumulated data.
 		toolAccum := map[int]*accumTool{}
 		var finishReason string
@@ -299,6 +303,13 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 				finishReason = string(choice.FinishReason)
 			}
 
+			if delta.ReasoningContent != "" {
+				reasoningBuf.WriteString(delta.ReasoningContent)
+				if !send(StreamChunk{ReasoningDelta: delta.ReasoningContent}) {
+					return
+				}
+			}
+
 			if delta.Content != "" {
 				contentBuf.WriteString(delta.Content)
 				if !send(StreamChunk{Delta: delta.Content}) {
@@ -327,7 +338,7 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			}
 		}
 
-		msg, err := buildFinalMessage(contentBuf.String(), toolAccum)
+		msg, err := buildFinalMessage(contentBuf.String(), reasoningBuf.String(), toolAccum)
 		if err != nil {
 			send(StreamChunk{Err: err})
 			return
@@ -389,8 +400,9 @@ func toOpenAITools(tools []ToolDefinition) []openai.Tool {
 
 func fromOpenAIMessage(m openai.ChatCompletionMessage) (Message, error) {
 	msg := Message{
-		Role:    m.Role,
-		Content: m.Content,
+		Role:      m.Role,
+		Content:   m.Content,
+		Reasoning: m.ReasoningContent,
 	}
 	for _, tc := range m.ToolCalls {
 		var args map[string]any

@@ -13,11 +13,19 @@ import (
 // --- buildFinalMessage ---
 
 func TestBuildFinalMessage_NoTools(t *testing.T) {
-	msg, err := buildFinalMessage("hello world", nil)
+	msg, err := buildFinalMessage("hello world", "", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "assistant", msg.Role)
 	assert.Equal(t, "hello world", msg.Content)
+	assert.Empty(t, msg.Reasoning)
 	assert.Empty(t, msg.ToolCalls)
+}
+
+func TestBuildFinalMessage_WithReasoning(t *testing.T) {
+	msg, err := buildFinalMessage("answer", "let me think", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "answer", msg.Content)
+	assert.Equal(t, "let me think", msg.Reasoning)
 }
 
 func TestBuildFinalMessage_SingleTool(t *testing.T) {
@@ -25,7 +33,7 @@ func TestBuildFinalMessage_SingleTool(t *testing.T) {
 	acc.args.WriteString(`{"path":"/tmp/foo"}`)
 	toolAccum := map[int]*accumTool{0: acc}
 
-	msg, err := buildFinalMessage("", toolAccum)
+	msg, err := buildFinalMessage("", "", toolAccum)
 	require.NoError(t, err)
 	require.Len(t, msg.ToolCalls, 1)
 	assert.Equal(t, "call1", msg.ToolCalls[0].ID)
@@ -41,7 +49,7 @@ func TestBuildFinalMessage_MultipleTools_SortedByIndex(t *testing.T) {
 	// Deliberately use sparse indexes 0 and 2 (no index 1).
 	toolAccum := map[int]*accumTool{2: acc2, 0: acc0}
 
-	msg, err := buildFinalMessage("", toolAccum)
+	msg, err := buildFinalMessage("", "", toolAccum)
 	require.NoError(t, err)
 	require.Len(t, msg.ToolCalls, 2)
 	// Must be sorted: index 0 first, index 2 second.
@@ -52,7 +60,7 @@ func TestBuildFinalMessage_MultipleTools_SortedByIndex(t *testing.T) {
 func TestBuildFinalMessage_EmptyArgs(t *testing.T) {
 	acc := &accumTool{id: "c1", name: "no_args"}
 	// empty args builder → no JSON to parse
-	msg, err := buildFinalMessage("", map[int]*accumTool{0: acc})
+	msg, err := buildFinalMessage("", "", map[int]*accumTool{0: acc})
 	require.NoError(t, err)
 	require.Len(t, msg.ToolCalls, 1)
 	assert.Nil(t, msg.ToolCalls[0].Arguments)
@@ -61,7 +69,7 @@ func TestBuildFinalMessage_EmptyArgs(t *testing.T) {
 func TestBuildFinalMessage_InvalidJSON(t *testing.T) {
 	acc := &accumTool{id: "c1", name: "bad"}
 	acc.args.WriteString(`{not valid json`)
-	_, err := buildFinalMessage("", map[int]*accumTool{0: acc})
+	_, err := buildFinalMessage("", "", map[int]*accumTool{0: acc})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bad")
 }

@@ -105,6 +105,7 @@ func inputPlaceholder(state tuiState) string {
 const (
 	itemUser          = "user"
 	itemAssistant     = "assistant"
+	itemReasoning     = "reasoning" // thinking/reasoning content from reasoning models
 	itemToolCall      = "tool_call"
 	itemError         = "error"
 	itemInfo          = "info"        // neutral status/system messages
@@ -537,6 +538,7 @@ func init() {
 				m.items = nil
 				m.toolCallIdx = make(map[string]int)
 				m.streamingItemIdx = -1
+				m.reasoningItemIdx = -1
 				m.oauthInfoIdx = -1
 				m.rebuildContent()
 				return nil
@@ -550,6 +552,7 @@ func init() {
 				m.items = nil
 				m.toolCallIdx = make(map[string]int)
 				m.streamingItemIdx = -1
+				m.reasoningItemIdx = -1
 				m.oauthInfoIdx = -1
 				m.sessionID = ""
 				m.sessionCreatedAt = time.Time{}
@@ -727,6 +730,7 @@ type Model struct {
 	currentCall      *ai.ToolCall
 	callingToolName  string // name of tool currently executing (stateCallingTool)
 	streamingItemIdx int    // index into items of the in-progress assistant item; -1 if none
+	reasoningItemIdx int    // index into items of the in-progress reasoning item; -1 if none
 
 	// Path approval state (stateAwaitingPathApproval).
 	pendingPathApprovals  []chat.PathAccessRequest // remaining paths needing approval
@@ -967,6 +971,7 @@ func initialModel(
 		messages:           chat.NewConversation(),
 		state:              stateIdle,
 		streamingItemIdx:   -1,
+		reasoningItemIdx:   -1,
 		oauthInfoIdx:       -1,
 		askUserSelectedIdx: -1,
 		askUserItemIdx:     -1,
@@ -1586,6 +1591,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.items = nil
 						m.toolCallIdx = make(map[string]int)
 						m.streamingItemIdx = -1
+						m.reasoningItemIdx = -1
 						m.oauthInfoIdx = -1
 						m.sessionID = ""
 						m.sessionCreatedAt = time.Time{}
@@ -2310,6 +2316,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.streamingItemIdx >= 0 {
 					m.items[m.streamingItemIdx].content += " ✗"
 					m.streamingItemIdx = -1
+					m.reasoningItemIdx = -1
 				}
 				m.cancelOp = nil
 				m.cancelPending = false
@@ -2322,6 +2329,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.streamingItemIdx >= 0 {
 					m.items[m.streamingItemIdx].content += "\n[stream error: " + chunk.Err.Error() + "]"
 					m.streamingItemIdx = -1
+					m.reasoningItemIdx = -1
 				} else {
 					m.items = append(m.items, displayItem{kind: itemError, content: chunk.Err.Error()})
 				}
@@ -2336,13 +2344,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastRateLimits = chunk.RateLimits
 			}
 			// Stream finished — append the full message to history and handle tool calls.
-			if m.streamingItemIdx < 0 && chunk.Msg.Content != "" {
-				m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content})
+			// Non-streaming path: no delta chunks were sent, so build items from the
+			// final message directly. Reasoning is always placed before the response.
+			if m.streamingItemIdx < 0 {
+				if chunk.Msg.Reasoning != "" {
+					m.items = append(m.items, displayItem{kind: itemReasoning, content: chunk.Msg.Reasoning})
+				}
+				if chunk.Msg.Content != "" {
+					m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content})
+				}
 			}
 			m.streamingItemIdx = -1
-			// Skip empty assistant messages (no content, no tool calls) — they
+			m.reasoningItemIdx = -1
+			// Skip empty assistant messages (no content, no tool calls, no reasoning) — they
 			// provide no value and some providers reject them with a 400 error.
-			if chunk.Msg.Content != "" || len(chunk.Msg.ToolCalls) > 0 {
+			if chunk.Msg.Content != "" || len(chunk.Msg.ToolCalls) > 0 || chunk.Msg.Reasoning != "" {
 				m.messages = append(m.messages, chunk.Msg)
 			}
 			if len(chunk.Msg.ToolCalls) == 0 {
@@ -2419,13 +2435,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, nextCmd)
 			}
 		default:
-			// Delta — create streaming assistant item on first token, then append.
+			// Delta — reasoning or content fragment. On the first delta of any kind,
+			// reserve both a reasoning slot and an assistant slot in that order so
+			// reasoning is always rendered above the response regardless of arrival order.
 			if m.streamingItemIdx < 0 {
+				m.reasoningItemIdx = len(m.items)
+				m.items = append(m.items, displayItem{kind: itemReasoning, content: ""})
 				m.streamingItemIdx = len(m.items)
 				m.items = append(m.items, displayItem{kind: itemAssistant, content: ""})
 				m.state = stateStreaming
 			}
-			m.items[m.streamingItemIdx].content += chunk.Delta
+			if chunk.ReasoningDelta != "" {
+				m.items[m.reasoningItemIdx].content += chunk.ReasoningDelta
+			} else {
+				m.items[m.streamingItemIdx].content += chunk.Delta
+			}
 			needRebuild = true
 			cmds = append(cmds, readNextChunk(msg.ch))
 		}
@@ -2999,6 +3023,20 @@ func (m *Model) rebuildContent() {
 
 func (m Model) renderItem(item displayItem) string {
 	switch item.kind {
+	case itemReasoning:
+		if item.content == "" {
+			return "" // empty slot — reasoning not emitted by this model
+		}
+		prefix := reasoningPrefixStyle.Render("💭 Thinking")
+		body := item.content
+		// Indent each line by two spaces and apply dim style.
+		lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+		styledLines := make([]string, len(lines))
+		for i, l := range lines {
+			styledLines[i] = reasoningBodyStyle.Render("  " + l)
+		}
+		return prefix + "\n" + strings.Join(styledLines, "\n")
+
 	case itemUser:
 		prefix := userPrefixStyle.Render("You")
 		prefixWidth := lipgloss.Width(prefix) + 2 // +2 for the two spaces after prefix
@@ -3719,6 +3757,7 @@ func (m *Model) applyCompaction(summary string) []tea.Cmd {
 	m.items = rebuildItemsFromMessages(m.messages)
 	m.toolCallIdx = make(map[string]int)
 	m.streamingItemIdx = -1
+	m.reasoningItemIdx = -1
 	// Add a compaction banner at the top of the visible history.
 	banner := displayItem{kind: itemInfo, content: "Context compacted — conversation summarized."}
 	m.items = append([]displayItem{banner}, m.items...)
@@ -4024,6 +4063,9 @@ func rebuildItemsFromMessages(msgs []ai.Message) []displayItem {
 		case "user":
 			items = append(items, displayItem{kind: itemUser, content: msg.Content})
 		case "assistant":
+			if msg.Reasoning != "" {
+				items = append(items, displayItem{kind: itemReasoning, content: msg.Reasoning})
+			}
 			if len(msg.ToolCalls) > 0 {
 				for _, tc := range msg.ToolCalls {
 					args := formatArgsCompact(tc.Arguments)

@@ -190,3 +190,13 @@ func renderMarkdown(r *glamour.TermRenderer, content string) string {
 	}
 	return strings.TrimRight(rendered, "\n")
 }
+
+var (
+	reasoningPrefixStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("99")) // muted purple
+
+	reasoningBodyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244")).
+				Italic(true) // dim/italic for reasoning content
+)

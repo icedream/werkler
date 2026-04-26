@@ -111,10 +111,14 @@ func TestUpdate_StreamDelta_FirstToken_CreatesAssistantItem(t *testing.T) {
 	m, _ = update(t, m, streamChunkMsg{ch: ch, chunk: ai.StreamChunk{Delta: "Hello"}})
 
 	assert.Equal(t, stateStreaming, m.state)
-	require.Len(t, m.items, 1)
-	assert.Equal(t, itemAssistant, m.items[0].kind)
-	assert.Equal(t, "Hello", m.items[0].content)
-	assert.Equal(t, 0, m.streamingItemIdx)
+	// First delta reserves two slots: reasoning (empty) at [0], assistant at [1].
+	require.Len(t, m.items, 2)
+	assert.Equal(t, itemReasoning, m.items[0].kind)
+	assert.Equal(t, "", m.items[0].content) // no reasoning emitted
+	assert.Equal(t, itemAssistant, m.items[1].kind)
+	assert.Equal(t, "Hello", m.items[1].content)
+	assert.Equal(t, 0, m.reasoningItemIdx)
+	assert.Equal(t, 1, m.streamingItemIdx)
 }
 
 func TestUpdate_StreamDelta_SubsequentTokens_AppendContent(t *testing.T) {
