@@ -11,8 +11,6 @@ import (
 
 var (
 	flagConfigPath string
-	flagEndpoint   string
-	flagAPIKey     string
 	flagModel      string
 
 	cfg *config.Config
@@ -41,9 +39,7 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagConfigPath, "config", "", "config file (default: $XDG_CONFIG_HOME/werkler/config.toml)")
-	rootCmd.PersistentFlags().StringVar(&flagEndpoint, "endpoint", "", "AI API base URL (overrides config)")
-	rootCmd.PersistentFlags().StringVar(&flagAPIKey, "api-key", "", "AI API key (overrides config)")
-	rootCmd.PersistentFlags().StringVar(&flagModel, "model", "", "model name (overrides config)")
+	rootCmd.PersistentFlags().StringVar(&flagModel, "model", "", "model name (overrides config active provider's model)")
 }
 
 func loadConfig() error {
@@ -52,6 +48,5 @@ func loadConfig() error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	config.ApplyOverrides(cfg, flagEndpoint, flagAPIKey, flagModel)
 	return nil
 }

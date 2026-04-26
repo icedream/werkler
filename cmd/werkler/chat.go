@@ -164,6 +164,10 @@ func buildAIClient(providers []config.ProviderConfig) (*ai.MultiClient, string, 
 
 	mc := &ai.MultiClient{}
 	for _, p := range providers {
+		// --model flag overrides the active provider's model.
+		if flagModel != "" && p.Name == activeName {
+			p.Model = flagModel
+		}
 		client, err := buildProviderClient(p)
 		if err != nil {
 			return nil, "", err

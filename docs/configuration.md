@@ -22,25 +22,9 @@ The file does not need to exist — missing keys fall back to defaults or flags.
 Werkler supports multiple AI providers simultaneously. You can switch between
 them in the model picker (`ctrl+p`) or by running `werkler chat --provider=name`.
 
-### Single-provider (legacy) config
-
-The simple single-provider format keeps working unchanged:
-
-```toml
-[ai]
-# Base URL of the API. Defaults to https://api.openai.com/v1.
-endpoint = "https://api.openai.com/v1"
-
-# API key sent as Bearer token.
-api_key = "sk-..."
-
-# Model name as understood by the provider.
-model = "gpt-4o"
-```
-
 ### Multi-provider config
 
-Define multiple providers as an array of tables and name the active one:
+Define providers as an array of tables and name the active one:
 
 ```toml
 [ai]
@@ -73,7 +57,9 @@ as `ProviderName: model-id`.
 ### Using OpenAI
 
 ```toml
-[ai]
+[[ai.providers]]
+name     = "openai"
+type     = "openai"
 endpoint = "https://api.openai.com/v1"
 api_key  = "sk-..."
 model    = "gpt-4o"
@@ -84,7 +70,9 @@ model    = "gpt-4o"
 Ollama exposes an OpenAI-compatible endpoint on port 11434. No key is required.
 
 ```toml
-[ai]
+[[ai.providers]]
+name     = "ollama"
+type     = "openai"
 endpoint = "http://localhost:11434/v1"
 api_key  = "ollama"   # any non-empty string; Ollama ignores it
 model    = "llama3.2"
@@ -93,7 +81,9 @@ model    = "llama3.2"
 ### Using a self-hosted cluster (KubeAI / vLLM)
 
 ```toml
-[ai]
+[[ai.providers]]
+name     = "kubeai"
+type     = "openai"
 endpoint = "https://kubeai.example.com/openai/v1"
 api_key  = "your-token"
 model    = "devstral-small-2"
@@ -157,32 +147,15 @@ model = "claude-sonnet-4-5"
 | `werkler auth copilot --force` | Re-authenticate even if already authenticated |
 | `werkler auth status` | Show authentication status for all providers |
 
-### Environment variables
-
-The legacy flat `ai.*` keys can be set via environment variables, which is
-useful for CI or secret managers. These apply only to the single-provider
-(non-`[[ai.providers]]`) configuration:
-
-| Key | Environment variable |
-|-----|----------------------|
-| `ai.endpoint` | `WERKLER_AI_ENDPOINT` |
-| `ai.api_key`  | `WERKLER_AI_API_KEY`  |
-| `ai.model`    | `WERKLER_AI_MODEL`    |
-
-Environment variables override the config file but are overridden by
-command-line flags.
-
 ### Command-line flags
 
 ```
-werkler --api-key sk-... --model gpt-4o chat
-werkler --endpoint http://localhost:11434/v1 --model llama3.2 chat
-werkler chat --provider=copilot
+werkler --model gpt-4o chat            # override active provider's model
+werkler chat --provider=copilot        # switch active provider
 ```
 
-The `--api-key`, `--endpoint`, and `--model` flags only affect the legacy
-single-provider configuration. Use `--provider` to select between named
-providers configured in `[[ai.providers]]`.
+The `--model` flag overrides the model for the active provider. Use `--provider`
+to select a different named provider from `[[ai.providers]]`.
 
 ---
 
@@ -591,27 +564,20 @@ auto_approve_paths = [
 ## Full example config
 
 ```toml
-# Single-provider example (legacy format, still works):
 [ai]
+active = "copilot"
+
+[[ai.providers]]
+name     = "openai"
+type     = "openai"
 endpoint = "https://api.openai.com/v1"
 api_key  = "sk-..."
 model    = "gpt-4o"
 
-# ---- OR multi-provider example ----
-# [ai]
-# active = "copilot"
-#
-# [[ai.providers]]
-# name     = "openai"
-# type     = "openai"
-# endpoint = "https://api.openai.com/v1"
-# api_key  = "sk-..."
-# model    = "gpt-4o"
-#
-# [[ai.providers]]
-# name  = "copilot"
-# type  = "copilot"
-# model = "claude-sonnet-4-5"
+[[ai.providers]]
+name  = "copilot"
+type  = "copilot"
+model = "claude-sonnet-4-5"
 
 # Optional: rubber duck reviewer (separate model for critical feedback)
 # [ai.rubber_duck]
