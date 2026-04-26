@@ -63,6 +63,14 @@ type StreamChunk struct {
 	Err          error      // non-nil on error; stream is terminated
 	RateLimits   RateLimits // populated on Done; zero when provider doesn't report limits
 	FinishReason string     // "stop", "length", "tool_calls", etc.; populated on Done
+	Usage        Usage      // token usage; populated on Done when provider reports it
+}
+
+// Usage holds token consumption statistics for a single AI turn.
+type Usage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
 }
 
 // Completer can perform a non-streaming chat completion.
@@ -236,9 +244,10 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 		}
 
 		req := openai.ChatCompletionRequest{
-			Model:    c.model,
-			Messages: toOpenAIMessages(messages),
-			Tools:    toOpenAITools(tools),
+			Model:         c.model,
+			Messages:      toOpenAIMessages(messages),
+			Tools:         toOpenAITools(tools),
+			StreamOptions: &openai.StreamOptions{IncludeUsage: true},
 		}
 
 		stream, err := c.inner.CreateChatCompletionStream(ctx, req)
@@ -262,6 +271,7 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 		// toolAccum maps tool-call index → accumulated data.
 		toolAccum := map[int]*accumTool{}
 		var finishReason string
+		var usage Usage
 
 		for {
 			resp, err := stream.Recv()
@@ -271,6 +281,14 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			if err != nil {
 				send(StreamChunk{Err: fmt.Errorf("stream recv: %w", err)})
 				return
+			}
+			// Usage arrives in the final chunk (no Choices) when include_usage is set.
+			if resp.Usage != nil {
+				usage = Usage{
+					PromptTokens:     resp.Usage.PromptTokens,
+					CompletionTokens: resp.Usage.CompletionTokens,
+					TotalTokens:      resp.Usage.TotalTokens,
+				}
 			}
 			if len(resp.Choices) == 0 {
 				continue
@@ -314,7 +332,7 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			send(StreamChunk{Err: err})
 			return
 		}
-		send(StreamChunk{Done: true, Msg: msg, RateLimits: rateLimits, FinishReason: finishReason})
+		send(StreamChunk{Done: true, Msg: msg, RateLimits: rateLimits, FinishReason: finishReason, Usage: usage})
 	}()
 	return ch
 }

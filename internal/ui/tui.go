@@ -1850,6 +1850,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 				// Turn complete: drain queued prompts or go idle.
+				// Show token usage as an informational item if the provider reported it.
+				if chunk.Usage.TotalTokens > 0 {
+					m.items = append(m.items, displayItem{
+						kind:    itemInfo,
+						content: formatUsage(chunk.Usage),
+					})
+				}
 				needRebuild = true
 				if m.sessionStore != nil {
 					snap := m.currentSessionSnapshot()
@@ -3044,6 +3051,14 @@ func formatArgsCompact(args map[string]any) string {
 	if len(s) > 120 {
 		s = s[:120] + "…"
 	}
+	return s
+}
+
+// formatUsage renders token usage stats as a short human-readable string.
+// For GitHub Copilot the "completion tokens" equates to premium request units.
+func formatUsage(u ai.Usage) string {
+	s := fmt.Sprintf("tokens — prompt: %d  completion: %d  total: %d",
+		u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 	return s
 }
 
