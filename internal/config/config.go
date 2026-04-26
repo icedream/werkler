@@ -24,6 +24,9 @@ const (
 type MCPServerConfig struct {
 	Name      string       `mapstructure:"name"`
 	Transport MCPTransport `mapstructure:"transport"`
+	// Hint is an optional human-readable description of what tools this server
+	// provides. The AI uses it to decide when to connect to the server lazily.
+	Hint string `mapstructure:"hint"`
 	// For stdio transport:
 	Command string            `mapstructure:"command"`
 	Args    []string          `mapstructure:"args"`

@@ -86,10 +86,8 @@ func runChat(_ *cobra.Command, _ []string) error {
 	case len(cfg.MCP.Servers) == 0:
 		fmt.Fprintln(os.Stderr, "Note: no MCP servers configured — AI will have no tools available.")
 	default:
-		// TUI mode with servers: validate names upfront, then connect in background.
-		if err := mcppkg.ValidateServerNames(cfg.MCP.Servers); err != nil {
-			return fmt.Errorf("MCP setup: %w", err)
-		}
+		// TUI mode with servers: servers are registered and connected lazily.
+		// ValidateServerNames is called inside Register at TUI startup.
 	}
 
 	toolMgr := tools.New(manager, nil, nil)

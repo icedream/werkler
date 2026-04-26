@@ -81,13 +81,16 @@ type Manager struct {
 	toolMap      map[string]toolEntry // AI-facing name → {conn, original name}
 	mcpImpl      *mcp.Implementation
 	pendingOAuth []config.MCPServerConfig // streamable+oauth servers deferred until first prompt
+	configured   []config.MCPServerConfig // servers registered for lazy connect (non-OAuth)
+	connecting   map[string]bool          // display names currently being connected (TOCTOU guard)
 }
 
 // NewManager creates an uninitialised Manager.
 func NewManager() *Manager {
 	return &Manager{
-		mcpImpl: &mcp.Implementation{Name: "werkler", Version: "v0.1.0"},
-		toolMap: make(map[string]toolEntry),
+		mcpImpl:    &mcp.Implementation{Name: "werkler", Version: "v0.1.0"},
+		toolMap:    make(map[string]toolEntry),
+		connecting: make(map[string]bool),
 	}
 }
 
@@ -105,7 +108,119 @@ func ValidateServerNames(servers []config.MCPServerConfig) error {
 	return nil
 }
 
-// Connect establishes connections to all configured MCP servers.
+// Register stores servers for lazy on-demand connection without connecting them
+// immediately. Non-OAuth servers go into the configured pool; OAuth servers are
+// queued in pendingOAuth so the existing first-prompt OAuth flow still works.
+// Register validates server names upfront and returns an error on duplicates.
+func (m *Manager) Register(servers []config.MCPServerConfig) error {
+	if err := ValidateServerNames(servers); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, srv := range servers {
+		if srv.Transport == config.MCPTransportStreamable && srv.OAuth {
+			m.pendingOAuth = append(m.pendingOAuth, srv)
+		} else {
+			m.configured = append(m.configured, srv)
+		}
+	}
+	return nil
+}
+
+// ConfiguredServers returns a copy of the servers registered for lazy connection
+// that have not yet been connected.
+func (m *Manager) ConfiguredServers() []config.MCPServerConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]config.MCPServerConfig, len(m.configured))
+	copy(out, m.configured)
+	return out
+}
+
+// IsConnected reports whether the server with the given display name is active.
+func (m *Manager) IsConnected(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.conns {
+		if c.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ConnectByName connects a single server from the configured pool by its display
+// name. Returns (true, nil) when the server is already connected.
+// Returns an error for OAuth servers (they must be connected via the OAuth flow)
+// or when the name is not found.
+// Safe to call concurrently: a TOCTOU guard prevents two goroutines from
+// connecting the same server simultaneously.
+func (m *Manager) ConnectByName(ctx context.Context, name string) (alreadyConnected bool, err error) {
+	m.mu.Lock()
+
+	// Already connected?
+	for _, c := range m.conns {
+		if c.name == name {
+			m.mu.Unlock()
+			return true, nil
+		}
+	}
+
+	// Already in-flight?
+	if m.connecting[name] {
+		m.mu.Unlock()
+		return false, fmt.Errorf("server %q is already being connected", name)
+	}
+
+	// Find in configured pool.
+	var found *config.MCPServerConfig
+	for i := range m.configured {
+		if m.configured[i].Name == name {
+			found = &m.configured[i]
+			break
+		}
+	}
+	if found == nil {
+		// Check if it's a pending OAuth server.
+		for _, p := range m.pendingOAuth {
+			if p.Name == name {
+				m.mu.Unlock()
+				return false, fmt.Errorf("server %q uses OAuth authentication — it will be connected automatically on your first prompt", name)
+			}
+		}
+		m.mu.Unlock()
+		return false, fmt.Errorf("server %q not found in configured servers", name)
+	}
+
+	srv := *found
+	m.connecting[name] = true
+	m.mu.Unlock()
+
+	// Connect outside the lock to avoid blocking other callers.
+	connErr := m.connectOne(ctx, srv, sanitize(srv.Name))
+
+	m.mu.Lock()
+	delete(m.connecting, name)
+	if connErr == nil {
+		// Remove from configured pool now that it is live.
+		remaining := m.configured[:0]
+		for _, c := range m.configured {
+			if c.Name != name {
+				remaining = append(remaining, c)
+			}
+		}
+		m.configured = remaining
+	}
+	m.mu.Unlock()
+
+	if connErr != nil {
+		return false, fmt.Errorf("connecting to %q: %w", name, connErr)
+	}
+	return false, nil
+}
+
+
 // Streamable servers with OAuth enabled are deferred: they are not connected here
 // but instead queued for [ConnectPendingOAuth].
 // Call Close when done.

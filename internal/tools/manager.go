@@ -26,6 +26,7 @@ import (
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
+	"github.com/icedream/werkler/internal/config"
 	"github.com/icedream/werkler/internal/memorystore"
 	"github.com/icedream/werkler/internal/process"
 	"github.com/icedream/werkler/internal/skills"
@@ -94,6 +95,14 @@ type oauthManager interface {
 	ConnectPendingOAuth(ctx context.Context, display func(serverName, authURL string)) error
 }
 
+// mcpConnector is the minimal interface the connect_server builtin needs from
+// the MCP manager. Keeping it narrow avoids an import cycle and makes testing easier.
+type mcpConnector interface {
+	ConfiguredServers() []config.MCPServerConfig
+	IsConnected(name string) bool
+	ConnectByName(ctx context.Context, name string) (alreadyConnected bool, err error)
+}
+
 // UserAsker is implemented by interactive callers (e.g. the TUI) to suspend a
 // tool goroutine and wait for user input. It is called from a tool execution
 // goroutine and blocks until the user responds or ctx is cancelled.
@@ -108,6 +117,7 @@ type Manager struct {
 	userAsker     UserAsker
 	reviewer      ai.Completer
 	reviewerLabel string
+	mcpMgr        mcpConnector
 	skills        []skills.Skill
 	todoStore     *todostore.Store
 	memoryStore   *memorystore.MemoryStore
@@ -198,8 +208,14 @@ func (m *Manager) SetReviewer(c ai.Completer, label string) {
 	m.builtins = m.makeBuiltins()
 }
 
-// Processes returns the underlying process.Manager for inspection by the TUI.
-func (m *Manager) Processes() *process.Manager { return m.processes }
+// SetMCPManager wires in the MCP manager so the connect_server builtin is
+// registered. Must be called before the tool manager is in use.
+func (m *Manager) SetMCPManager(mgr mcpConnector) {
+	m.mcpMgr = mgr
+	m.builtins = m.makeBuiltins()
+}
+
+
 
 // HasPendingOAuth forwards to the wrapped manager if it supports OAuth.
 func (m *Manager) HasPendingOAuth() bool {
@@ -821,6 +837,37 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 		)
 	}
 
+	if m.mcpMgr != nil {
+		// Build an enum of currently configured (lazy, not yet connected) server names.
+		configured := m.mcpMgr.ConfiguredServers()
+		if len(configured) > 0 {
+			names := make([]any, len(configured))
+			for i, srv := range configured {
+				names[i] = srv.Name
+			}
+			builtins = append(builtins, builtin{
+				def: ai.ToolDefinition{
+					Name: "connect_server",
+					Description: "Connect to a configured MCP server by name. " +
+						"Use this when you need tools from a server that has not been connected yet. " +
+						"After connecting, new tools from that server will be available immediately.",
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"name": map[string]any{
+								"type":        "string",
+								"enum":        names,
+								"description": "Exact name of the server to connect (must match one of the configured servers)",
+							},
+						},
+						"required": []string{"name"},
+					},
+				},
+				handle: m.handleConnectServer,
+			})
+		}
+	}
+
 	// task_complete is always registered — autopilot and manual use both benefit.
 	builtins = append(builtins, builtin{
 		def: ai.ToolDefinition{
@@ -892,6 +939,21 @@ func jsonResult(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
+}
+
+func (m *Manager) handleConnectServer(ctx context.Context, args map[string]any) (string, error) {
+	name := stringArg(args, "name")
+	if name == "" {
+		return "", fmt.Errorf("connect_server: name is required")
+	}
+	already, err := m.mcpMgr.ConnectByName(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if already {
+		return fmt.Sprintf("Server %q is already connected.", name), nil
+	}
+	return fmt.Sprintf("Connected to server %q. New tools from this server are now available.", name), nil
 }
 
 func (m *Manager) handleProcessStart(ctx context.Context, args map[string]any) (string, error) {
