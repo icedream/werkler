@@ -514,7 +514,11 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any
 	if callErr != nil {
 		return "", fmt.Errorf("calling tool %q on %q: %w", entry.origName, entry.conn.name, callErr)
 	}
-	return renderResult(result), nil
+	content, isErr := renderResult(result)
+	if isErr {
+		return "", fmt.Errorf("%s", content)
+	}
+	return content, nil
 }
 
 // reconnectConn closes a dropped connection and establishes a fresh one using
@@ -572,8 +576,9 @@ func splitToolName(name string) (server, tool string, ok bool) {
 
 // renderResult converts an MCP CallToolResult to a string for feeding back to
 // the AI. Text content is concatenated; non-text content is JSON-encoded so the
-// model can still reason about it.
-func renderResult(result *mcp.CallToolResult) string {
+// model can still reason about it. Returns (content, true) when the MCP server
+// set IsError=true so callers can surface the failure appropriately.
+func renderResult(result *mcp.CallToolResult) (string, bool) {
 	var parts []string
 	for _, c := range result.Content {
 		switch tc := c.(type) {
@@ -590,9 +595,8 @@ func renderResult(result *mcp.CallToolResult) string {
 	if result.IsError {
 		if out == "" {
 			out = "(tool returned an error with no message)"
-		} else {
-			out = "Error: " + out
 		}
+		return out, true
 	}
-	return out
+	return out, false
 }

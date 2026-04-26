@@ -69,7 +69,9 @@ func TestRenderResult_SingleText(t *testing.T) {
 	result := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: "hello"}},
 	}
-	assert.Equal(t, "hello", renderResult(result))
+	out, isErr := renderResult(result)
+	assert.Equal(t, "hello", out)
+	assert.False(t, isErr)
 }
 
 func TestRenderResult_MultipleText(t *testing.T) {
@@ -79,7 +81,9 @@ func TestRenderResult_MultipleText(t *testing.T) {
 			&mcp.TextContent{Text: "line2"},
 		},
 	}
-	assert.Equal(t, "line1\nline2", renderResult(result))
+	out, isErr := renderResult(result)
+	assert.Equal(t, "line1\nline2", out)
+	assert.False(t, isErr)
 }
 
 func TestRenderResult_ErrorFlag(t *testing.T) {
@@ -87,19 +91,23 @@ func TestRenderResult_ErrorFlag(t *testing.T) {
 		IsError: true,
 		Content: []mcp.Content{&mcp.TextContent{Text: "something went wrong"}},
 	}
-	out := renderResult(result)
-	assert.Contains(t, out, "Error: ")
-	assert.Contains(t, out, "something went wrong")
+	out, isErr := renderResult(result)
+	assert.True(t, isErr)
+	assert.Equal(t, "something went wrong", out)
 }
 
 func TestRenderResult_ErrorFlagNoContent(t *testing.T) {
 	result := &mcp.CallToolResult{IsError: true}
-	assert.Equal(t, "(tool returned an error with no message)", renderResult(result))
+	out, isErr := renderResult(result)
+	assert.True(t, isErr)
+	assert.Equal(t, "(tool returned an error with no message)", out)
 }
 
 func TestRenderResult_EmptyContent(t *testing.T) {
 	result := &mcp.CallToolResult{}
-	assert.Equal(t, "", renderResult(result))
+	out, isErr := renderResult(result)
+	assert.Equal(t, "", out)
+	assert.False(t, isErr)
 }
 
 func TestRenderResult_NonTextContent_JSONEncoded(t *testing.T) {
@@ -107,6 +115,7 @@ func TestRenderResult_NonTextContent_JSONEncoded(t *testing.T) {
 	result := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.ImageContent{Data: []byte("abc"), MIMEType: "image/png"}},
 	}
-	out := renderResult(result)
+	out, isErr := renderResult(result)
 	assert.Contains(t, out, "image/png")
+	assert.False(t, isErr)
 }
