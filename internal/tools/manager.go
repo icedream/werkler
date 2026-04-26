@@ -966,7 +966,7 @@ func (m *Manager) handleFileEdit(_ context.Context, args map[string]any) (string
 	count := strings.Count(content, oldStr)
 	switch {
 	case count == 0:
-		return "", fmt.Errorf("file_edit: old_str not found in %s", path)
+		return "", fmt.Errorf("file_edit: old_str not found in %s — call file_read on the file first and use the exact text from the file as old_str (watch for whitespace and indentation)", path)
 	case count > 1:
 		// Give the AI enough context to narrow down the match.
 		lineNums := findMatchLines(content, oldStr)
