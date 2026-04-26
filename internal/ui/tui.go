@@ -131,6 +131,11 @@ type toolResultMsg struct {
 
 type contextDoneMsg struct{}
 
+// tokenCountMsg carries the result of an async token-count operation.
+type tokenCountMsg struct {
+	count ai.TokenCount
+}
+
 // --- OAuth messages ---
 
 // oauthNeedAuthMsg is sent when an OAuth server requires browser authorization.
@@ -505,6 +510,10 @@ type Model struct {
 	// lastRateLimits holds the most recent rate limit headers from the provider.
 	// Zero when the provider has not returned rate limit data (e.g. Ollama).
 	lastRateLimits ai.RateLimits
+
+	// contextUsage holds the most recently computed token count for the current
+	// message history. Updated asynchronously after each message change.
+	contextUsage ai.TokenCount
 
 	// turnRoundtrips counts how many AI completion calls have been made within
 	// the current user turn. Resets when the user sends a new message. Used to
@@ -974,6 +983,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.turnRoundtrips = 0
 							m.state = stateThinking
+							if cmd := m.recountContext(); cmd != nil {
+								cmds = append(cmds, cmd)
+							}
 							cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
 						}
 					}
@@ -1095,6 +1107,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.resumeHint = nil
 					m.applySession(&sess)
 					needRebuild = true
+					if cmd := m.recountContext(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 				m.state = stateIdle
 				m.updateCompletion()
@@ -1332,6 +1347,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tokenCountMsg:
+		if msg.count.Total > 0 {
+			m.contextUsage = msg.count
+		}
+
 	case modelsLoadedMsg:
 		// Only process if we're still in model-picking state (guard against stale results).
 		if m.state == statePickingModel {
@@ -1542,6 +1562,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sessionID = snap.ID
 					m.sessionCreatedAt = snap.CreatedAt
 					cmds = append(cmds, doSaveSession(m.sessionStore, snap))
+				}
+				if cmd := m.recountContext(); cmd != nil {
+					cmds = append(cmds, cmd)
 				}
 				cmds = append(cmds, m.processQueueOrIdle())
 			} else {
@@ -1798,6 +1821,11 @@ func (m Model) headerView() string {
 		servers = strings.Join(m.serverNames, ", ")
 	}
 	text := fmt.Sprintf("werkler  model: %s  servers: %s", m.modelName, servers)
+	if m.contextUsage.Total > 0 {
+		maxTok := m.modelInfo.Context.MaxTokens
+		ctx := m.contextUsage.FormatWithMax(maxTok)
+		text += "  ctx: " + ctx
+	}
 	return headerStyle.Width(m.width).Render(text)
 }
 
@@ -2320,6 +2348,29 @@ func doGetModelInfo(ctx context.Context, getter ai.ModelInfoGetter) tea.Cmd {
 		info, err := getter.GetModelInfo(ctx)
 		return modelInfoMsg{info: info, err: err}
 	}
+}
+
+// doCountTokens counts the input tokens for messages asynchronously and returns
+// a tokenCountMsg. Errors are silently swallowed (count will be zero).
+func doCountTokens(modelName string, messages []ai.Message) tea.Cmd {
+	// Snapshot the slice so the goroutine doesn't race with the main model.
+	snap := make([]ai.Message, len(messages))
+	copy(snap, messages)
+	return func() tea.Msg {
+		count, err := ai.CountTokens(modelName, snap)
+		if err != nil {
+			return tokenCountMsg{}
+		}
+		return tokenCountMsg{count: count}
+	}
+}
+
+// recountContext schedules an async token count for the current message history.
+func (m *Model) recountContext() tea.Cmd {
+	if len(m.messages) == 0 {
+		return nil
+	}
+	return doCountTokens(m.modelName, m.messages)
 }
 
 // filteredFromAllDefs returns the enabled subset of m.allToolDefs according to
