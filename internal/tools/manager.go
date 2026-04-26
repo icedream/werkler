@@ -25,6 +25,7 @@ import (
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
+	"github.com/icedream/werkler/internal/memorystore"
 	"github.com/icedream/werkler/internal/process"
 	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/todostore"
@@ -80,6 +81,7 @@ type Manager struct {
 	reviewerLabel string
 	skills        []skills.Skill
 	todoStore     *todostore.Store
+	memoryStore   *memorystore.MemoryStore
 }
 
 type builtin struct {
@@ -121,6 +123,14 @@ func (m *Manager) SetSkills(s []skills.Skill) {
 // Must be called at setup time only (not concurrency-safe).
 func (m *Manager) SetTodoStore(s *todostore.Store) {
 	m.todoStore = s
+	m.builtins = m.makeBuiltins()
+}
+
+// SetMemoryStore wires the per-project memory store so the AI can read and
+// write persistent notes about the project. Must be called at setup time only
+// (not concurrency-safe).
+func (m *Manager) SetMemoryStore(s *memorystore.MemoryStore) {
+	m.memoryStore = s
 	m.builtins = m.makeBuiltins()
 }
 
@@ -705,6 +715,44 @@ Use proactively at the start of multi-step tasks. Returns the todo ID for later 
 		)
 	}
 
+	if m.memoryStore != nil {
+		builtins = append(builtins,
+			builtin{
+				def: ai.ToolDefinition{
+					Name: "memory_read",
+					Description: `Read the project memory for the current directory.
+Returns notes saved by memory_write in previous sessions about this project.
+The current memory is also automatically injected into your system prompt at session start,
+so you rarely need to call this — only if you want to re-read it mid-session.`,
+					InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+				},
+				handle: m.handleMemoryRead,
+			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name: "memory_write",
+					Description: `Write (replace) the project memory for the current directory.
+IMPORTANT: This tool REPLACES the entire memory file. You must include the existing notes
+plus any new additions — partial writes will erase earlier content.
+Use this to persist project knowledge across sessions: conventions, architecture decisions,
+known issues, preferred patterns, important file locations.
+Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` bytes total.`,
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"content": map[string]any{
+								"type":        "string",
+								"description": "Full markdown content to store as the project memory (replaces previous content)",
+							},
+						},
+						"required": []string{"content"},
+					},
+				},
+				handle: m.handleMemoryWrite,
+			},
+		)
+	}
+
 	// task_complete is always registered — autopilot and manual use both benefit.
 	builtins = append(builtins, builtin{
 		def: ai.ToolDefinition{
@@ -1273,4 +1321,23 @@ func (m *Manager) handleTaskComplete(_ context.Context, args map[string]any) (st
 		summary = "Task complete."
 	}
 	return summary, nil
+}
+
+func (m *Manager) handleMemoryRead(_ context.Context, _ map[string]any) (string, error) {
+	content, err := m.memoryStore.Read()
+	if err != nil {
+		return "error reading project memory: " + err.Error(), nil
+	}
+	if content == "" {
+		return "(no project memory stored yet)", nil
+	}
+	return content, nil
+}
+
+func (m *Manager) handleMemoryWrite(_ context.Context, args map[string]any) (string, error) {
+	content := stringArg(args, "content")
+	if err := m.memoryStore.Write(content); err != nil {
+		return "error writing project memory: " + err.Error(), nil
+	}
+	return fmt.Sprintf("project memory saved (%d bytes)", len(content)), nil
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/icedream/werkler/internal/config"
 	"github.com/icedream/werkler/internal/copilot"
 	mcppkg "github.com/icedream/werkler/internal/mcp"
+	"github.com/icedream/werkler/internal/memorystore"
 	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/todostore"
@@ -126,6 +127,17 @@ func runChat(_ *cobra.Command, _ []string) error {
 	todoStore := todostore.New()
 	toolMgr.SetTodoStore(todoStore)
 
+	// Set up cross-session project memory (stored in ~/.config/werkler/memory/).
+	var memStore *memorystore.MemoryStore
+	if cwd, err := os.Getwd(); err == nil {
+		if ms, err := memorystore.New(cwd); err == nil {
+			memStore = ms
+			toolMgr.SetMemoryStore(ms)
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: project memory unavailable: %v\n", err)
+		}
+	}
+
 	store := sessionstore.New(sessionstore.DefaultDir())
 
 	if chatPrompt != "" {
@@ -133,7 +145,7 @@ func runChat(_ *cobra.Command, _ []string) error {
 			names := strings.Join(session.PendingOAuthNames(), ", ")
 			return fmt.Errorf("OAuth authentication required for: %s — run `werkler chat` to authenticate interactively", names)
 		}
-		return runPromptMode(ctx, multiClient, session)
+		return runPromptMode(ctx, multiClient, session, memStore)
 	}
 
 	opts := ui.SessionOptions{
@@ -151,6 +163,7 @@ func runChat(_ *cobra.Command, _ []string) error {
 		},
 		Autopilot:          chatAutopilot,
 		AutopilotMaxCycles: resolveAutopilotMax(chatAutopilotMaxCyc, cfg.Autopilot.MaxCycles),
+		MemoryStore:        memStore,
 	}
 	if len(cfg.MCP.Servers) > 0 {
 		opts.MCPManager = manager
@@ -295,10 +308,13 @@ func buildReviewerClient(providers []config.ProviderConfig) (ai.Completer, strin
 	return client, label, nil
 }
 
-func runPromptMode(ctx context.Context, aiClient ai.Completer, session *chat.Session) error {
+func runPromptMode(ctx context.Context, aiClient ai.Completer, session *chat.Session, memStore *memorystore.MemoryStore) error {
 	opts := chat.PromptOptions{
 		Autopilot:          chatAutopilot,
 		AutopilotMaxCycles: resolveAutopilotMax(chatAutopilotMaxCyc, cfg.Autopilot.MaxCycles),
+	}
+	if memStore != nil {
+		opts.InitialMemory, _ = memStore.Read()
 	}
 	if chatVerbose {
 		opts.Progress = os.Stderr
