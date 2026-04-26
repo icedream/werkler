@@ -303,6 +303,12 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 func toOpenAIMessages(msgs []Message) []openai.ChatCompletionMessage {
 	out := make([]openai.ChatCompletionMessage, 0, len(msgs))
 	for _, m := range msgs {
+		// Drop empty assistant messages (no content, no tool calls) — they are
+		// produced when the model returns a blank response and some providers
+		// (e.g. Ollama) reject them with a 400 "invalid message content type: <nil>".
+		if m.Role == "assistant" && m.Content == "" && len(m.ToolCalls) == 0 {
+			continue
+		}
 		msg := openai.ChatCompletionMessage{
 			Role:       m.Role,
 			Content:    m.Content,
