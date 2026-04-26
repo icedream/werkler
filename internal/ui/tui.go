@@ -402,6 +402,21 @@ func init() {
 			},
 		},
 		{
+			name:        "new",
+			description: "Start a new session (clears history and detaches from the current saved session)",
+			action: func(m *Model) []tea.Cmd {
+				m.messages = m.newConversation()
+				m.items = nil
+				m.toolCallIdx = make(map[string]int)
+				m.streamingItemIdx = -1
+				m.oauthInfoIdx = -1
+				m.sessionID = ""
+				m.sessionCreatedAt = time.Time{}
+				m.rebuildContent()
+				return nil
+			},
+		},
+		{
 			name:        "compact",
 			description: "Summarize the conversation to free up context window space",
 			available: func(m *Model) bool {
