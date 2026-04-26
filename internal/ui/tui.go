@@ -261,6 +261,13 @@ func (s sessionItem) Description() string {
 	return formatAge(s.sess.UpdatedAt) + "  " + shortenHomePath(s.sess.CWD)
 }
 
+// newSessionItem is the sentinel "↳ New session" entry at the top of the picker.
+type newSessionItem struct{}
+
+func (newSessionItem) FilterValue() string { return "new session" }
+func (newSessionItem) Title() string       { return "↳ New session" }
+func (newSessionItem) Description() string { return "Start a fresh conversation" }
+
 // toolItem implements list.Item for the tool picker.
 // The name field holds the full AI-facing tool name (e.g. "github__get_file_contents").
 type toolItem struct {
@@ -1213,12 +1220,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateCompletion()
 			case tea.KeyEnter:
 				if sel := m.sessionPicker.SelectedItem(); sel != nil {
-					sess := sel.(sessionItem).sess
-					m.resumeHint = nil
-					m.applySession(&sess)
-					needRebuild = true
-					if cmd := m.recountContext(); cmd != nil {
-						cmds = append(cmds, cmd)
+					switch item := sel.(type) {
+					case newSessionItem:
+						m.messages = m.newConversation()
+						m.items = nil
+						m.toolCallIdx = make(map[string]int)
+						m.streamingItemIdx = -1
+						m.oauthInfoIdx = -1
+						m.sessionID = ""
+						m.sessionCreatedAt = time.Time{}
+						needRebuild = true
+					case sessionItem:
+						m.resumeHint = nil
+						m.applySession(&item.sess)
+						needRebuild = true
+						if cmd := m.recountContext(); cmd != nil {
+							cmds = append(cmds, cmd)
+						}
 					}
 				}
 				m.state = stateIdle
@@ -1609,9 +1627,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateCompletion()
 				needRebuild = true
 			} else {
-				items := make([]list.Item, len(msg.sessions))
-				for i, s := range msg.sessions {
-					items[i] = sessionItem{sess: s}
+				items := make([]list.Item, 0, len(msg.sessions)+1)
+				items = append(items, newSessionItem{})
+				for _, s := range msg.sessions {
+					items = append(items, sessionItem{sess: s})
 				}
 				m.sessionPicker.SetItems(items)
 				m.sessionPicker.SetSize(m.width, m.height-fixedLines)
