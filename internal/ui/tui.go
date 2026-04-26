@@ -477,6 +477,10 @@ type slashCommand struct {
 	description string
 	available   func(*Model) bool      // nil = always available
 	action      func(*Model) []tea.Cmd // executed on selection
+	// safeWhileBusy, when true, allows this command to be executed while the AI
+	// is actively thinking/streaming/calling tools. Commands that open picker
+	// overlays must NOT set this, since overlay + async state mutation is unsafe.
+	safeWhileBusy bool
 }
 
 // slashCommands is the ordered registry of all /commands.
@@ -621,9 +625,10 @@ func init() {
 			},
 		},
 		{
-			name:        "todos",
-			description: "Toggle the todo sidebar",
-			available:   func(m *Model) bool { return m.todoStore != nil },
+			name:          "todos",
+			description:   "Toggle the todo sidebar",
+			available:     func(m *Model) bool { return m.todoStore != nil },
+			safeWhileBusy: true,
 			action: func(m *Model) []tea.Cmd {
 				m.sidebarOpen = !m.sidebarOpen
 				m.recalcLayout()
@@ -632,8 +637,9 @@ func init() {
 			},
 		},
 		{
-			name:        "autopilot",
-			description: "Toggle autopilot mode — AI works autonomously until task_complete is called",
+			name:          "autopilot",
+			description:   "Toggle autopilot mode — AI works autonomously until task_complete is called",
+			safeWhileBusy: true,
 			action: func(m *Model) []tea.Cmd {
 				if m.autopilot || m.autopilotPaused {
 					m.autopilotDisable()
@@ -647,7 +653,8 @@ func init() {
 			},
 		},
 		{
-			description: "Toggle allow-all mode — auto-approve all tool calls and path access without prompting",
+			description:   "Toggle allow-all mode — auto-approve all tool calls and path access without prompting",
+			safeWhileBusy: true,
 			action: func(m *Model) []tea.Cmd {
 				m.session.SetAllowAll(!m.session.AllowAll())
 				m.rebuildContent()
@@ -655,15 +662,17 @@ func init() {
 			},
 		},
 		{
-			name:        "quit",
-			description: "Quit werkler",
+			name:          "quit",
+			description:   "Quit werkler",
+			safeWhileBusy: true,
 			action: func(m *Model) []tea.Cmd {
 				return []tea.Cmd{tea.Quit}
 			},
 		},
 		{
-			name:        "help",
-			description: "Show available keyboard shortcuts and commands",
+			name:          "help",
+			description:   "Show available keyboard shortcuts and commands",
+			safeWhileBusy: true,
 			action: func(m *Model) []tea.Cmd {
 				var lines []string
 				lines = append(lines, "**Keyboard shortcuts**")
@@ -1051,9 +1060,13 @@ func (m Model) filteredCmds() []slashCommand {
 	if !strings.HasPrefix(text, "/") {
 		return nil
 	}
+	busy := m.isBusy()
 	prefix := strings.TrimPrefix(text, "/")
 	var out []slashCommand
 	for _, cmd := range slashCommands {
+		if busy && !cmd.safeWhileBusy {
+			continue
+		}
 		if cmd.available != nil && !cmd.available(&m) {
 			continue
 		}
@@ -1097,13 +1110,23 @@ func (m *Model) recalcLayout() {
 	m.syncViewportHeight()
 }
 
+// isBusy reports whether the model is in an active AI processing state where
+// the input box remains accessible but the AI has not yet returned to idle.
+func (m Model) isBusy() bool {
+	switch m.state {
+	case stateThinking, stateStreaming, stateCallingTool, stateCompacting, stateConnectingOAuth:
+		return true
+	}
+	return false
+}
+
 // updateCompletion derives showCompletion from the current state and input value,
 // clamps completionIdx, and syncs the viewport height. Call after any input or
 // state change that might affect completion visibility.
 func (m *Model) updateCompletion() {
 	wasShowing := m.showCompletion
 	cmds := m.filteredCmds()
-	m.showCompletion = m.state == stateIdle && len(cmds) > 0
+	m.showCompletion = (m.state == stateIdle || m.isBusy()) && len(cmds) > 0
 	if !wasShowing && m.showCompletion {
 		m.completionIdx = 0 // reset selection on fresh open
 	} else if m.completionIdx >= len(cmds) {
@@ -1773,14 +1796,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth, stateCompacting:
 			switch msg.Type {
 			case tea.KeyEnter:
+				// If the completion popup is showing and a safe-while-busy command is
+				// selected, execute it immediately rather than queuing it as a prompt.
+				if m.showCompletion {
+					filtered := m.filteredCmds()
+					if m.completionIdx < len(filtered) {
+						cmds = append(cmds, m.runCompletion(filtered[m.completionIdx])...)
+						break
+					}
+				}
 				text := strings.TrimSpace(m.input.Value())
 				if text != "" {
 					m.input.Reset()
+					m.showCompletion = false
 					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: false})
 					needRebuild = true
 				}
+			case tea.KeyTab:
+				if m.showCompletion {
+					filtered := m.filteredCmds()
+					if len(filtered) > 0 {
+						m.input.SetValue("/" + filtered[m.completionIdx].name)
+						m.input.CursorEnd()
+						m.updateCompletion()
+					}
+				}
+			case tea.KeyUp:
+				if m.showCompletion {
+					filtered := m.filteredCmds()
+					if len(filtered) > 0 {
+						m.completionIdx = (m.completionIdx - 1 + len(filtered)) % len(filtered)
+					}
+				} else {
+					var vpCmd tea.Cmd
+					m.viewport, vpCmd = m.viewport.Update(msg)
+					cmds = append(cmds, vpCmd)
+				}
+			case tea.KeyDown:
+				if m.showCompletion {
+					filtered := m.filteredCmds()
+					if len(filtered) > 0 {
+						m.completionIdx = (m.completionIdx + 1) % len(filtered)
+					}
+				} else {
+					var vpCmd tea.Cmd
+					m.viewport, vpCmd = m.viewport.Update(msg)
+					cmds = append(cmds, vpCmd)
+				}
 			case tea.KeyEsc:
 				switch {
+				case m.showCompletion:
+					m.showCompletion = false
+					m.syncViewportHeight()
 				case m.input.Value() != "":
 					m.input.Reset()
 					m.cancelPending = false
@@ -1808,6 +1875,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var inputCmd tea.Cmd
 				m.input, inputCmd = m.input.Update(msg)
 				cmds = append(cmds, inputCmd)
+				m.updateCompletion()
 				var vpCmd tea.Cmd
 				m.viewport, vpCmd = m.viewport.Update(msg)
 				cmds = append(cmds, vpCmd)
