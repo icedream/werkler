@@ -331,7 +331,7 @@ func TestUpdate_ToolResult_Failure_InformsAI(t *testing.T) {
 	m.callingToolName = "bad_tool"
 	m.toolCallIdx["c1"] = 0
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusRunning})
-	m.queuedPrompts = []string{"follow-up"}
+	m.queuedPrompts = []queuedPrompt{{text: "follow-up"}}
 	// Pre-seed an assistant message with a tool call so history is valid.
 	m.messages = append(m.messages, ai.Message{
 		Role:      "assistant",
@@ -414,7 +414,7 @@ func TestUpdate_Queue_EnterWhileBusy_AddsToQueue(t *testing.T) {
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 
 	require.Len(t, m.queuedPrompts, 1)
-	assert.Equal(t, "hello", m.queuedPrompts[0])
+	assert.Equal(t, "hello", m.queuedPrompts[0].text)
 	assert.Equal(t, "", m.input.Value(), "input should be cleared after queueing")
 	// State must not change — we're still thinking.
 	assert.Equal(t, stateThinking, m.state)
@@ -432,9 +432,9 @@ func TestUpdate_Queue_MultiplePrompts_FIFO(t *testing.T) {
 	}
 
 	require.Len(t, m.queuedPrompts, 3)
-	assert.Equal(t, "first", m.queuedPrompts[0])
-	assert.Equal(t, "second", m.queuedPrompts[1])
-	assert.Equal(t, "third", m.queuedPrompts[2])
+	assert.Equal(t, "first", m.queuedPrompts[0].text)
+	assert.Equal(t, "second", m.queuedPrompts[1].text)
+	assert.Equal(t, "third", m.queuedPrompts[2].text)
 }
 
 func TestUpdate_Queue_EscWithText_ClearsInput(t *testing.T) {
@@ -453,12 +453,12 @@ func TestUpdate_Queue_EscWithText_ClearsInput(t *testing.T) {
 func TestUpdate_Queue_EscEmptyInput_RemovesLastQueued(t *testing.T) {
 	m := baseModel()
 	m.state = stateStreaming
-	m.queuedPrompts = []string{"first", "second"}
+	m.queuedPrompts = []queuedPrompt{{text: "first"}, {text: "second"}}
 
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 
 	require.Len(t, m.queuedPrompts, 1)
-	assert.Equal(t, "first", m.queuedPrompts[0])
+	assert.Equal(t, "first", m.queuedPrompts[0].text)
 }
 
 func TestUpdate_Queue_EscEmptyInputNoQueue_NoOp(t *testing.T) {
@@ -485,7 +485,7 @@ func TestUpdate_ProcessQueueOrIdle_WithQueue_StartsNextTurn(t *testing.T) {
 	session := chat.NewSession(tm, nil, nil)
 	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark", nil)
 	m.state = stateStreaming
-	m.queuedPrompts = []string{"next question"}
+	m.queuedPrompts = []queuedPrompt{{text: "next question"}}
 
 	// Simulate stream completing with no tool calls → processQueueOrIdle fires.
 	finalMsg := ai.Message{Role: "assistant", Content: "answer"}

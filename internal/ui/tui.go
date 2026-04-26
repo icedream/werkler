@@ -158,6 +158,14 @@ type toolResultMsg struct {
 
 type contextDoneMsg struct{}
 
+// queuedPrompt is a user prompt held in the queue while the AI or MCP connect is busy.
+// displayed=true means the itemUser bubble was already added to m.items (e.g. typed
+// during stateConnectingMCP or stateIdle+OAuth), so processQueueOrIdle must not add it again.
+type queuedPrompt struct {
+	text      string
+	displayed bool
+}
+
 // tokenCountMsg carries the result of an async token-count operation.
 type tokenCountMsg struct {
 	count ai.TokenCount
@@ -651,7 +659,8 @@ type Model struct {
 
 	// Queue of user prompts entered while the AI is busy.
 	// Processed FIFO after the current agent turn completes successfully.
-	queuedPrompts []string
+	// displayed=true means the itemUser bubble has already been added to m.items.
+	queuedPrompts []queuedPrompt
 
 	// inputHistory holds all user prompts sent in this session (oldest first).
 	// historyIdx is the current position when navigating (-1 = not navigating).
@@ -1298,7 +1307,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 						if m.session.HasPendingOAuth() {
 							// Defer the user prompt until OAuth servers are connected.
-							m.queuedPrompts = append([]string{text}, m.queuedPrompts...)
+							// Item already shown above (displayed=true).
+							m.queuedPrompts = append([]queuedPrompt{{text: text, displayed: true}}, m.queuedPrompts...)
 							m.oauthInfoIdx = len(m.items)
 							names := strings.Join(m.session.PendingOAuthNames(), ", ")
 							m.items = append(m.items, displayItem{
@@ -1575,7 +1585,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.Reset()
 					m.appendInputHistory(text)
 					m.items = append(m.items, displayItem{kind: itemUser, content: text})
-					m.queuedPrompts = append(m.queuedPrompts, text)
+					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: true})
 					needRebuild = true
 				}
 			case tea.KeyEsc:
@@ -1600,7 +1610,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text := strings.TrimSpace(m.input.Value())
 				if text != "" {
 					m.input.Reset()
-					m.queuedPrompts = append(m.queuedPrompts, text)
+					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: false})
 					needRebuild = true
 				}
 			case tea.KeyEsc:
@@ -2966,10 +2976,14 @@ func (m *Model) populateHistoryFromMessages(msgs []ai.Message) {
 // keeping the agent busy. Otherwise the TUI returns to idle.
 func (m *Model) processQueueOrIdle() tea.Cmd {
 	if len(m.queuedPrompts) > 0 {
-		text := m.queuedPrompts[0]
+		p := m.queuedPrompts[0]
 		m.queuedPrompts = m.queuedPrompts[1:]
-		m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
-		m.items = append(m.items, displayItem{kind: itemUser, content: text})
+		m.messages = append(m.messages, ai.Message{Role: "user", Content: p.text})
+		// Only add the display item if it wasn't already shown when queued
+		// (e.g. typed during stateConnectingMCP or stateIdle+OAuth).
+		if !p.displayed {
+			m.items = append(m.items, displayItem{kind: itemUser, content: p.text})
+		}
 		m.turnRoundtrips = 0
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
