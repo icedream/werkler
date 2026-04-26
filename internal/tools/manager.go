@@ -27,6 +27,7 @@ import (
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/process"
 	"github.com/icedream/werkler/internal/skills"
+	"github.com/icedream/werkler/internal/todostore"
 )
 
 // PathApprover checks path-level access approvals.
@@ -78,6 +79,7 @@ type Manager struct {
 	reviewer      ai.Completer
 	reviewerLabel string
 	skills        []skills.Skill
+	todoStore     *todostore.Store
 }
 
 type builtin struct {
@@ -112,6 +114,13 @@ func (m *Manager) SetOutputNotify(fn OutputNotification) {
 // Rebuilds the built-in tool list. Must be called at setup time only (not concurrency-safe).
 func (m *Manager) SetSkills(s []skills.Skill) {
 	m.skills = s
+	m.builtins = m.makeBuiltins()
+}
+
+// SetTodoStore wires an in-session todo store so the AI can manage todos.
+// Must be called at setup time only (not concurrency-safe).
+func (m *Manager) SetTodoStore(s *todostore.Store) {
+	m.todoStore = s
 	m.builtins = m.makeBuiltins()
 }
 
@@ -650,6 +659,52 @@ Set recommended_choice to highlight a suggested option.`,
 		})
 	}
 
+	if m.todoStore != nil {
+		builtins = append(builtins,
+			builtin{
+				def: ai.ToolDefinition{
+					Name: "todo_add",
+					Description: `Add a todo item to the session task list.
+Use proactively at the start of multi-step tasks. Returns the todo ID for later updates.`,
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"title":       map[string]any{"type": "string", "description": "Short one-line title"},
+							"description": map[string]any{"type": "string", "description": "Optional detail or acceptance criteria"},
+						},
+						"required": []string{"title"},
+					},
+				},
+				handle: m.handleTodoAdd,
+			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name:        "todo_update",
+					Description: `Update the status (or title/description) of an existing todo item.`,
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"id":          map[string]any{"type": "string", "description": "Todo ID returned by todo_add"},
+							"status":      map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "done", "blocked"}, "description": "New status"},
+							"title":       map[string]any{"type": "string", "description": "Replace title"},
+							"description": map[string]any{"type": "string", "description": "Replace description"},
+						},
+						"required": []string{"id"},
+					},
+				},
+				handle: m.handleTodoUpdate,
+			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name:        "todo_list",
+					Description: `Return the current todo list as text so you can review progress.`,
+					InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+				},
+				handle: m.handleTodoList,
+			},
+		)
+	}
+
 	return builtins
 }
 
@@ -1134,4 +1189,59 @@ func (m *Manager) handleUseSkill(_ context.Context, args map[string]any) (string
 		}
 	}
 	return "skill not found: " + name, nil
+}
+
+func (m *Manager) handleTodoAdd(_ context.Context, args map[string]any) (string, error) {
+title := stringArg(args, "title")
+if title == "" {
+return "error: title is required", nil
+}
+id := m.todoStore.Add(title, stringArg(args, "description"))
+return fmt.Sprintf("todo %s added", id), nil
+}
+
+func (m *Manager) handleTodoUpdate(_ context.Context, args map[string]any) (string, error) {
+id := stringArg(args, "id")
+if id == "" {
+return "error: id is required", nil
+}
+var f todostore.UpdateFields
+if v := stringArg(args, "status"); v != "" {
+f.Status = &v
+}
+if v := stringArg(args, "title"); v != "" {
+f.Title = &v
+}
+if v := stringArg(args, "description"); v != "" {
+f.Description = &v
+}
+if err := m.todoStore.Update(id, f); err != nil {
+return "error: " + err.Error(), nil
+}
+return "todo " + id + " updated", nil
+}
+
+func (m *Manager) handleTodoList(_ context.Context, _ map[string]any) (string, error) {
+todos := m.todoStore.List()
+if len(todos) == 0 {
+return "no todos", nil
+}
+var sb strings.Builder
+icons := map[string]string{
+todostore.StatusPending:    "○",
+todostore.StatusInProgress: "▶",
+todostore.StatusDone:       "✓",
+todostore.StatusBlocked:    "✗",
+}
+for _, t := range todos {
+icon := icons[t.Status]
+if icon == "" {
+icon = "?"
+}
+fmt.Fprintf(&sb, "%s [%s] %s: %s\n", icon, t.ID, t.Status, t.Title)
+if t.Description != "" {
+fmt.Fprintf(&sb, "    %s\n", t.Description)
+}
+}
+return strings.TrimRight(sb.String(), "\n"), nil
 }

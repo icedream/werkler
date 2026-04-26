@@ -27,12 +27,19 @@ import (
 	"github.com/icedream/werkler/internal/registry"
 	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/skills"
+	"github.com/icedream/werkler/internal/todostore"
 	"github.com/icedream/werkler/internal/tools"
 )
 
 // fixedLines is the number of terminal lines consumed by non-viewport UI elements:
 // header(1) + sep(1) + sep(1) + statusLine1(1) + statusLine2(1) + sep(1) + input(1) = 7
 const fixedLines = 7
+
+// sidebarWidth is the fixed column width of the todo sidebar (including 1 separator column).
+const sidebarWidth = 33 // 32 content + 1 for "│"
+
+// minMainWidth is the minimum width of the main pane; below this the sidebar is hidden.
+const minMainWidth = 40
 
 // --- Debug logging ---
 
@@ -245,6 +252,8 @@ type modelInfoMsg struct {
 	err  error
 }
 
+// todoUpdateMsg is sent by the todo store notify callback when todos change.
+type todoUpdateMsg struct{ autoOpen bool }
 // modelItem implements list.Item for a model picker entry.
 type modelItem struct{ ai.ModelItem }
 
@@ -351,6 +360,8 @@ type SessionOptions struct {
 	PersistMCPServer func(cfg config.MCPServerConfig) error
 	// Skills is the list of loaded skills to mention in the system prompt.
 	Skills []skills.Skill
+	// TodoStore, if non-nil, enables the AI-managed todo sidebar.
+	TodoStore *todostore.Store
 	// MCPManager and MCPServers, when both non-nil/non-empty, enable background
 	// MCP server connection. The TUI starts in stateConnectingMCP and transitions
 	// to stateIdle once all servers have been connected (or failed).
@@ -656,6 +667,10 @@ type Model struct {
 	registryCancelCtx  context.CancelFunc
 	// persistMCPServer, if non-nil, saves a server to the config file.
 	persistMCPServer func(cfg config.MCPServerConfig) error
+
+	// Todo sidebar.
+	todoStore   *todostore.Store
+	sidebarOpen bool
 }
 
 func initialModel(
@@ -799,6 +814,18 @@ func (m *Model) syncViewportHeight() {
 		vph = 1
 	}
 	m.viewport.Height = vph
+}
+
+// recalcLayout updates viewport and input widths to account for whether the
+// sidebar is open. Must be called after m.width, m.height, or m.sidebarOpen changes.
+func (m *Model) recalcLayout() {
+	mainW := m.width
+	if m.sidebarOpen && m.todoStore != nil && m.width-sidebarWidth >= minMainWidth {
+		mainW = m.width - sidebarWidth
+	}
+	m.viewport.Width = mainW
+	m.input.Width = mainW - 5 // 5 = len("You> ")
+	m.syncViewportHeight()
 }
 
 // updateCompletion derives showCompletion from the current state and input value,
@@ -1517,6 +1544,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.contextUsage = msg.count
 		}
 
+	case todoUpdateMsg:
+		if msg.autoOpen {
+			m.sidebarOpen = true
+			m.recalcLayout()
+		}
+		needRebuild = true
+
 	case compactDoneMsg:
 		if msg.err != nil {
 			// Compaction failed: keep history intact, show error, go idle.
@@ -1705,11 +1739,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var vpCmd tea.Cmd
 		m.viewport, vpCmd = m.viewport.Update(msg)
 		cmds = append(cmds, vpCmd)
-		m.viewport.Width = m.width
-		m.input.Width = m.width - 5 // 5 = len("You> ")
 		m.modelPicker.SetSize(m.width, m.height-fixedLines)
 		m.toolPicker.SetSize(m.width, m.height-fixedLines)
-		m.syncViewportHeight() // accounts for completion popup if visible
+		m.recalcLayout() // sets viewport.Width, input.Width, viewport.Height
 		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
 		needRebuild = true
 		// Clear and fully repaint after resize to avoid blank regions.
@@ -1754,7 +1786,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.input.Focus())
 			}
 		case chunk.Done:
-			debugLog("streamChunk: done, toolCalls=%d, streamingItemIdx=%d, content=%q", len(chunk.Msg.ToolCalls), m.streamingItemIdx, chunk.Msg.Content)
+			debugLog("streamChunk: done, toolCalls=%d, streamingItemIdx=%d, content=%q, finishReason=%q", len(chunk.Msg.ToolCalls), m.streamingItemIdx, chunk.Msg.Content, chunk.FinishReason)
 			// Capture rate limit headers reported by the provider.
 			if chunk.RateLimits.IsKnown() {
 				m.lastRateLimits = chunk.RateLimits
@@ -1770,6 +1802,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.messages = append(m.messages, chunk.Msg)
 			}
 			if len(chunk.Msg.ToolCalls) == 0 {
+				// If the provider cut off the response due to output token limits,
+				// automatically continue rather than going idle mid-task.
+				if chunk.FinishReason == "length" {
+					debugLog("streamChunk: finish_reason=length, auto-continuing")
+					m.messages = append(m.messages, ai.Message{Role: "user", Content: "Continue."})
+					m.turnRoundtrips++
+					m.state = stateThinking
+					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
+					needRebuild = true
+					break
+				}
 				// Turn complete: drain queued prompts or go idle.
 				needRebuild = true
 				if m.sessionStore != nil {
@@ -2445,11 +2488,10 @@ func (m *Model) processNextCall() tea.Cmd {
 	m.currentCall = &callCopy
 
 	debugLog("processNextCall: dispatching tool=%q id=%q approved=%v", call.Name, call.ID, m.session.IsApproved(call.Name))
-	// ask_user, rubber_duck_review, and use_skill are always dispatched immediately
-	// without an approval dialog: ask_user suspends the goroutine waiting for the user,
-	// rubber_duck_review sends data only to a user-configured reviewer, and use_skill
-	// only returns pre-computed skill content (no side effects).
-	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "rubber_duck_review" || call.Name == "use_skill" {
+	// ask_user, rubber_duck_review, use_skill, and todo_* are always dispatched immediately
+	// without an approval dialog.
+	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "rubber_duck_review" ||
+		call.Name == "use_skill" || call.Name == "todo_add" || call.Name == "todo_update" || call.Name == "todo_list" {
 		if idx, ok := m.toolCallIdx[call.ID]; ok {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
@@ -3029,6 +3071,18 @@ func RunTUI(
 	m.persistToolApproval = opts.PersistToolApproval
 	m.persistPathApproval = opts.PersistPathApproval
 	m.persistMCPServer = opts.PersistMCPServer
+	if opts.TodoStore != nil {
+		m.todoStore = opts.TodoStore
+		m.todoStore.SetNotify(func() {
+			todos := m.todoStore.List()
+			// Auto-open sidebar when the first todo is added.
+			if len(todos) == 1 {
+				sendFn(todoUpdateMsg{autoOpen: true})
+			} else {
+				sendFn(todoUpdateMsg{})
+			}
+		})
+	}
 	if opts.Initial != nil {
 		m.applySession(opts.Initial)
 	} else if opts.OpenPicker && opts.Store != nil && m.state == stateIdle {

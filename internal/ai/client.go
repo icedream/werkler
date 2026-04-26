@@ -57,11 +57,12 @@ type ToolCall struct {
 // StreamChunk is one event from a streaming completion.
 // Either Delta (incremental text) or Done (final message + tool calls) or Err is set.
 type StreamChunk struct {
-	Delta      string     // non-empty for incremental text chunks
-	Done       bool       // true on the final chunk; Msg is valid
-	Msg        Message    // valid only when Done && Err == nil
-	Err        error      // non-nil on error; stream is terminated
-	RateLimits RateLimits // populated on Done; zero when provider doesn't report limits
+	Delta        string     // non-empty for incremental text chunks
+	Done         bool       // true on the final chunk; Msg is valid
+	Msg          Message    // valid only when Done && Err == nil
+	Err          error      // non-nil on error; stream is terminated
+	RateLimits   RateLimits // populated on Done; zero when provider doesn't report limits
+	FinishReason string     // "stop", "length", "tool_calls", etc.; populated on Done
 }
 
 // Completer can perform a non-streaming chat completion.
@@ -260,6 +261,7 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 		var contentBuf strings.Builder
 		// toolAccum maps tool-call index → accumulated data.
 		toolAccum := map[int]*accumTool{}
+		var finishReason string
 
 		for {
 			resp, err := stream.Recv()
@@ -273,7 +275,11 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			if len(resp.Choices) == 0 {
 				continue
 			}
-			delta := resp.Choices[0].Delta
+			choice := resp.Choices[0]
+			delta := choice.Delta
+			if choice.FinishReason != "" {
+				finishReason = string(choice.FinishReason)
+			}
 
 			if delta.Content != "" {
 				contentBuf.WriteString(delta.Content)
@@ -308,7 +314,7 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			send(StreamChunk{Err: err})
 			return
 		}
-		send(StreamChunk{Done: true, Msg: msg, RateLimits: rateLimits})
+		send(StreamChunk{Done: true, Msg: msg, RateLimits: rateLimits, FinishReason: finishReason})
 	}()
 	return ch
 }
