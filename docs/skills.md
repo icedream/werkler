@@ -8,8 +8,6 @@ Skills are similar to system-prompt extensions — they can contain anything: co
 style guides, project conventions, step-by-step process descriptions, or domain
 knowledge the AI should apply.
 
----
-
 ## How skills work
 
 1. Werkler scans the skills directory at startup and registers every valid skill
@@ -24,8 +22,6 @@ You can also ask the AI to use a skill explicitly:
 ```
 > Use the go-guidelines skill and review my code.
 ```
-
----
 
 ## Skill file format
 
@@ -85,8 +81,6 @@ Use the features of this Go version and below.
 Commands run with a 10-second timeout in the current working directory. If a
 command fails, a short error placeholder is inserted instead.
 
----
-
 ## Skills directory
 
 ### Default location
@@ -140,8 +134,6 @@ dir = "~/.agents/skills"   # still include global skills
 > both global and project skills active simultaneously, symlink them into one
 > directory or concatenate them.
 
----
-
 ## Adding a skill
 
 ### Global skill (available in all projects)
@@ -176,8 +168,6 @@ description: Coding conventions for this project.
 EOF
 ```
 
----
-
 ## Example skill
 
 Here is a more complete example demonstrating shell expansion:
@@ -203,8 +193,6 @@ TypeScript version:
 - Use `zod` for runtime input validation.
 - Do not use `any` — use `unknown` with type guards instead.
 ```
-
----
 
 ## Troubleshooting
 

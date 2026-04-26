@@ -15,8 +15,6 @@ Pass a different path with `--config /path/to/config.toml`.
 
 The file does not need to exist — missing keys fall back to defaults or flags.
 
----
-
 ## AI provider
 
 Werkler supports multiple AI providers simultaneously. You can switch between
@@ -157,8 +155,6 @@ werkler chat --provider=copilot        # switch active provider
 The `--model` flag overrides the model for the active provider. Use `--provider`
 to select a different named provider from `[[ai.providers]]`.
 
----
-
 ## Rubber duck reviewer
 
 Werkler can optionally route planning and code-review requests to a second AI
@@ -212,8 +208,6 @@ model = "claude-opus-4-5"
 | `type` | Provider type for standalone config: `openai` or `copilot`. Defaults to `openai` when omitted. |
 | `endpoint` | Base URL for standalone OpenAI-compatible providers. Defaults to `https://api.openai.com/v1`. |
 | `api_key` | API key for standalone OpenAI-compatible providers. Required when `type = "openai"`. |
-
----
 
 ## Tools (MCP servers)
 
@@ -380,9 +374,6 @@ revoked.
 > non-interactive (`--prompt`) mode. If you try, Werkler will print an error
 > and exit. Run `werkler chat` once first to authenticate, then use
 > `--prompt` freely afterwards.
-
----
-
 ### Local server — stdio (Docker)
 
 If you do not have a Copilot subscription, or want full control, run the
@@ -437,8 +428,6 @@ auto_approve_tools = [
   "github__search_*",
 ]
 ```
-
----
 
 ## Tool approval
 
@@ -503,8 +492,6 @@ auto_approve_paths = [
   "/home/user/shared-docs",
 ]
 ```
-
----
 
 ## Full example config
 
