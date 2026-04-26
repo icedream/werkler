@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
@@ -2689,7 +2690,16 @@ func (m *Model) rebuildContent() {
 func (m Model) renderItem(item displayItem) string {
 	switch item.kind {
 	case itemUser:
-		return userPrefixStyle.Render("You") + "  " + item.content
+		prefix := userPrefixStyle.Render("You")
+		prefixWidth := lipgloss.Width(prefix) + 2 // +2 for the two spaces after prefix
+		body := item.content
+		if m.width > prefixWidth+1 {
+			body = wordwrap.String(body, m.width-4-prefixWidth)
+			// Indent continuation lines to align under the content start.
+			indent := strings.Repeat(" ", prefixWidth)
+			body = strings.ReplaceAll(body, "\n", "\n"+indent)
+		}
+		return prefix + "  " + body
 
 	case itemAssistant:
 		prefix := assistantPrefixStyle.Render("Werkler")
