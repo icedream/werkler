@@ -480,8 +480,9 @@ Returns an error for binary files; use process_start to handle those.`,
 		{
 			def: ai.ToolDefinition{
 				Name: "file_write",
-				Description: `Create or overwrite a file with the given content.
-To create a new file with parent directories, set create_parents to true.`,
+				Description: `Create a new file or overwrite an existing file with the given content.
+This is the correct tool to use whenever you need to write a file.
+To create a new file including its parent directories, set create_parents to true.`,
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
