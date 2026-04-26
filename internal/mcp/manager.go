@@ -444,6 +444,33 @@ func (m *Manager) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 	return tools, nil
 }
 
+// ToolNamesForServer returns the AI-prefixed tool names for a specific server
+// (identified by its display name). It queries the server directly, bypassing
+// the cached toolMap, so callers can use it immediately after connecting.
+// Returns nil if the server is not found.
+func (m *Manager) ToolNamesForServer(ctx context.Context, name string) ([]string, error) {
+	m.mu.Lock()
+	var conn *serverConn
+	for _, c := range m.conns {
+		if c.name == name {
+			conn = c
+			break
+		}
+	}
+	m.mu.Unlock()
+	if conn == nil {
+		return nil, nil
+	}
+	var names []string
+	for t, err := range conn.session.Tools(ctx, nil) {
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, conn.safeName+toolNameSep+sanitize(t.Name))
+	}
+	return names, nil
+}
+
 // CallTool dispatches a tool call to the appropriate MCP server.
 // Tool names must be in the format returned by Tools ("<safe-server-name>__<tool-name>").
 // The original (unsanitized) tool name is looked up from the internal map built

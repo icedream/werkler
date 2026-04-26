@@ -871,9 +871,9 @@ type Model struct {
 	registryPicker        list.Model
 	registryNextCursor    string // non-empty if another page can be loaded
 	registryCancelCtx     context.CancelFunc
-	registryTab           int             // 0 = browse, 1 = installed
+	registryTab           int // 0 = browse, 1 = installed
 	registrySearchInput   textinput.Model
-	registrySearchSeq     uint64          // for stale-result detection
+	registrySearchSeq     uint64 // for stale-result detection
 	registryInstalledList list.Model
 	// configuredMCPServers is the mutable live list of all configured MCP servers.
 	// Starts from opts.MCPServers and updated on add/remove in the registry browser.
@@ -3982,6 +3982,10 @@ func (m *Model) applySession(sess *sessionstore.Session) {
 	m.sessionCreatedAt = sess.CreatedAt
 	m.sessionCWD = sess.CWD
 	m.messages = sess.Messages
+	// Replace messages[0] with a freshly built system prompt so any stale
+	// MCP-server or memory injections from the saved session are removed.
+	// buildStreamMessages will re-add the current injections each turn.
+	m.rebuildSystemPrompt()
 	m.items = rebuildItemsFromMessages(sess.Messages)
 	if m.todoStore != nil {
 		if len(sess.Todos) > 0 {

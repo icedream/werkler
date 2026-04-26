@@ -101,6 +101,7 @@ type mcpConnector interface {
 	ConfiguredServers() []config.MCPServerConfig
 	IsConnected(name string) bool
 	ConnectByName(ctx context.Context, name string) (alreadyConnected bool, err error)
+	ToolNamesForServer(ctx context.Context, name string) ([]string, error)
 }
 
 // UserAsker is implemented by interactive callers (e.g. the TUI) to suspend a
@@ -214,8 +215,6 @@ func (m *Manager) SetMCPManager(mgr mcpConnector) {
 	m.mcpMgr = mgr
 	m.builtins = m.makeBuiltins()
 }
-
-
 
 // HasPendingOAuth forwards to the wrapped manager if it supports OAuth.
 func (m *Manager) HasPendingOAuth() bool {
@@ -957,7 +956,14 @@ func (m *Manager) handleConnectServer(ctx context.Context, args map[string]any) 
 	if already {
 		return fmt.Sprintf("Server %q is already connected.", name), nil
 	}
-	return fmt.Sprintf("Connected to server %q. New tools from this server are now available.", name), nil
+	toolNames, err := m.mcpMgr.ToolNamesForServer(ctx, name)
+	if err != nil || len(toolNames) == 0 {
+		return fmt.Sprintf("Connected to server %q. New tools from this server are now available.", name), nil
+	}
+	return fmt.Sprintf(
+		"Connected to server %q. You can now call these tools directly:\n- %s",
+		name, strings.Join(toolNames, "\n- "),
+	), nil
 }
 
 func (m *Manager) handleProcessStart(ctx context.Context, args map[string]any) (string, error) {
@@ -1376,8 +1382,8 @@ const rubberDuckMaxSteps = 10
 // reviewerAllowedTools is the set of built-in tool names the rubber duck reviewer
 // may call. These are read-only or process-query tools; write tools are excluded.
 var reviewerAllowedTools = map[string]bool{
-	"file_read":    true,
-	"file_list":    true,
+	"file_read":     true,
+	"file_list":     true,
 	"process_start": true,
 	"process_read":  true,
 	"process_stop":  true,
