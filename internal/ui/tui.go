@@ -3252,7 +3252,7 @@ func (m *Model) buildStreamMessages(base []ai.Message) []ai.Message {
 	if len(configuredServers) > 0 {
 		var sb strings.Builder
 		sb.WriteString("\n\n## Configured MCP servers (not yet connected)\n")
-		sb.WriteString("Use the `connect_server` tool to connect to any of these when their tools would be useful:\n")
+		sb.WriteString("Only call `connect_server` for a server when the user's **current task** specifically requires tools from that server. Do NOT connect servers proactively or speculatively — wait until a concrete need arises:\n")
 		for _, srv := range configuredServers {
 			sb.WriteString("- `")
 			sb.WriteString(sanitizeInlineText(srv.Name))

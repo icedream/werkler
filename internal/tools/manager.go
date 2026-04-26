@@ -852,8 +852,9 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 				def: ai.ToolDefinition{
 					Name: "connect_server",
 					Description: "Connect to a configured MCP server by name. " +
-						"Use this when you need tools from a server that has not been connected yet. " +
-						"After connecting, new tools from that server will be available immediately.",
+						"Only call this when the user's current task specifically requires tools from that server — " +
+						"do NOT connect servers proactively or before a concrete need arises. " +
+						"After connecting, the available tools from that server will be listed in the result.",
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
