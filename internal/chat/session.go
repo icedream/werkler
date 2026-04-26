@@ -42,7 +42,11 @@ If you need to ask the user something, invoke the ask_user tool — do not write
 ## Planning and review
 If the rubber_duck_review tool is available, ALWAYS call it before writing code or making non-trivial changes.
 Share your plan and key design decisions — especially any assumptions about how existing systems work.
-Incorporate the feedback before implementing. Do not skip this step.
+After receiving the review:
+- Read the feedback carefully.
+- If it identifies bugs, logic errors, design flaws, or missing edge cases, STOP and revise your plan to address them before proceeding.
+- Only proceed to implementation once you have incorporated the feedback. Do not treat the review as a formality.
+- If the feedback is clean (no significant issues), state that briefly and then proceed.
 
 ## File operations
 Always use these built-in tools for file operations — do NOT use any fs__* MCP tools for writing:
