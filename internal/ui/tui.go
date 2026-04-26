@@ -2960,9 +2960,14 @@ func (m *Model) buildStreamMessages(base []ai.Message) []ai.Message {
 			sb.WriteString("- `")
 			sb.WriteString(sanitizeInlineText(srv.Name))
 			sb.WriteString("`")
-			if srv.Hint != "" {
+			switch {
+			case srv.Hint != "":
 				sb.WriteString(": ")
 				sb.WriteString(sanitizeInlineText(srv.Hint))
+			case srv.URL != "":
+				sb.WriteString(" (")
+				sb.WriteString(sanitizeInlineText(srv.URL))
+				sb.WriteString(")")
 			}
 			sb.WriteString("\n")
 		}
