@@ -2232,8 +2232,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			debugLog("toolResult: ok tool=%q result=%q", msg.toolName, msg.result[:min(len(msg.result), 80)])
 			if idx, ok := m.toolCallIdx[msg.callID]; ok {
 				m.items[idx].toolStatus = toolStatusDone
-				if msg.toolName == "file_edit" {
+				switch msg.toolName {
+				case "file_edit":
 					m.items[idx].toolNote = parseFileEditNote(msg.result)
+				case "file_write":
+					m.items[idx].toolNote = parseFileWriteNote(msg.result)
+				case "file_delete":
+					m.items[idx].toolNote = parseFileDeleteNote(msg.result)
 				}
 			}
 			m.messages = append(m.messages, ai.Message{
@@ -3417,11 +3422,11 @@ func formatArgsCompact(args map[string]any) string {
 }
 
 // toolCallDisplayArgs returns a compact display string for tool call arguments.
-// For file_edit it shows just the path; for process_start it shows "$ cmd args…";
+// For file tools it shows just the path; for process_start it shows "$ cmd args…";
 // for other tools it falls back to compact JSON.
 func toolCallDisplayArgs(toolName string, args map[string]any) string {
 	switch toolName {
-	case "file_edit":
+	case "file_edit", "file_write", "file_delete", "file_read":
 		if path, ok := args["path"].(string); ok && path != "" {
 			return shortenHomePath(path)
 		}
@@ -3469,6 +3474,42 @@ func parseFileEditNote(result string) string {
 	add := diffAddedStyle.Render(fmt.Sprintf("+%d", int(added)))
 	rem := diffRemovedStyle.Render(fmt.Sprintf("-%d", int(removed)))
 	return fmt.Sprintf("%s %s lines @ line %d", add, rem, int(line))
+}
+
+// parseFileWriteNote extracts a human-readable annotation from a successful
+// file_write result JSON: e.g. "wrote 1.2 KB".
+func parseFileWriteNote(result string) string {
+	var data map[string]any
+	if err := json.Unmarshal([]byte(result), &data); err != nil {
+		return ""
+	}
+	bytes, _ := data["bytes"].(float64)
+	return fmt.Sprintf("wrote %s", formatBytes(int64(bytes)))
+}
+
+// parseFileDeleteNote extracts a human-readable annotation from a successful
+// file_delete result JSON.
+func parseFileDeleteNote(result string) string {
+	var data map[string]any
+	if err := json.Unmarshal([]byte(result), &data); err != nil {
+		return ""
+	}
+	if _, ok := data["deleted"]; ok {
+		return "deleted"
+	}
+	return ""
+}
+
+// formatBytes renders a byte count as a human-readable string (B, KB, MB).
+func formatBytes(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
 }
 
 // fileEditErrorNote returns a short, user-readable summary of a file_edit error.
