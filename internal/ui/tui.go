@@ -3844,6 +3844,10 @@ func toolCallDisplayArgs(toolName string, args map[string]any) string {
 			}
 			return "$ " + strings.Join(parts, " ")
 		}
+	case "connect_server":
+		if name, ok := args["name"].(string); ok && name != "" {
+			return "→ " + name
+		}
 	}
 	return formatArgsCompact(args)
 }
