@@ -1069,6 +1069,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		// Bracketed paste: insert pasted text into the input, collapsing newlines to spaces.
+		if msg.Paste && msg.Type == tea.KeyRunes {
+			text := strings.Map(func(r rune) rune {
+				if r == '\n' || r == '\r' || r == '\t' {
+					return ' '
+				}
+				return r
+			}, string(msg.Runes))
+			m.input.SetValue(m.input.Value() + text)
+			m.input.CursorEnd()
+			needRebuild = true
+			break
+		}
+
 		// Alt+M toggles terminal mouse reporting so the user can select and copy text.
 		if msg.String() == "alt+m" {
 			if m.mouseEnabled {
