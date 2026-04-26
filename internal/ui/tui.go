@@ -1421,7 +1421,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content})
 			}
 			m.streamingItemIdx = -1
-			m.messages = append(m.messages, chunk.Msg)
+			// Skip empty assistant messages (no content, no tool calls) — they
+			// provide no value and some providers reject them with a 400 error.
+			if chunk.Msg.Content != "" || len(chunk.Msg.ToolCalls) > 0 {
+				m.messages = append(m.messages, chunk.Msg)
+			}
 			if len(chunk.Msg.ToolCalls) == 0 {
 				// Turn complete: drain queued prompts or go idle.
 				needRebuild = true
