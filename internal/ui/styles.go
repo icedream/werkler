@@ -110,6 +110,13 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("202")) // orange — visible warning
 
+	roundtripHintStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220")) // yellow hint for moderate roundtrip count
+
+	roundtripWarnStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("202")) // orange warning for high roundtrip count
+
 	separatorAllowAllStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("202")) // orange separator in allow-all mode
 

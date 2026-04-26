@@ -506,6 +506,11 @@ type Model struct {
 	// Zero when the provider has not returned rate limit data (e.g. Ollama).
 	lastRateLimits ai.RateLimits
 
+	// turnRoundtrips counts how many AI completion calls have been made within
+	// the current user turn. Resets when the user sends a new message. Used to
+	// warn when the agent is looping excessively.
+	turnRoundtrips int
+
 	// mouseEnabled tracks whether the terminal mouse reporting mode is active.
 	// When false, the terminal handles mouse events natively (text selection works).
 	mouseEnabled bool
@@ -967,6 +972,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						} else {
 							m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
 							m.resumeHint = nil // dismiss hint once user starts chatting
+							m.turnRoundtrips = 0
 							m.state = stateThinking
 							cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
 						}
@@ -1821,7 +1827,7 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
 		}
-		return statusStyle.Render(m.spinner.View()+" Thinking…") + cancelHint + queueHint + allowAllIndicator, ""
+		return statusStyle.Render(m.spinner.View()+" Thinking…") + cancelHint + queueHint + allowAllIndicator + m.roundtripHint(), ""
 	case stateConnectingMCP:
 		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + allowAllIndicator, ""
 	case stateConnectingOAuth:
@@ -1831,14 +1837,14 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
 		}
-		return statusStyle.Render(m.spinner.View()+" Streaming…") + cancelHint + queueHint + allowAllIndicator, ""
+		return statusStyle.Render(m.spinner.View()+" Streaming…") + cancelHint + queueHint + allowAllIndicator + m.roundtripHint(), ""
 	case stateCallingTool:
 		name := toolNameStyle.Render(m.callingToolName)
 		cancelHint := ""
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
 		}
-		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + cancelHint + queueHint + allowAllIndicator, ""
+		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + cancelHint + queueHint + allowAllIndicator + m.roundtripHint(), ""
 	case stateAwaitingPathApproval:
 		if m.currentPathRequest.Path == "" {
 			return "", ""
@@ -1945,6 +1951,24 @@ func (m Model) statusLines() (line1, line2 string) {
 func (m Model) inputView() string {
 	prefix := inputPrefixStyle.Render("You> ")
 	return prefix + m.input.View()
+}
+
+// roundtripHint returns a status-bar fragment warning the user when the agent
+// has made many completion calls within the current turn. Empty when below the
+// first threshold or when the agent is idle.
+//
+// Thresholds: ≥20 → yellow hint, ≥40 → orange warning.
+func (m Model) roundtripHint() string {
+	const warnThreshold = 40
+	const hintThreshold = 20
+	switch {
+	case m.turnRoundtrips >= warnThreshold:
+		return "  " + roundtripWarnStyle.Render(fmt.Sprintf("⚠ %d roundtrips", m.turnRoundtrips))
+	case m.turnRoundtrips >= hintThreshold:
+		return "  " + roundtripHintStyle.Render(fmt.Sprintf("⚠ %d roundtrips", m.turnRoundtrips))
+	default:
+		return ""
+	}
 }
 
 // completionView renders the slash-command popup lines that appear above the
@@ -2137,6 +2161,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 		m.queuedPrompts = m.queuedPrompts[1:]
 		m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
 		m.items = append(m.items, displayItem{kind: itemUser, content: text})
+		m.turnRoundtrips = 0
 		m.state = stateThinking
 		return doStartStream(m.newOpCtx(), m.client, m.messages, m.tools)
 	}
@@ -2152,6 +2177,7 @@ func (m *Model) processNextCall() tea.Cmd {
 	if len(m.pendingCalls) == 0 {
 		debugLog("processNextCall: no more pending calls, starting new stream (messages=%d)", len(m.messages))
 		m.state = stateThinking
+		m.turnRoundtrips++
 		return doStartStream(m.newOpCtx(), m.client, m.messages, m.tools)
 	}
 
