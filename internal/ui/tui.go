@@ -130,13 +130,13 @@ Work autonomously toward the given goal. Use todo_add, todo_update, and todo_lis
 Call task_complete(summary) when all work is done. Call ask_user only if you are completely blocked and cannot proceed without human input.`
 
 type displayItem struct {
-	kind         string
-	content      string
-	toolName     string
-	toolArgs     string // compact JSON args
-	toolStatus   int
-	handle       string // process handle (itemProcessOutput only)
-	fileEditNote string // post-result annotation for file_edit items
+	kind       string
+	content    string
+	toolName   string
+	toolArgs   string // compact JSON args
+	toolStatus int
+	handle     string // process handle (itemProcessOutput only)
+	toolNote   string // secondary annotation: intent title (process_start) or diff summary (file_edit)
 }
 
 // --- Tea messages ---
@@ -2115,6 +2115,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						kind:       itemToolCall,
 						toolName:   tc.Name,
 						toolArgs:   toolCallDisplayArgs(tc.Name, tc.Arguments),
+						toolNote:   toolCallIntent(tc.Name, tc.Arguments),
 						toolStatus: toolStatusPending,
 					})
 				}
@@ -2201,7 +2202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if idx, ok := m.toolCallIdx[msg.callID]; ok {
 					m.items[idx].toolStatus = toolStatusFailed
 					if msg.toolName == "file_edit" {
-						m.items[idx].fileEditNote = fileEditErrorNote(msg.err)
+						m.items[idx].toolNote = fileEditErrorNote(msg.err)
 					}
 				}
 				m.messages = append(m.messages, ai.Message{
@@ -2231,7 +2232,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx, ok := m.toolCallIdx[msg.callID]; ok {
 				m.items[idx].toolStatus = toolStatusDone
 				if msg.toolName == "file_edit" {
-					m.items[idx].fileEditNote = parseFileEditNote(msg.result)
+					m.items[idx].toolNote = parseFileEditNote(msg.result)
 				}
 			}
 			m.messages = append(m.messages, ai.Message{
@@ -2717,14 +2718,14 @@ func (m Model) renderItem(item displayItem) string {
 		if item.toolStatus == toolStatusDenied {
 			line += "  " + toolDeniedStyle.Render("(denied)")
 		}
-		if item.fileEditNote != "" {
+		if item.toolNote != "" {
 			var noteStyle lipgloss.Style
 			if item.toolStatus == toolStatusFailed {
 				noteStyle = errorStyle
 			} else {
 				noteStyle = statusStyle
 			}
-			line += "\n    " + noteStyle.Render(item.fileEditNote)
+			line += "\n    " + noteStyle.Render(item.toolNote)
 		}
 		return line
 
@@ -3402,14 +3403,40 @@ func formatArgsCompact(args map[string]any) string {
 }
 
 // toolCallDisplayArgs returns a compact display string for tool call arguments.
-// For file_edit it shows just the path; for other tools it falls back to compact JSON.
+// For file_edit it shows just the path; for process_start it shows "$ cmd args…";
+// for other tools it falls back to compact JSON.
 func toolCallDisplayArgs(toolName string, args map[string]any) string {
-	if toolName == "file_edit" {
+	switch toolName {
+	case "file_edit":
 		if path, ok := args["path"].(string); ok && path != "" {
 			return shortenHomePath(path)
 		}
+	case "process_start":
+		cmd, _ := args["command"].(string)
+		if cmd != "" {
+			parts := []string{cmd}
+			if rawArgs, ok := args["args"].([]any); ok {
+				for _, a := range rawArgs {
+					if s, ok := a.(string); ok {
+						parts = append(parts, s)
+					}
+				}
+			}
+			return "$ " + strings.Join(parts, " ")
+		}
 	}
 	return formatArgsCompact(args)
+}
+
+// toolCallIntent returns a short intent annotation for tool calls that carry a
+// human-readable title field (currently process_start). Returns "" for all others.
+func toolCallIntent(toolName string, args map[string]any) string {
+	if toolName == "process_start" {
+		if title, ok := args["title"].(string); ok {
+			return title
+		}
+	}
+	return ""
 }
 
 // parseFileEditNote extracts a human-readable annotation from a successful
