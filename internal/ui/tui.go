@@ -24,6 +24,7 @@ import (
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/config"
 	mcppkg "github.com/icedream/werkler/internal/mcp"
+	"github.com/icedream/werkler/internal/registry"
 	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/tools"
@@ -61,6 +62,7 @@ const (
 	statePickingTools         // tool enable/disable picker is open
 	stateAwaitingUserQuestion // AI asked a question; waiting for the user's reply
 	stateCompacting           // compacting conversation history via AI summary
+	statePickingRegistry      // MCP registry browser is open
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -79,7 +81,7 @@ func inputPlaceholder(state tuiState) string {
 		return "Waiting for authorization in browser…"
 	case stateCompacting:
 		return "Compacting context… (queue a follow-up, press Enter)"
-	case statePickingModel, statePickingSession, statePickingTools:
+	case statePickingModel, statePickingSession, statePickingTools, statePickingRegistry:
 		return ""
 	case stateIdle:
 		return "Type a message, press Enter to send…"
@@ -145,6 +147,19 @@ type tokenCountMsg struct {
 type compactDoneMsg struct {
 	summary string
 	err     error
+}
+
+// registryLoadedMsg carries a page of servers from the MCP registry.
+type registryLoadedMsg struct {
+	servers    []registry.Server
+	nextCursor string
+	err        error
+}
+
+// registrySavedMsg reports the result of saving a registry server to config.
+type registrySavedMsg struct {
+	name string
+	err  error
 }
 
 // --- OAuth messages ---
@@ -289,6 +304,29 @@ func (t toolItem) Description() string {
 	return "[" + server + "] " + desc
 }
 
+// registryItem implements list.Item for the MCP registry picker.
+type registryItem struct{ srv registry.Server }
+
+func (r registryItem) FilterValue() string { return r.srv.Title + " " + r.srv.Name }
+func (r registryItem) Title() string {
+	if r.srv.HasPackage {
+		return r.srv.Title + "  (requires install)"
+	}
+	return r.srv.Title
+}
+func (r registryItem) Description() string {
+	desc := r.srv.Description
+	const maxDesc = 100
+	if len(desc) > maxDesc {
+		desc = desc[:maxDesc] + "…"
+	}
+	url := r.srv.FirstRemoteURL()
+	if url != "" {
+		return desc + "  — " + url
+	}
+	return desc
+}
+
 // SessionOptions configures optional session persistence behaviour for RunTUI.
 type SessionOptions struct {
 	Store      *sessionstore.Store   // nil = session persistence disabled
@@ -301,6 +339,9 @@ type SessionOptions struct {
 	// approves a path (adds it to auto_approve_paths in the config file).
 	// write indicates whether write access was granted (false = read-only).
 	PersistPathApproval func(path string, write bool) error
+	// PersistMCPServer, if non-nil, is called when the user adds an MCP server
+	// from the registry browser (saves it to the config file).
+	PersistMCPServer func(cfg config.MCPServerConfig) error
 	// Skills is the list of loaded skills to mention in the system prompt.
 	Skills []skills.Skill
 	// MCPManager and MCPServers, when both non-nil/non-empty, enable background
@@ -369,6 +410,20 @@ func init() {
 			action: func(m *Model) []tea.Cmd {
 				m.state = stateCompacting
 				return []tea.Cmd{doCompact(m.newOpCtx(), m.client, m.messages)}
+			},
+		},
+		{
+			name:        "registry",
+			description: "Browse and add MCP servers from the Model Context Protocol registry",
+			action: func(m *Model) []tea.Cmd {
+				m.state = statePickingRegistry
+				m.registryPicker = list.New(nil, list.NewDefaultDelegate(), m.width, m.height-fixedLines)
+				m.registryPicker.Title = "MCP Registry — press Enter to add, Esc to close"
+				m.registryPicker.SetShowStatusBar(true)
+				m.registryPicker.SetFilteringEnabled(true)
+				ctx, cancel := context.WithCancel(m.ctx)
+				m.registryCancelCtx = cancel
+				return []tea.Cmd{doFetchRegistry(ctx, "", "")}
 			},
 		},
 		{
@@ -501,7 +556,7 @@ type Model struct {
 	askUserSelectedIdx   int // index of highlighted choice; -1 = freeform input active
 	askUserItemIdx       int // index of the question display item in items; -1 if none
 	askUserResultCh      chan<- askUserResult
-	askUserSavedDraft string // input text saved on entry, restored on exit
+	askUserSavedDraft    string // input text saved on entry, restored on exit
 
 	// Per-operation cancellation for in-flight streams and tool calls.
 	// cancelOp is nil when idle. cancelPending is true after the first Esc
@@ -572,6 +627,13 @@ type Model struct {
 	// completionIdx is the currently highlighted item in the completion popup.
 	showCompletion bool
 	completionIdx  int
+
+	// Registry browser state (only valid during statePickingRegistry).
+	registryPicker     list.Model
+	registryNextCursor string // non-empty if another page can be loaded
+	registryCancelCtx  context.CancelFunc
+	// persistMCPServer, if non-nil, saves a server to the config file.
+	persistMCPServer func(cfg config.MCPServerConfig) error
 }
 
 func initialModel(
@@ -1179,6 +1241,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, pickerCmd)
 			}
 
+		case statePickingRegistry:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				if m.registryCancelCtx != nil {
+					m.registryCancelCtx()
+					m.registryCancelCtx = nil
+				}
+				m.state = stateIdle
+				m.updateCompletion()
+				cmds = append(cmds, m.input.Focus())
+			case tea.KeyEnter:
+				if sel := m.registryPicker.SelectedItem(); sel != nil {
+					srv := sel.(registryItem).srv
+					if srv.HasPackage {
+						m.items = append(m.items, displayItem{
+							kind:    itemInfo,
+							content: `Server "` + srv.Title + `" requires a local package install and cannot be added automatically. See: https://registry.modelcontextprotocol.io`,
+						})
+						needRebuild = true
+						break
+					}
+					if m.persistMCPServer == nil {
+						m.items = append(m.items, displayItem{
+							kind:    itemError,
+							content: "Config persistence is not available in this session.",
+						})
+						needRebuild = true
+						break
+					}
+					cmds = append(cmds, doSaveMCPServer(srv, m.persistMCPServer))
+				}
+			default:
+				var pickerCmd tea.Cmd
+				m.registryPicker, pickerCmd = m.registryPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			}
+
 		case stateConnectingMCP:
 			// Allow viewport scrolling and prompt queuing; block submission until connected.
 			switch msg.Type {
@@ -1445,6 +1544,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateCompletion()
 			needRebuild = true
 		}
+
+	case registryLoadedMsg:
+		if m.state == statePickingRegistry {
+			if msg.err != nil {
+				m.items = append(m.items, displayItem{
+					kind:    itemError,
+					content: "registry fetch failed: " + msg.err.Error(),
+				})
+				m.state = stateIdle
+				m.updateCompletion()
+				needRebuild = true
+				break
+			}
+			items := make([]list.Item, len(msg.servers))
+			for i, s := range msg.servers {
+				items[i] = registryItem{s}
+			}
+			m.registryNextCursor = msg.nextCursor
+			m.registryPicker.SetItems(items)
+			m.registryPicker.SetSize(m.width, m.height-fixedLines)
+		}
+
+	case registrySavedMsg:
+		content := `Added MCP server "` + msg.name + `" — restart werkler to connect.`
+		if msg.err != nil {
+			content = "Failed to save MCP server: " + msg.err.Error()
+		}
+		if m.state == statePickingRegistry {
+			m.state = stateIdle
+			m.updateCompletion()
+		}
+		m.items = append(m.items, displayItem{kind: itemInfo, content: content})
+		needRebuild = true
+		cmds = append(cmds, m.input.Focus())
 
 	case sessionHintMsg:
 		m.resumeHint = msg.sess
@@ -1823,6 +1956,9 @@ func (m Model) View() string {
 	}
 	if m.state == statePickingTools {
 		return m.toolPicker.View()
+	}
+	if m.state == statePickingRegistry {
+		return m.registryPicker.View()
 	}
 
 	sep := separator(m.width)
@@ -2607,8 +2743,30 @@ func (m *Model) applyCompaction(summary string) []tea.Cmd {
 	return cmds
 }
 
-// filteredFromAllDefs returns the enabled subset of m.allToolDefs according to
-// the current session disabled set. Used to refresh m.tools after picker changes.
+// doFetchRegistry fetches a page of servers from the MCP registry.
+// search is the query string (may be empty). cursor is empty for the first page.
+func doFetchRegistry(ctx context.Context, search, cursor string) tea.Cmd {
+	return func() tea.Msg {
+		page, err := registry.Fetch(ctx, search, cursor, 50)
+		if err != nil {
+			return registryLoadedMsg{err: err}
+		}
+		return registryLoadedMsg{servers: page.Servers, nextCursor: page.NextCursor}
+	}
+}
+
+// doSaveMCPServer calls persistFn to write the server config to disk.
+func doSaveMCPServer(srv registry.Server, persistFn func(config.MCPServerConfig) error) tea.Cmd {
+	return func() tea.Msg {
+		cfg := config.MCPServerConfig{
+			Name:      srv.Name,
+			Transport: config.MCPTransportStreamable,
+			URL:       srv.FirstRemoteURL(),
+		}
+		return registrySavedMsg{name: srv.Name, err: persistFn(cfg)}
+	}
+}
+
 func (m *Model) filteredFromAllDefs() []ai.ToolDefinition {
 	if len(m.allToolDefs) == 0 {
 		return m.tools // nothing was loaded; keep existing slice
@@ -2836,6 +2994,7 @@ func RunTUI(
 	m.sessionStore = opts.Store
 	m.persistToolApproval = opts.PersistToolApproval
 	m.persistPathApproval = opts.PersistPathApproval
+	m.persistMCPServer = opts.PersistMCPServer
 	if opts.Initial != nil {
 		m.applySession(opts.Initial)
 	} else if opts.OpenPicker && opts.Store != nil && m.state == stateIdle {

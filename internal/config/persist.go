@@ -9,6 +9,63 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+// AppendMCPServer appends a new [[mcp.servers]] entry to the config file at
+// configPath (defaults to DefaultConfigPath when empty). If a server with the
+// same name already exists, it is a no-op and returns nil.
+func AppendMCPServer(configPath string, srv MCPServerConfig) error {
+	if configPath == "" {
+		configPath = DefaultConfigPath()
+	}
+
+	// Idempotency: parse existing config to check for duplicates.
+	var parsed struct {
+		MCP struct {
+			Servers []struct {
+				Name string `toml:"name"`
+			} `toml:"servers"`
+		} `toml:"mcp"`
+	}
+	rawData, readErr := os.ReadFile(configPath)
+	if readErr == nil {
+		_ = toml.Unmarshal(rawData, &parsed)
+		for _, existing := range parsed.MCP.Servers {
+			if existing.Name == srv.Name {
+				return nil
+			}
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+
+	// Build the TOML fragment for the new server entry.
+	var entry strings.Builder
+	entry.WriteString("\n[[mcp.servers]]\n")
+	fmt.Fprintf(&entry, "name = %s\n", tomlString(srv.Name))
+	switch srv.Transport {
+	case MCPTransportStreamable, MCPTransportSSE:
+		fmt.Fprintf(&entry, "transport = %s\n", tomlString(string(srv.Transport)))
+		fmt.Fprintf(&entry, "url = %s\n", tomlString(srv.URL))
+	case MCPTransportStdio:
+		fmt.Fprintf(&entry, "transport = %s\n", tomlString(string(srv.Transport)))
+		fmt.Fprintf(&entry, "command = %s\n", tomlString(srv.Command))
+	}
+
+	if readErr != nil {
+		// File doesn't exist — create from scratch.
+		content := strings.TrimPrefix(entry.String(), "\n")
+		return os.WriteFile(configPath, []byte(content), 0o600)
+	}
+
+	// Append to existing file.
+	text := string(rawData)
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return os.WriteFile(configPath, []byte(text+entry.String()[1:]), 0o600)
+}
+
 // AppendAutoApproveTool appends pattern to mcp.auto_approve_tools in the config
 // file at configPath (defaults to DefaultConfigPath when empty).
 // If the file does not exist it is created. If pattern is already present it is

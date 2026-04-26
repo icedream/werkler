@@ -138,6 +138,9 @@ func runChat(_ *cobra.Command, _ []string) error {
 		PersistPathApproval: func(path string, _ bool) error {
 			return config.AppendAutoApprovePath(flagConfigPath, path)
 		},
+		PersistMCPServer: func(srv config.MCPServerConfig) error {
+			return config.AppendMCPServer(flagConfigPath, srv)
+		},
 	}
 	if len(cfg.MCP.Servers) > 0 {
 		opts.MCPManager = manager
