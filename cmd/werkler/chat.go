@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,11 +25,13 @@ import (
 )
 
 var (
-	chatPrompt    string
-	chatVerbose   bool
-	chatResume    bool
-	chatSessionID string
-	chatProvider  string
+	chatPrompt          string
+	chatVerbose         bool
+	chatResume          bool
+	chatSessionID       string
+	chatProvider        string
+	chatAutopilot       bool
+	chatAutopilotMaxCyc int
 )
 
 var chatCmd = &cobra.Command{
@@ -50,6 +51,8 @@ func init() {
 	chatCmd.Flags().BoolVar(&chatResume, "resume", false, "Open the session picker to resume a previous session")
 	chatCmd.Flags().StringVar(&chatSessionID, "session", "", "Resume the session with this ID (or unique prefix)")
 	chatCmd.Flags().StringVar(&chatProvider, "provider", "", "Name of the AI provider to use (overrides ai.active in config)")
+	chatCmd.Flags().BoolVar(&chatAutopilot, "autopilot", false, "Enable autopilot mode: AI works autonomously until task_complete is called")
+	chatCmd.Flags().IntVar(&chatAutopilotMaxCyc, "autopilot-max-cycles", 0, "Maximum autopilot cycles before pausing (0 = use config default)")
 	rootCmd.AddCommand(chatCmd)
 }
 
@@ -146,6 +149,8 @@ func runChat(_ *cobra.Command, _ []string) error {
 		PersistMCPServer: func(srv config.MCPServerConfig) error {
 			return config.AppendMCPServer(flagConfigPath, srv)
 		},
+		Autopilot:          chatAutopilot,
+		AutopilotMaxCycles: resolveAutopilotMax(chatAutopilotMaxCyc, cfg.Autopilot.MaxCycles),
 	}
 	if len(cfg.MCP.Servers) > 0 {
 		opts.MCPManager = manager
@@ -165,6 +170,15 @@ func runChat(_ *cobra.Command, _ []string) error {
 	}
 
 	return runInteractiveMode(ctx, multiClient, session, toolMgr, displayName, opts)
+}
+
+// resolveAutopilotMax picks the effective autopilot cycle cap:
+// flag > config > 0 (TUI will use the default).
+func resolveAutopilotMax(flagVal, cfgVal int) int {
+	if flagVal > 0 {
+		return flagVal
+	}
+	return cfgVal
 }
 
 // buildProviderClient constructs a single AI client from a ProviderConfig.
@@ -282,11 +296,14 @@ func buildReviewerClient(providers []config.ProviderConfig) (ai.Completer, strin
 }
 
 func runPromptMode(ctx context.Context, aiClient ai.Completer, session *chat.Session) error {
-	var progress io.Writer
-	if chatVerbose {
-		progress = os.Stderr
+	opts := chat.PromptOptions{
+		Autopilot:          chatAutopilot,
+		AutopilotMaxCycles: resolveAutopilotMax(chatAutopilotMaxCyc, cfg.Autopilot.MaxCycles),
 	}
-	result, err := chat.RunPrompt(ctx, aiClient, session, chatPrompt, progress)
+	if chatVerbose {
+		opts.Progress = os.Stderr
+	}
+	result, err := chat.RunPrompt(ctx, aiClient, session, chatPrompt, opts)
 	if err != nil {
 		return err
 	}

@@ -705,6 +705,27 @@ Use proactively at the start of multi-step tasks. Returns the todo ID for later 
 		)
 	}
 
+	// task_complete is always registered — autopilot and manual use both benefit.
+	builtins = append(builtins, builtin{
+		def: ai.ToolDefinition{
+			Name: "task_complete",
+			Description: `Signal that the assigned task is fully complete. Call this when all work is done and no further action is needed.
+In autopilot mode this stops the autonomous loop. Outside autopilot mode it marks the task done and returns to idle.
+Provide a concise summary of what was accomplished.`,
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"summary": map[string]any{
+						"type":        "string",
+						"description": "Concise summary of what was accomplished",
+					},
+				},
+				"required": []string{"summary"},
+			},
+		},
+		handle: m.handleTaskComplete,
+	})
+
 	return builtins
 }
 
@@ -1244,4 +1265,12 @@ func (m *Manager) handleTodoList(_ context.Context, _ map[string]any) (string, e
 		}
 	}
 	return strings.TrimRight(sb.String(), "\n"), nil
+}
+
+func (m *Manager) handleTaskComplete(_ context.Context, args map[string]any) (string, error) {
+	summary := stringArg(args, "summary")
+	if summary == "" {
+		summary = "Task complete."
+	}
+	return summary, nil
 }

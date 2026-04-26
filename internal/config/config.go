@@ -107,11 +107,19 @@ type SkillsConfig struct {
 	Dir string `mapstructure:"dir"`
 }
 
+// AutopilotConfig holds settings for autonomous operation mode.
+type AutopilotConfig struct {
+	// MaxCycles is the maximum number of autonomous continuation cycles before
+	// pausing and notifying the user. Defaults to 50.
+	MaxCycles int `mapstructure:"max_cycles"`
+}
+
 // Config is the root configuration structure.
 type Config struct {
-	AI     AIConfig     `mapstructure:"ai"`
-	MCP    MCPConfig    `mapstructure:"mcp"`
-	Skills SkillsConfig `mapstructure:"skills"`
+	AI        AIConfig        `mapstructure:"ai"`
+	MCP       MCPConfig       `mapstructure:"mcp"`
+	Skills    SkillsConfig    `mapstructure:"skills"`
+	Autopilot AutopilotConfig `mapstructure:"autopilot"`
 }
 
 // DefaultConfigPath returns the default config file path.

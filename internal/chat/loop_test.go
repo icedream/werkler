@@ -43,7 +43,7 @@ func TestRunPrompt_SimpleResponse(t *testing.T) {
 	}), mock.Anything).Return(ai.Message{Role: "assistant", Content: "pong"}, nil)
 
 	s := newTestSession(tm, nil)
-	result, err := chat.RunPrompt(context.Background(), c, s, "ping", nil)
+	result, err := chat.RunPrompt(context.Background(), c, s, "ping", chat.PromptOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "pong", result)
 	c.AssertExpectations(t)
@@ -58,7 +58,7 @@ func TestRunPrompt_AIError(t *testing.T) {
 		Return(ai.Message{}, errors.New("api error"))
 
 	s := newTestSession(tm, nil)
-	_, err := chat.RunPrompt(context.Background(), c, s, "hello", nil)
+	_, err := chat.RunPrompt(context.Background(), c, s, "hello", chat.PromptOptions{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api error")
 }
@@ -85,7 +85,7 @@ func TestRunPrompt_ApprovedToolCall(t *testing.T) {
 	}), mock.Anything).Return(ai.Message{Role: "assistant", Content: "done"}, nil).Once()
 
 	s := newTestSession(tm, []string{"fs__read"})
-	result, err := chat.RunPrompt(context.Background(), c, s, "read the file", nil)
+	result, err := chat.RunPrompt(context.Background(), c, s, "read the file", chat.PromptOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "done", result)
 	c.AssertExpectations(t)
@@ -113,7 +113,7 @@ func TestRunPrompt_UnapprovedToolCall_DenialFedBack(t *testing.T) {
 	}), mock.Anything).Return(ai.Message{Role: "assistant", Content: "ok sorry"}, nil).Once()
 
 	s := newTestSession(tm, nil) // no auto-approve
-	result, err := chat.RunPrompt(context.Background(), c, s, "do something dangerous", nil)
+	result, err := chat.RunPrompt(context.Background(), c, s, "do something dangerous", chat.PromptOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "ok sorry", result)
 	c.AssertExpectations(t)
@@ -135,7 +135,7 @@ func TestRunPrompt_MaxStepsExceeded(t *testing.T) {
 		}, nil)
 
 	s := newTestSession(tm, []string{"loop_tool"})
-	_, err := chat.RunPrompt(context.Background(), c, s, "loop forever", nil)
+	_, err := chat.RunPrompt(context.Background(), c, s, "loop forever", chat.PromptOptions{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeded")
 }
@@ -152,7 +152,7 @@ func TestRunPrompt_ContextCancel(t *testing.T) {
 		Return(ai.Message{}, context.Canceled)
 
 	s := newTestSession(tm, nil)
-	_, err := chat.RunPrompt(ctx, c, s, "cancel me", nil)
+	_, err := chat.RunPrompt(ctx, c, s, "cancel me", chat.PromptOptions{})
 	require.Error(t, err)
 }
 
@@ -161,7 +161,7 @@ func TestRunPrompt_ToolsError(t *testing.T) {
 	tm.On("Tools", mock.Anything).Return([]ai.ToolDefinition{}, errors.New("server down"))
 
 	s := newTestSession(tm, nil)
-	_, err := chat.RunPrompt(context.Background(), &mockCompleter{}, s, "hi", nil)
+	_, err := chat.RunPrompt(context.Background(), &mockCompleter{}, s, "hi", chat.PromptOptions{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server down")
 }

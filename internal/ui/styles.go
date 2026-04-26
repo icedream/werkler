@@ -150,6 +150,10 @@ var (
 	todoIndicatorStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("220")).
 				Bold(true)
+
+	autopilotStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Bold(true)
 )
 
 func separator(width int) string {

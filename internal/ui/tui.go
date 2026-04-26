@@ -117,6 +117,16 @@ const (
 	toolStatusDenied
 )
 
+// autopilotDefaultMax is the default cycle cap for autopilot mode.
+const autopilotDefaultMax = 50
+
+// autopilotSystemNote is appended to the system prompt when autopilot is active.
+// It is injected at request-build time, not stored in message history.
+const autopilotSystemNote = `## Autopilot mode
+You are operating in autopilot mode. The user is not currently present.
+Work autonomously toward the given goal. Use todo_add, todo_update, and todo_list to track progress.
+Call task_complete(summary) when all work is done. Call ask_user only if you are completely blocked and cannot proceed without human input.`
+
 type displayItem struct {
 	kind       string
 	content    string
@@ -255,6 +265,13 @@ type modelInfoMsg struct {
 // todoUpdateMsg is sent by the todo store notify callback when todos change.
 type todoUpdateMsg struct{ autoOpen bool }
 
+// taskCompleteMsg is sent when the AI calls task_complete.
+// callID is the tool call ID so we can synthesise the tool result message.
+type taskCompleteMsg struct {
+	callID  string
+	summary string
+}
+
 // modelItem implements list.Item for a model picker entry.
 type modelItem struct{ ai.ModelItem }
 
@@ -368,6 +385,10 @@ type SessionOptions struct {
 	// to stateIdle once all servers have been connected (or failed).
 	MCPManager *mcppkg.Manager
 	MCPServers []config.MCPServerConfig
+	// Autopilot, when true, enables autonomous loop mode from the first prompt.
+	Autopilot bool
+	// AutopilotMaxCycles overrides the cycle cap (0 = use config/default).
+	AutopilotMaxCycles int
 }
 
 // --- Slash commands ---
@@ -477,7 +498,21 @@ func init() {
 			},
 		},
 		{
-			name:        "allow-all",
+			name:        "autopilot",
+			description: "Toggle autopilot mode — AI works autonomously until task_complete is called",
+			action: func(m *Model) []tea.Cmd {
+				if m.autopilot || m.autopilotPaused {
+					m.autopilotDisable()
+					m.items = append(m.items, displayItem{kind: itemInfo, content: "⚡ Autopilot disabled."})
+				} else {
+					m.autopilotEnable()
+					m.items = append(m.items, displayItem{kind: itemInfo, content: fmt.Sprintf("⚡ Autopilot enabled (cap: %d cycles). The AI will work autonomously.", m.effectiveAutopilotMax())})
+				}
+				m.rebuildContent()
+				return nil
+			},
+		},
+		{
 			description: "Toggle allow-all mode — auto-approve all tool calls and path access without prompting",
 			action: func(m *Model) []tea.Cmd {
 				m.session.SetAllowAll(!m.session.AllowAll())
@@ -695,6 +730,12 @@ type Model struct {
 	// Todo sidebar.
 	todoStore   *todostore.Store
 	sidebarOpen bool
+
+	// autopilot fields
+	autopilot       bool // autonomous loop currently active
+	autopilotPaused bool // cap reached — waiting for user to resume
+	autopilotCycle  int  // cycles completed since autopilot started
+	autopilotMax    int  // configured cap (0 → autopilotDefaultMax)
 }
 
 func initialModel(
@@ -1125,7 +1166,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else {
 					text := strings.TrimSpace(m.input.Value())
-					if text != "" {
+					// Resume paused autopilot on bare Enter (empty input).
+					if text == "" && m.autopilotPaused {
+						m.autopilotPaused = false
+						m.autopilotCycle = 0
+						m.items = append(m.items, displayItem{kind: itemInfo, content: "⚡ Autopilot resumed."})
+						needRebuild = true
+						m.turnRoundtrips = 0
+						m.state = stateThinking
+						cmds = append(cmds, doStartStream(
+							m.newOpCtx(), m.client,
+							m.buildStreamMessages(m.autopilotMessagesForStream()),
+							m.tools,
+						))
+					} else if text != "" {
 						m.input.Reset()
 						m.items = append(m.items, displayItem{kind: itemUser, content: text})
 						needRebuild = true
@@ -1154,7 +1208,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages))
 							} else {
 								m.state = stateThinking
-								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
+								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
 							}
 						}
 					}
@@ -1587,6 +1641,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		needRebuild = true
 
+	case taskCompleteMsg:
+		// Inject the tool result so the message history stays valid.
+		m.messages = append(m.messages, ai.Message{
+			Role:       "tool",
+			ToolCallID: msg.callID,
+			Content:    "Task complete: " + msg.summary,
+		})
+		m.autopilotDisable()
+		m.items = append(m.items, displayItem{
+			kind:    itemInfo,
+			content: "✓ Task complete: " + msg.summary,
+		})
+		needRebuild = true
+		if m.sessionStore != nil {
+			snap := m.currentSessionSnapshot()
+			m.sessionID = snap.ID
+			m.sessionCreatedAt = snap.CreatedAt
+			cmds = append(cmds, doSaveSession(m.sessionStore, snap))
+		}
+		cmds = append(cmds, m.processQueueOrIdle())
+
 	case compactDoneMsg:
 		if msg.err != nil {
 			// Compaction failed: keep history intact, show error, go idle.
@@ -1845,7 +1920,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, ai.Message{Role: "user", Content: "Continue."})
 					m.turnRoundtrips++
 					m.state = stateThinking
-					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
+					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
 					needRebuild = true
 					break
 				}
@@ -1866,6 +1941,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if cmd := m.recountContext(); cmd != nil {
 					cmds = append(cmds, cmd)
+				}
+				// Autopilot: if active and no queued user prompts, inject an
+				// ephemeral continuation instead of going idle.
+				if m.autopilot && len(m.queuedPrompts) == 0 {
+					m.autopilotCycle++
+					if m.autopilotCycle >= m.effectiveAutopilotMax() {
+						m.autopilotPaused = true
+						m.items = append(m.items, displayItem{
+							kind: itemInfo,
+							content: fmt.Sprintf(
+								"⚡ Autopilot paused after %d cycles — press Enter to resume, or /autopilot to disable.",
+								m.autopilotCycle,
+							),
+						})
+						cmds = append(cmds, m.processQueueOrIdle())
+					} else {
+						m.turnRoundtrips = 0
+						m.state = stateThinking
+						cmds = append(cmds, doStartStream(
+							m.newOpCtx(), m.client,
+							m.buildStreamMessages(m.autopilotMessagesForStream()),
+							m.tools,
+						))
+					}
+					break
 				}
 				cmds = append(cmds, m.processQueueOrIdle())
 			} else {
@@ -2165,6 +2265,12 @@ func (m Model) statusLines() (line1, line2 string) {
 	if m.session.AllowAll() {
 		allowAllIndicator = "  " + allowAllWarningStyle.Render("⚠ allow-all ON")
 	}
+	autopilotIndicator := ""
+	if m.autopilot {
+		autopilotIndicator = "  " + autopilotStyle.Render(fmt.Sprintf("⚡ %d/%d", m.autopilotCycle, m.effectiveAutopilotMax()))
+	} else if m.autopilotPaused {
+		autopilotIndicator = "  " + autopilotStyle.Render(fmt.Sprintf("⚡ paused (%d cycles)", m.autopilotCycle))
+	}
 
 	switch m.state {
 	case stateThinking:
@@ -2172,26 +2278,26 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
 		}
-		return statusStyle.Render(m.spinner.View()+" Thinking…") + cancelHint + queueHint + allowAllIndicator + m.roundtripHint(), ""
+		return statusStyle.Render(m.spinner.View()+" Thinking…") + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
 	case stateConnectingMCP:
-		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + allowAllIndicator, ""
+		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + autopilotIndicator + allowAllIndicator, ""
 	case stateConnectingOAuth:
-		return statusStyle.Render(m.spinner.View()+" Waiting for OAuth authorization…") + queueHint + allowAllIndicator, ""
+		return statusStyle.Render(m.spinner.View()+" Waiting for OAuth authorization…") + queueHint + autopilotIndicator + allowAllIndicator, ""
 	case stateCompacting:
-		return statusStyle.Render(m.spinner.View()+" Compacting context…") + queueHint + allowAllIndicator, ""
+		return statusStyle.Render(m.spinner.View()+" Compacting context…") + queueHint + autopilotIndicator + allowAllIndicator, ""
 	case stateStreaming:
 		cancelHint := ""
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
 		}
-		return statusStyle.Render(m.spinner.View()+" Streaming…") + cancelHint + queueHint + allowAllIndicator + m.roundtripHint(), ""
+		return statusStyle.Render(m.spinner.View()+" Streaming…") + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
 	case stateCallingTool:
 		name := toolNameStyle.Render(m.callingToolName)
 		cancelHint := ""
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
 		}
-		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + cancelHint + queueHint + allowAllIndicator + m.roundtripHint(), ""
+		return statusStyle.Render(m.spinner.View()+" Calling tool: ") + name + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
 	case stateAwaitingPathApproval:
 		if m.currentPathRequest.Path == "" {
 			return "", ""
@@ -2564,6 +2670,55 @@ func (m *Model) processNextPath() tea.Cmd {
 	return m.input.Focus()
 }
 
+// --- Autopilot helpers ---
+
+// effectiveAutopilotMax returns the active cycle cap, falling back to the default.
+func (m *Model) effectiveAutopilotMax() int {
+	if m.autopilotMax > 0 {
+		return m.autopilotMax
+	}
+	return autopilotDefaultMax
+}
+
+// autopilotEnable turns on autopilot, injecting the system note at request time.
+func (m *Model) autopilotEnable() {
+	m.autopilot = true
+	m.autopilotPaused = false
+	m.autopilotCycle = 0
+}
+
+// autopilotDisable turns off autopilot without clearing the cycle counter so
+// the status banner can still report how many cycles ran.
+func (m *Model) autopilotDisable() {
+	m.autopilot = false
+	m.autopilotPaused = false
+}
+
+// autopilotMessagesForStream returns the message slice to send to the AI for an
+// autopilot continuation. The "Continue working." turn is ephemeral — it is
+// never appended to m.messages so it won't appear in saved sessions or compaction.
+func (m *Model) autopilotMessagesForStream() []ai.Message {
+	msgs := make([]ai.Message, len(m.messages)+1)
+	copy(msgs, m.messages)
+	msgs[len(m.messages)] = ai.Message{Role: "user", Content: "Continue working."}
+	return msgs
+}
+
+// buildStreamMessages returns the message slice for the next stream request,
+// prepending the autopilot system note to the system message when active.
+func (m *Model) buildStreamMessages(base []ai.Message) []ai.Message {
+	if !m.autopilot {
+		return base
+	}
+	if len(base) == 0 {
+		return base
+	}
+	msgs := make([]ai.Message, len(base))
+	copy(msgs, base)
+	msgs[0].Content = msgs[0].Content + "\n\n" + autopilotSystemNote
+	return msgs
+}
+
 // appendInputHistory adds text to the prompt history, deduplicating consecutive
 // identical entries, and resets history navigation state.
 func (m *Model) appendInputHistory(text string) {
@@ -2640,7 +2795,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 			return doCompact(m.newOpCtx(), m.client, m.messages)
 		}
 		m.state = stateThinking
-		return doStartStream(m.newOpCtx(), m.client, m.messages, m.tools)
+		return doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools)
 	}
 	m.state = stateIdle
 	m.cancelOp = nil
@@ -2660,7 +2815,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		}
 		m.state = stateThinking
 		m.turnRoundtrips++
-		return doStartStream(m.newOpCtx(), m.client, m.messages, m.tools)
+		return doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools)
 	}
 
 	call := m.pendingCalls[0]
@@ -2669,6 +2824,31 @@ func (m *Model) processNextCall() tea.Cmd {
 	m.currentCall = &callCopy
 
 	debugLog("processNextCall: dispatching tool=%q id=%q approved=%v", call.Name, call.ID, m.session.IsApproved(call.Name))
+
+	// task_complete terminates the autopilot loop — intercept before normal dispatch.
+	if call.Name == "task_complete" {
+		summary := ""
+		if s, ok := call.Arguments["summary"].(string); ok {
+			summary = s
+		}
+		// Mark the tool call display item as done.
+		if idx, ok := m.toolCallIdx[call.ID]; ok {
+			m.items[idx].toolStatus = toolStatusDone
+		}
+		// Synthesise terminal tool results for any remaining sibling calls so
+		// the message history stays valid.
+		for _, sibling := range m.pendingCalls {
+			m.messages = append(m.messages, ai.Message{
+				Role:       "tool",
+				ToolCallID: sibling.ID,
+				Content:    "Cancelled: task_complete was called.",
+			})
+		}
+		m.pendingCalls = m.pendingCalls[:0]
+		m.currentCall = nil
+		return func() tea.Msg { return taskCompleteMsg{callID: call.ID, summary: summary} }
+	}
+
 	// ask_user, rubber_duck_review, use_skill, and todo_* are always dispatched immediately
 	// without an approval dialog.
 	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "rubber_duck_review" ||
@@ -2992,7 +3172,7 @@ func (m *Model) applyCompaction(summary string) []tea.Cmd {
 		m.autoCompactPending = false
 		m.turnRoundtrips++
 		m.state = stateThinking
-		cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
+		cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
 	} else {
 		m.state = stateIdle
 		cmds = append(cmds, m.input.Focus())
@@ -3286,6 +3466,10 @@ func RunTUI(
 				sendFn(todoUpdateMsg{})
 			}
 		})
+	}
+	if opts.Autopilot {
+		m.autopilot = true
+		m.autopilotMax = opts.AutopilotMaxCycles
 	}
 	if opts.Initial != nil {
 		m.applySession(opts.Initial)
