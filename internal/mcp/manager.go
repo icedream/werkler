@@ -62,7 +62,8 @@ func sanitize(s string) string {
 // in-process (builtin) servers.
 type serverConn struct {
 	name          string
-	safeName      string // sanitized, used as prefix in AI tool names
+	safeName      string                 // sanitized, used as prefix in AI tool names
+	cfg           config.MCPServerConfig // stored for transparent reconnection
 	session       *mcp.ClientSession
 	serverSession *mcp.ServerSession // non-nil for builtin servers
 }
@@ -220,7 +221,6 @@ func (m *Manager) ConnectByName(ctx context.Context, name string) (alreadyConnec
 	return false, nil
 }
 
-
 // Streamable servers with OAuth enabled are deferred: they are not connected here
 // but instead queued for [ConnectPendingOAuth].
 // Call Close when done.
@@ -318,6 +318,7 @@ func (m *Manager) ConnectPendingOAuth(ctx context.Context, display func(serverNa
 		m.conns = append(m.conns, &serverConn{
 			name:     srv.Name,
 			safeName: safe,
+			cfg:      srv,
 			session:  session,
 		})
 		remaining := m.pendingOAuth[:0]
@@ -399,6 +400,7 @@ func (m *Manager) connectOne(ctx context.Context, srv config.MCPServerConfig, sa
 	m.conns = append(m.conns, &serverConn{
 		name:          srv.Name,
 		safeName:      safeName,
+		cfg:           srv,
 		session:       session,
 		serverSession: serverSession,
 	})
@@ -447,6 +449,8 @@ func (m *Manager) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 // The original (unsanitized) tool name is looked up from the internal map built
 // by the most recent Tools() call, so original names with unsafe characters are
 // preserved correctly.
+// If the call fails with a transport error (and the context is still alive),
+// CallTool transparently reconnects the server and retries once.
 func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
 	m.mu.Lock()
 	entry, ok := m.toolMap[name]
@@ -455,15 +459,63 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any
 		return "", fmt.Errorf("unknown tool %q (call Tools first to populate the tool map)", name)
 	}
 
-	result, err := entry.conn.session.CallTool(ctx, &mcp.CallToolParams{
+	result, callErr := entry.conn.session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      entry.origName,
 		Arguments: args,
 	})
-	if err != nil {
-		return "", fmt.Errorf("calling tool %q on %q: %w", entry.origName, entry.conn.name, err)
+
+	// If the call failed and the context is still active, assume the connection
+	// dropped (transport error) and attempt a transparent reconnect + single retry.
+	if callErr != nil && ctx.Err() == nil {
+		if reconnErr := m.reconnectConn(ctx, entry.conn); reconnErr == nil {
+			// Rebuild toolMap so the retry uses the fresh session.
+			if _, refreshErr := m.Tools(ctx); refreshErr == nil {
+				m.mu.Lock()
+				newEntry, newOK := m.toolMap[name]
+				m.mu.Unlock()
+				if newOK {
+					result, callErr = newEntry.conn.session.CallTool(ctx, &mcp.CallToolParams{
+						Name:      newEntry.origName,
+						Arguments: args,
+					})
+				}
+			}
+		}
+		// If reconnect or retry failed, callErr still holds the original error.
 	}
 
+	if callErr != nil {
+		return "", fmt.Errorf("calling tool %q on %q: %w", entry.origName, entry.conn.name, callErr)
+	}
 	return renderResult(result), nil
+}
+
+// reconnectConn closes a dropped connection and establishes a fresh one using
+// the same config. OAuth servers are skipped since they need user interaction.
+// After a successful reconnect the caller should refresh the tool map via Tools.
+func (m *Manager) reconnectConn(ctx context.Context, old *serverConn) error {
+	if old.cfg.Transport == config.MCPTransportStreamable && old.cfg.OAuth {
+		return fmt.Errorf("server %q uses OAuth — reconnect requires user interaction", old.cfg.Name)
+	}
+
+	// Close the stale session (errors are non-fatal; the session is broken anyway).
+	_ = old.session.Close()
+	if old.serverSession != nil {
+		_ = old.serverSession.Close()
+	}
+
+	// Remove the stale conn so connectOne does not leave a duplicate.
+	m.mu.Lock()
+	remaining := make([]*serverConn, 0, len(m.conns))
+	for _, c := range m.conns {
+		if c != old {
+			remaining = append(remaining, c)
+		}
+	}
+	m.conns = remaining
+	m.mu.Unlock()
+
+	return m.connectOne(ctx, old.cfg, old.safeName)
 }
 
 // Close shuts down all MCP server connections.
