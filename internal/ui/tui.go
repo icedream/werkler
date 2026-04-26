@@ -1421,6 +1421,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						))
 					} else if text != "" {
 						m.input.Reset()
+						m.appendInputHistory(text)
 						m.items = append(m.items, displayItem{kind: itemUser, content: text})
 						needRebuild = true
 
@@ -1809,7 +1810,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if text != "" {
 					m.input.Reset()
 					m.showCompletion = false
-					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: false})
+					m.appendInputHistory(text)
+					// Show the message immediately so the user can see it was received.
+					// processQueueOrIdle will skip re-adding it (displayed=true).
+					m.items = append(m.items, displayItem{kind: itemUser, content: text})
+					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: true})
 					needRebuild = true
 				}
 			case tea.KeyTab:
