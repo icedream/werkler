@@ -490,7 +490,7 @@ Use pty=false (default) for non-interactive commands (builds, scripts) — outpu
 					"type": "object",
 					"properties": map[string]any{
 						"command":         map[string]any{"type": "string", "description": "Absolute path or PATH-resolvable command name"},
-						"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command arguments (not including the command itself)"},
+						"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command arguments only — do NOT include the command name as the first element (unlike argv[0])"},
 						"title":           map[string]any{"type": "string", "description": "Short one-line description of what this command does and why, shown to the user"},
 						"cwd":             map[string]any{"type": "string", "description": "Working directory; empty = inherit werkler's cwd"},
 						"pty":             map[string]any{"type": "boolean", "description": "Allocate a PTY (pseudo-terminal); required for interactive programs"},

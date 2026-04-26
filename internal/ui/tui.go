@@ -2953,29 +2953,63 @@ func (m Model) renderItem(item displayItem) string {
 			badge = toolDeniedStyle.Render("✗")
 		}
 		name := toolNameStyle.Render(item.toolName)
-		line := "  " + badge + " " + name
+		badgeAndName := "  " + badge + " " + name
+		prefixW := lipgloss.Width(badgeAndName)
+		line := badgeAndName
 		if item.toolArgs != "" {
-			line += "  " + item.toolArgs
+			args := item.toolArgs
+			sep := "  "
+			if m.width > prefixW+len(sep)+1 {
+				available := m.width - prefixW - len(sep)
+				wrapped := wordwrap.String(args, available)
+				indent := strings.Repeat(" ", prefixW+len(sep))
+				args = strings.ReplaceAll(wrapped, "\n", "\n"+indent)
+			}
+			line += sep + args
 		}
 		if item.toolStatus == toolStatusDenied {
 			line += "  " + toolDeniedStyle.Render("(denied)")
 		}
 		if item.toolNote != "" {
-			var noteStyle lipgloss.Style
+			var ns lipgloss.Style
 			if item.toolStatus == toolStatusFailed {
-				noteStyle = errorStyle
+				ns = errorStyle
 			} else {
-				noteStyle = statusStyle
+				ns = statusStyle
 			}
-			line += "\n    " + noteStyle.Render(item.toolNote)
+			const noteIndent = "    "
+			note := item.toolNote
+			if m.width > len(noteIndent)+1 {
+				wrapped := wordwrap.String(note, m.width-len(noteIndent))
+				noteParts := strings.Split(wrapped, "\n")
+				rendered := make([]string, len(noteParts))
+				for j, p := range noteParts {
+					rendered[j] = noteIndent + ns.Render(p)
+				}
+				line += "\n" + strings.Join(rendered, "\n")
+			} else {
+				line += "\n" + noteIndent + ns.Render(note)
+			}
 		}
 		return line
 
 	case itemError:
-		return errorStyle.Render("Error: ") + item.content
+		label := errorStyle.Render("Error: ")
+		labelW := lipgloss.Width(label)
+		content := item.content
+		if m.width > labelW+1 {
+			wrapped := wordwrap.String(content, m.width-labelW)
+			indent := strings.Repeat(" ", labelW)
+			content = strings.ReplaceAll(wrapped, "\n", "\n"+indent)
+		}
+		return label + content
 
 	case itemInfo:
-		return infoStyle.Render(item.content)
+		content := item.content
+		if m.width > 0 {
+			content = wordwrap.String(content, m.width)
+		}
+		return infoStyle.Render(content)
 
 	case itemProcessOutput:
 		prefix := processHandleStyle.Render("[process:" + item.handle + "]")
