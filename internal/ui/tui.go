@@ -564,6 +564,13 @@ type Model struct {
 	// Processed FIFO after the current agent turn completes successfully.
 	queuedPrompts []string
 
+	// inputHistory holds all user prompts sent in this session (oldest first).
+	// historyIdx is the current position when navigating (-1 = not navigating).
+	// historyDraft is the unsent text saved when navigation begins, restored on exit.
+	inputHistory []string
+	historyIdx   int
+	historyDraft string
+
 	// Display items for the viewport.
 	items        []displayItem
 	toolCallIdx  map[string]int // callID → index in items
@@ -754,6 +761,7 @@ func initialModel(
 		oauthInfoIdx:       -1,
 		askUserSelectedIdx: -1,
 		askUserItemIdx:     -1,
+		historyIdx:         -1,
 		toolCallIdx:        make(map[string]int),
 		viewport:           viewport.New(0, 0),
 		modelPicker:        picker,
@@ -1168,24 +1176,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case tea.KeyUp:
-				if m.showCompletion {
+				switch {
+				case m.showCompletion:
 					filtered := m.filteredCmds()
 					if len(filtered) > 0 {
 						m.completionIdx = (m.completionIdx - 1 + len(filtered)) % len(filtered)
 					}
-				} else {
+				case len(m.inputHistory) > 0:
+					// History navigation takes priority over viewport scroll.
+					m.historyUp()
+					m.updateCompletion()
+				default:
 					var vpCmd tea.Cmd
 					m.viewport, vpCmd = m.viewport.Update(msg)
 					cmds = append(cmds, vpCmd)
 				}
 
 			case tea.KeyDown:
-				if m.showCompletion {
+				switch {
+				case m.showCompletion:
 					filtered := m.filteredCmds()
 					if len(filtered) > 0 {
 						m.completionIdx = (m.completionIdx + 1) % len(filtered)
 					}
-				} else {
+				case m.historyIdx != -1:
+					// Only intercept Down when actively navigating history.
+					m.historyDown()
+					m.updateCompletion()
+				default:
 					var vpCmd tea.Cmd
 					m.viewport, vpCmd = m.viewport.Update(msg)
 					cmds = append(cmds, vpCmd)
@@ -1362,6 +1380,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text := strings.TrimSpace(m.input.Value())
 				if text != "" {
 					m.input.Reset()
+					m.appendInputHistory(text)
 					m.items = append(m.items, displayItem{kind: itemUser, content: text})
 					m.queuedPrompts = append(m.queuedPrompts, text)
 					needRebuild = true
@@ -2538,6 +2557,66 @@ func (m *Model) processNextPath() tea.Cmd {
 	return m.input.Focus()
 }
 
+// appendInputHistory adds text to the prompt history, deduplicating consecutive
+// identical entries, and resets history navigation state.
+func (m *Model) appendInputHistory(text string) {
+	if text == "" {
+		return
+	}
+	if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
+		m.inputHistory = append(m.inputHistory, text)
+	}
+	m.historyIdx = -1
+	m.historyDraft = ""
+}
+
+// historyUp navigates one step back in prompt history. If not yet navigating,
+// saves the current input as the draft first.
+func (m *Model) historyUp() {
+	if len(m.inputHistory) == 0 {
+		return
+	}
+	if m.historyIdx == -1 {
+		m.historyDraft = m.input.Value()
+		m.historyIdx = len(m.inputHistory) - 1
+	} else if m.historyIdx > 0 {
+		m.historyIdx--
+	}
+	m.input.SetValue(m.inputHistory[m.historyIdx])
+	m.input.CursorEnd()
+}
+
+// historyDown navigates one step forward in prompt history, restoring the
+// draft when moving past the newest entry.
+func (m *Model) historyDown() {
+	if m.historyIdx == -1 {
+		return
+	}
+	if m.historyIdx < len(m.inputHistory)-1 {
+		m.historyIdx++
+		m.input.SetValue(m.inputHistory[m.historyIdx])
+		m.input.CursorEnd()
+	} else {
+		m.historyIdx = -1
+		m.input.SetValue(m.historyDraft)
+		m.input.CursorEnd()
+		m.historyDraft = ""
+	}
+}
+
+// populateHistoryFromMessages seeds inputHistory from saved message history
+// (used on session resume so prior prompts are immediately navigable).
+func (m *Model) populateHistoryFromMessages(msgs []ai.Message) {
+	m.inputHistory = m.inputHistory[:0]
+	for _, msg := range msgs {
+		if msg.Role == "user" && msg.Content != "" {
+			m.appendInputHistory(msg.Content)
+		}
+	}
+	m.historyIdx = -1
+	m.historyDraft = ""
+}
+
 // processQueueOrIdle is called when an AI turn finishes successfully.
 // If queued prompts exist, the next one is dequeued and sent immediately,
 // keeping the agent busy. Otherwise the TUI returns to idle.
@@ -3022,6 +3101,7 @@ func (m *Model) applySession(sess *sessionstore.Session) {
 		}
 		m.recalcLayout()
 	}
+	m.populateHistoryFromMessages(sess.Messages)
 	// Show a resume banner as the first visible item.
 	banner := displayItem{
 		kind:    itemInfo,
