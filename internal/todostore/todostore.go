@@ -53,10 +53,14 @@ func (s *Store) SetNotify(fn func()) {
 }
 
 // Add creates a new todo with StatusPending and returns its ID.
-func (s *Store) Add(title, description string) string {
+// If id is non-empty it is used as-is (caller must ensure uniqueness);
+// otherwise a numeric fallback id ("t1", "t2", …) is generated.
+func (s *Store) Add(id, title, description string) string {
 	s.mu.Lock()
-	s.nextID++
-	id := fmt.Sprintf("t%d", s.nextID)
+	if id == "" {
+		s.nextID++
+		id = fmt.Sprintf("t%d", s.nextID)
+	}
 	now := time.Now()
 	s.todos = append(s.todos, Todo{
 		ID:          id,

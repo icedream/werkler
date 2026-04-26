@@ -691,13 +691,17 @@ Set recommended_choice to highlight a suggested option.`,
 				def: ai.ToolDefinition{
 					Name: "todo_add",
 					Description: `Add a todo item to the session task list.
-Use proactively at the start of multi-step tasks. Returns the todo ID for later updates.
+Always supply a short kebab-case id (e.g. "write-readme", "fix-login-bug") so you can
+reference the todo later. Use proactively at the start of multi-step tasks.
 IMPORTANT: Duplicate titles are not allowed. If a todo with the same title already exists
 you will receive the existing item back — do NOT call todo_add again with the same title.
-Only rephrase if this is genuinely a distinct task.`,
+IMPORTANT: Duplicate IDs are not allowed. Choose a unique id; if the id already exists
+you will receive the existing item back.
+Only rephrase/re-id if this is genuinely a distinct task.`,
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
+							"id":          map[string]any{"type": "string", "description": "Short kebab-case identifier (e.g. write-readme). Must be unique in this session."},
 							"title":       map[string]any{"type": "string", "description": "Short one-line title"},
 							"description": map[string]any{"type": "string", "description": "Optional detail or acceptance criteria"},
 						},
@@ -1288,13 +1292,17 @@ func (m *Manager) handleTodoAdd(_ context.Context, args map[string]any) (string,
 	if title == "" {
 		return "error: title is required", nil
 	}
-	// Reject exact-duplicate titles so the AI doesn't create ghost copies.
+	requestedID := stringArg(args, "id")
+	// Reject exact-duplicate titles or IDs so the AI doesn't create ghost copies.
 	for _, t := range m.todoStore.List() {
 		if t.Title == title {
 			return fmt.Sprintf("duplicate: todo %q already exists with id=%s status=%s — use todo_update to change it", title, t.ID, t.Status), nil
 		}
+		if requestedID != "" && t.ID == requestedID {
+			return fmt.Sprintf("duplicate: id %q already exists (title=%q status=%s) — choose a different id or use todo_update", requestedID, t.Title, t.Status), nil
+		}
 	}
-	id := m.todoStore.Add(title, stringArg(args, "description"))
+	id := m.todoStore.Add(requestedID, title, stringArg(args, "description"))
 	return fmt.Sprintf("added: id=%s status=pending title=%q", id, title), nil
 }
 
