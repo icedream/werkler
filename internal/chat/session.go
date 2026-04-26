@@ -13,8 +13,9 @@ import (
 
 // PathAccessRequest describes a single path access that needs user approval.
 type PathAccessRequest struct {
-	Path  string
-	Write bool // true = write (and read); false = read only
+	Path    string
+	Write   bool // true = write (and read); false = read only
+	Execute bool // true = execute (binary/script); implies write-level trust
 }
 
 // PathApprovalError is implemented by errors that require interactive path

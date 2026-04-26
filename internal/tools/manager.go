@@ -246,7 +246,10 @@ func ExtractPaths(command string, args []string, cwd string) []string {
 		// Heuristic scan for embedded paths (covers cases like "-I/usr/include").
 		for _, m := range pathHeuristic.FindAllStringSubmatch(arg, -1) {
 			if len(m) >= 2 {
-				add(resolvePath(strings.Trim(m[1], `"'`), cwd))
+				p := strings.Trim(m[1], `"'`)
+				if !containsEllipsis(p) {
+					add(resolvePath(p, cwd))
+				}
 			}
 		}
 	}
@@ -259,7 +262,10 @@ func ExtractPaths(command string, args []string, cwd string) []string {
 				script := args[i+1]
 				for _, m := range pathHeuristic.FindAllStringSubmatch(script, -1) {
 					if len(m) >= 2 {
-						add(resolvePath(strings.Trim(m[1], `"'`), cwd))
+						p := strings.Trim(m[1], `"'`)
+						if !containsEllipsis(p) {
+							add(resolvePath(p, cwd))
+						}
 					}
 				}
 			}
@@ -270,11 +276,26 @@ func ExtractPaths(command string, args []string, cwd string) []string {
 }
 
 // isPathLike reports whether s looks like a standalone filesystem path.
+// Excludes Go package wildcards (e.g. ./..., ./foo/...) which start with ./ but
+// are not real filesystem paths.
 func isPathLike(s string) bool {
+	if containsEllipsis(s) {
+		return false
+	}
 	return strings.HasPrefix(s, "/") ||
 		strings.HasPrefix(s, "./") ||
 		strings.HasPrefix(s, "../") ||
 		strings.HasPrefix(s, "~/")
+}
+
+// containsEllipsis reports whether any path segment of s is "..." (Go wildcard).
+func containsEllipsis(s string) bool {
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "..." {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvePath expands ~ and resolves a relative path against baseDir.
@@ -316,17 +337,24 @@ func canonicalizePath(p string) string {
 	return filepath.Clean(p)
 }
 
-// checkWritePaths returns unapproved paths from ExtractPaths, requiring write access.
-// Used by process tools (unrestricted execution requires write-level approval).
+// checkWritePaths returns unapproved paths from ExtractPaths.
+// The command binary (first path) requires execute-level approval; all other
+// paths (cwd, file arguments) require write-level approval.
 func (m *Manager) checkWritePaths(command string, args []string, cwd string) []chat.PathAccessRequest {
 	if m.pathApprover == nil {
 		return nil
 	}
 	paths := ExtractPaths(command, args, cwd)
 	var unapproved []chat.PathAccessRequest
-	for _, p := range paths {
+	for i, p := range paths {
 		if !m.pathApprover.IsPathWriteApproved(p) {
-			unapproved = append(unapproved, chat.PathAccessRequest{Path: p, Write: true})
+			req := chat.PathAccessRequest{Path: p}
+			if i == 0 {
+				req.Execute = true
+			} else {
+				req.Write = true
+			}
+			unapproved = append(unapproved, req)
 		}
 	}
 	return unapproved

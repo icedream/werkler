@@ -769,7 +769,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case "p":
 						req := m.currentPathRequest
 						m.approvePathRequest(req)
-						if err := m.persistPathApproval(req.Path, req.Write); err != nil {
+						if err := m.persistPathApproval(req.Path, req.Write || req.Execute); err != nil {
 							m.items = append(m.items, displayItem{
 								kind:    itemError,
 								content: "Failed to save approval: " + err.Error(),
@@ -1702,7 +1702,9 @@ func (m Model) statusLines() (line1, line2 string) {
 			return "", ""
 		}
 		accessKind := "read"
-		if m.currentPathRequest.Write {
+		if m.currentPathRequest.Execute {
+			accessKind = "execute"
+		} else if m.currentPathRequest.Write {
 			accessKind = "write"
 		}
 		ch := m.pendingApprovalChoice
@@ -1919,9 +1921,10 @@ func (m Model) renderItem(item displayItem) string {
 
 // --- Agent loop helpers ---
 
-// approvePathRequest calls the appropriate session approval method based on the request's Write flag.
+// approvePathRequest calls the appropriate session approval method.
+// Execute and Write both grant write-level trust (execute implies arbitrary capability).
 func (m *Model) approvePathRequest(req chat.PathAccessRequest) {
-	if req.Write {
+	if req.Write || req.Execute {
 		m.session.ApprovePathWriteForSession(req.Path)
 	} else {
 		m.session.ApprovePathReadForSession(req.Path)
