@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -82,6 +83,7 @@ type Manager struct {
 	skills        []skills.Skill
 	todoStore     *todostore.Store
 	memoryStore   *memorystore.MemoryStore
+	activeCallID  atomic.Value // stores string; set/cleared by doCallTool goroutine
 }
 
 type builtin struct {
@@ -132,6 +134,19 @@ func (m *Manager) SetTodoStore(s *todostore.Store) {
 func (m *Manager) SetMemoryStore(s *memorystore.MemoryStore) {
 	m.memoryStore = s
 	m.builtins = m.makeBuiltins()
+}
+
+// SetActiveCallID records the ID of the tool call currently being executed.
+// Called by the doCallTool goroutine in the TUI; safe for concurrent use.
+func (m *Manager) SetActiveCallID(id string) { m.activeCallID.Store(id) }
+
+// ActiveCallID returns the ID of the tool call currently being executed, or
+// empty string if no call is in progress.
+func (m *Manager) ActiveCallID() string {
+	if v := m.activeCallID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
 }
 
 // Session (which wraps this Manager) to serve as its own path approver without

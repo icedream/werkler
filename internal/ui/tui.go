@@ -1200,7 +1200,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.executingCall = &call
 						m.state = stateCallingTool
 						needRebuild = true
-						cmds = append(cmds, doCallTool(m.newOpCtx(), m.session, call))
+						cmds = append(cmds, doCallTool(m.newOpCtx(), m.toolMgr, m.session, call))
 					case "a":
 						call := *m.currentCall
 						m.session.ApproveForSession(call.Name)
@@ -1212,7 +1212,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.executingCall = &call
 						m.state = stateCallingTool
 						needRebuild = true
-						cmds = append(cmds, doCallTool(m.newOpCtx(), m.session, call))
+						cmds = append(cmds, doCallTool(m.newOpCtx(), m.toolMgr, m.session, call))
 					case "p":
 						call := *m.currentCall
 						m.session.ApproveForSession(call.Name)
@@ -1230,7 +1230,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.executingCall = &call
 						m.state = stateCallingTool
 						needRebuild = true
-						cmds = append(cmds, doCallTool(m.newOpCtx(), m.session, call))
+						cmds = append(cmds, doCallTool(m.newOpCtx(), m.toolMgr, m.session, call))
 					case "n":
 						call := *m.currentCall
 						if idx, ok := m.toolCallIdx[call.ID]; ok {
@@ -2823,7 +2823,7 @@ func (m *Model) processNextPath() tea.Cmd {
 		m.callingToolName = call.Name
 		m.executingCall = &call
 		m.state = stateCallingTool
-		return doCallTool(m.newOpCtx(), m.session, call)
+		return doCallTool(m.newOpCtx(), m.toolMgr, m.session, call)
 	}
 	return m.input.Focus()
 }
@@ -3028,7 +3028,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		m.currentCall = nil
 		m.executingCall = &callCopy
 		m.state = stateCallingTool
-		return doCallTool(m.newOpCtx(), m.session, call)
+		return doCallTool(m.newOpCtx(), m.toolMgr, m.session, call)
 	}
 
 	m.state = stateAwaitingApproval
@@ -3076,8 +3076,12 @@ func readNextChunk(ch <-chan ai.StreamChunk) tea.Cmd {
 	}
 }
 
-func doCallTool(ctx context.Context, session *chat.Session, tc ai.ToolCall) tea.Cmd {
+func doCallTool(ctx context.Context, toolMgr *tools.Manager, session *chat.Session, tc ai.ToolCall) tea.Cmd {
 	return func() tea.Msg {
+		if toolMgr != nil {
+			toolMgr.SetActiveCallID(tc.ID)
+			defer toolMgr.SetActiveCallID("")
+		}
 		result, err := session.CallTool(ctx, tc)
 		return toolResultMsg{tc.ID, tc.Name, result, err}
 	}
@@ -3746,9 +3750,10 @@ func RunTUI(
 		})
 		toolMgr.SetUserAsker(func(ctx context.Context, question string, choices []string, recommended string, allowFreeform bool) (string, error) {
 			resultCh := make(chan askUserResult, 1)
-			if m.executingCall != nil {
+			callID := toolMgr.ActiveCallID()
+			if callID != "" {
 				sendFn(askUserMsg{
-					callID:        m.executingCall.ID,
+					callID:        callID,
 					question:      question,
 					choices:       choices,
 					recommended:   recommended,
