@@ -750,8 +750,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case "d":
 						// Approve the whole containing directory.
 						dirReq := chat.PathAccessRequest{
-							Path:  filepath.Dir(m.currentPathRequest.Path),
-							Write: m.currentPathRequest.Write,
+							Path:    filepath.Dir(m.currentPathRequest.Path),
+							Write:   m.currentPathRequest.Write,
+							Execute: m.currentPathRequest.Execute,
 						}
 						m.approvePathRequest(dirReq)
 						m.currentPathRequest = chat.PathAccessRequest{}
@@ -1098,6 +1099,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text := strings.TrimSpace(m.input.Value())
 				if text != "" {
 					m.input.Reset()
+					m.items = append(m.items, displayItem{kind: itemUser, content: text})
 					m.queuedPrompts = append(m.queuedPrompts, text)
 					needRebuild = true
 				}
@@ -1690,8 +1692,10 @@ func (m Model) statusLines() (line1, line2 string) {
 	switch m.state {
 	case stateThinking:
 		return statusStyle.Render(m.spinner.View()+" Thinking…") + queueHint + allowAllIndicator, ""
-	case stateConnectingOAuth:
+	case stateConnectingMCP:
 		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + allowAllIndicator, ""
+	case stateConnectingOAuth:
+		return statusStyle.Render(m.spinner.View()+" Waiting for OAuth authorization…") + queueHint + allowAllIndicator, ""
 	case stateStreaming:
 		return statusStyle.Render(m.spinner.View()+" Streaming…") + queueHint + allowAllIndicator, ""
 	case stateCallingTool:
