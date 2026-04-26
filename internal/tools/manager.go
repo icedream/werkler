@@ -658,7 +658,11 @@ On success, returns the line number where the replacement was made.`,
 				Name: "ask_user",
 				Description: `Ask the user a direct question and wait for their answer.
 Use this when the task requires a decision or information that only the user can provide.
-Provide predefined choices when the answer is one of a known set.
+
+REQUIRED: When there are 2–4 known valid answers, you MUST put them in the "choices" array — do NOT embed numbered options in the question string itself.
+WRONG: question="What should I do?\n\n1. Deploy now\n2. Review first", choices=[]
+RIGHT: question="What should I do?", choices=["Deploy now", "Review first"]
+
 Set allow_freeform to false to restrict the user strictly to those choices.
 Set recommended_choice to highlight a suggested option.`,
 				InputSchema: map[string]any{
@@ -666,12 +670,12 @@ Set recommended_choice to highlight a suggested option.`,
 					"properties": map[string]any{
 						"question": map[string]any{
 							"type":        "string",
-							"description": "The question to present to the user",
+							"description": "The question to present to the user. Must be a plain sentence ending in '?'. Do NOT include numbered or bulleted options — put those in the 'choices' array.",
 						},
 						"choices": map[string]any{
 							"type":        "array",
 							"items":       map[string]any{"type": "string"},
-							"description": "Predefined answer choices",
+							"description": "Predefined answer choices (e.g. [\"Yes\", \"No\"] or [\"Option A\", \"Option B\", \"Option C\"]). Always populate this when there are 2–4 known valid answers.",
 						},
 						"recommended_choice": map[string]any{
 							"type":        "string",

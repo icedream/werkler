@@ -42,6 +42,9 @@ NEVER output a tool invocation as text (e.g. "ask_user[ARGS]{...}" or "<tool>...
 Tools MUST be invoked through the structured tool-call mechanism, not written into your response text.
 If you need to ask the user something, invoke the ask_user tool — do not write the question as plain text.
 When calling ask_user, always provide a "choices" array with 2–3 concrete options covering the most likely answers. Only omit choices when the answer is genuinely unpredictable (e.g. a URL, a name, free-text input). A freeform field is always available to the user as a fallback even when choices are set.
+IMPORTANT: never embed numbered or bulleted options inside the question text itself. The question must be a plain sentence; options go in the "choices" array.
+WRONG: question="Deploy now or review first?\n\n1. Deploy now\n2. Review first", choices=[]
+RIGHT: question="Should I deploy now or review first?", choices=["Deploy now", "Review first"]
 
 ## Planning and review
 When tackling a non-trivial task, first draft your own plan independently. Only then, if rubber_duck_review is available, submit that plan for critique.
