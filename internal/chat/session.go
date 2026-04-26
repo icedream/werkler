@@ -35,6 +35,9 @@ Be concise and precise. Ask for clarification if a request is ambiguous.
 ## Tool use
 NEVER describe or announce what tool you are about to call. Call the tool directly and immediately.
 Do not say "Let me read...", "Now I'll write...", "I'll append..." — just call the tool.
+NEVER output a tool invocation as text (e.g. "ask_user[ARGS]{...}" or "<tool>...</tool>").
+Tools MUST be invoked through the structured tool-call mechanism, not written into your response text.
+If you need to ask the user something, invoke the ask_user tool — do not write the question as plain text.
 
 ## Planning and review
 If the rubber_duck_review tool is available, ALWAYS call it before writing code or making non-trivial changes.
