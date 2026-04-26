@@ -159,6 +159,9 @@ func runChat(_ *cobra.Command, _ []string) error {
 		PersistMCPServer: func(srv config.MCPServerConfig) error {
 			return config.AppendMCPServer(flagConfigPath, srv)
 		},
+		RemoveMCPServer: func(name string) error {
+			return config.RemoveMCPServer(flagConfigPath, name)
+		},
 		Autopilot:          chatAutopilot,
 		AutopilotMaxCycles: resolveAutopilotMax(chatAutopilotMaxCyc, cfg.Autopilot.MaxCycles),
 		MemoryStore:        memStore,

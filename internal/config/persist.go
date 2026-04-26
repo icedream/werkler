@@ -283,6 +283,121 @@ func insertIntoArray(lines []string, keyLine int, quoted string) (string, error)
 	return strings.Join(lines, "\n"), nil
 }
 
+// RemoveMCPServer removes the [[mcp.servers]] entry named serverName from the
+// config file at configPath (defaults to DefaultConfigPath when empty).
+// If no such entry exists, it is a no-op. Comments and formatting of other
+// entries are preserved. Does not support config files that use multi-line
+// string values that span more than one line.
+func RemoveMCPServer(configPath, serverName string) error {
+	if configPath == "" {
+		configPath = DefaultConfigPath()
+	}
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading config: %w", err)
+	}
+	result := removeMCPServerBlock(string(data), serverName)
+	if result == string(data) {
+		return nil // not found — no-op
+	}
+	return os.WriteFile(configPath, []byte(result), 0o600)
+}
+
+// removeMCPServerBlock removes the [[mcp.servers]] block for serverName from
+// the raw TOML text and returns the modified text. Returns the original text
+// unchanged if the block is not found.
+func removeMCPServerBlock(text, serverName string) string {
+	lines := strings.Split(text, "\n")
+
+	currentBlockStart := -1
+	targetStart := -1
+	targetEnd := -1
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// [[mcp.servers]] starts a new block
+		if trimmed == "[[mcp.servers]]" {
+			if targetStart >= 0 {
+				targetEnd = i
+				break
+			}
+			currentBlockStart = i
+			continue
+		}
+
+		// Any [[...]] other than [[mcp.servers]] ends the current block
+		if strings.HasPrefix(trimmed, "[[") && strings.HasSuffix(trimmed, "]]") {
+			if targetStart >= 0 {
+				targetEnd = i
+				break
+			}
+			currentBlockStart = -1
+			continue
+		}
+
+		// [mcp.servers.*] is a sub-table that belongs to the current block; skip it
+		if strings.HasPrefix(trimmed, "[mcp.servers.") && strings.HasSuffix(trimmed, "]") {
+			continue
+		}
+
+		// Any other [section] header ends the current block
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			if targetStart >= 0 {
+				targetEnd = i
+				break
+			}
+			currentBlockStart = -1
+			continue
+		}
+
+		// Skip comments
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		// Check name field within the current block
+		if currentBlockStart >= 0 && targetStart < 0 && isMCPNameField(trimmed, serverName) {
+			targetStart = currentBlockStart
+		}
+	}
+
+	if targetStart < 0 {
+		return text // not found
+	}
+	if targetEnd < 0 {
+		targetEnd = len(lines)
+	}
+
+	result := make([]string, 0, len(lines)-(targetEnd-targetStart))
+	result = append(result, lines[:targetStart]...)
+	result = append(result, lines[targetEnd:]...)
+	return strings.Join(result, "\n")
+}
+
+// isMCPNameField reports whether the trimmed TOML line is a name field with the
+// given value (e.g. `name = "github"` or `name = 'github'`).
+func isMCPNameField(trimmed, serverName string) bool {
+	parts := strings.SplitN(trimmed, "=", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	if strings.TrimSpace(parts[0]) != "name" {
+		return false
+	}
+	val := strings.TrimSpace(parts[1])
+	if len(val) < 2 {
+		return false
+	}
+	if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
+		return val[1:len(val)-1] == serverName
+	}
+	return false
+}
+
 // tomlString returns value as a quoted TOML string literal.
 func tomlString(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)

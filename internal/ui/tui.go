@@ -180,6 +180,7 @@ type compactDoneMsg struct {
 
 // registryLoadedMsg carries a page of servers from the MCP registry.
 type registryLoadedMsg struct {
+	seq        uint64
 	servers    []registry.Server
 	nextCursor string
 	err        error
@@ -187,6 +188,12 @@ type registryLoadedMsg struct {
 
 // registrySavedMsg reports the result of saving a registry server to config.
 type registrySavedMsg struct {
+	cfg config.MCPServerConfig
+	err error
+}
+
+// registryRemovedMsg reports the result of removing a registry server from config.
+type registryRemovedMsg struct {
 	name string
 	err  error
 }
@@ -376,14 +383,21 @@ func (s skillItem) Description() string {
 }
 
 // registryItem implements list.Item for the MCP registry picker.
-type registryItem struct{ srv registry.Server }
+type registryItem struct {
+	srv       registry.Server
+	installed bool
+}
 
 func (r registryItem) FilterValue() string { return r.srv.Title + " " + r.srv.Name }
 func (r registryItem) Title() string {
+	t := r.srv.Title
 	if r.srv.HasPackage {
-		return r.srv.Title + "  (requires install)"
+		t += "  (requires install)"
 	}
-	return r.srv.Title
+	if r.installed {
+		t += "  ✓"
+	}
+	return t
 }
 func (r registryItem) Description() string {
 	desc := r.srv.Description
@@ -397,6 +411,27 @@ func (r registryItem) Description() string {
 	}
 	return desc
 }
+
+// registryInstalledItem implements list.Item for the installed-servers tab.
+type registryInstalledItem struct{ srv config.MCPServerConfig }
+
+func (r registryInstalledItem) Title() string {
+	return r.srv.Name
+}
+func (r registryInstalledItem) Description() string {
+	switch r.srv.Transport {
+	case config.MCPTransportStreamable, config.MCPTransportSSE:
+		u := r.srv.URL
+		if u == "" {
+			u = "(no URL)"
+		}
+		return string(r.srv.Transport) + " — " + u
+	case config.MCPTransportStdio:
+		return "stdio — " + r.srv.Command
+	}
+	return string(r.srv.Transport)
+}
+func (r registryInstalledItem) FilterValue() string { return r.srv.Name }
 
 // SessionOptions configures optional session persistence behaviour for RunTUI.
 type SessionOptions struct {
@@ -413,6 +448,9 @@ type SessionOptions struct {
 	// PersistMCPServer, if non-nil, is called when the user adds an MCP server
 	// from the registry browser (saves it to the config file).
 	PersistMCPServer func(cfg config.MCPServerConfig) error
+	// RemoveMCPServer, if non-nil, is called when the user removes an MCP server
+	// in the registry browser (removes it from the config file).
+	RemoveMCPServer func(serverName string) error
 	// Skills is the list of loaded skills to mention in the system prompt.
 	Skills []skills.Skill
 	// TodoStore, if non-nil, enables the AI-managed todo sidebar.
@@ -540,13 +578,46 @@ func init() {
 			description: "Browse and add MCP servers from the Model Context Protocol registry",
 			action: func(m *Model) []tea.Cmd {
 				m.state = statePickingRegistry
-				m.registryPicker = list.New(nil, list.NewDefaultDelegate(), m.width, m.height-fixedLines)
-				m.registryPicker.Title = "MCP Registry — press Enter to add, Esc to close"
+				m.registryTab = 0
+
+				// Snapshot installed names.
+				m.registryInstalledNames = make(map[string]bool, len(m.configuredMCPServers))
+				for _, srv := range m.configuredMCPServers {
+					m.registryInstalledNames[srv.Name] = true
+				}
+
+				// Browse list (live-search; no local filter).
+				m.registryPicker = list.New(nil, list.NewDefaultDelegate(), m.width, m.height-fixedLines-2)
+				m.registryPicker.Title = "MCP Registry  [Browse | Tab → Installed]  — Enter to add · Esc to close"
 				m.registryPicker.SetShowStatusBar(true)
-				m.registryPicker.SetFilteringEnabled(true)
+				m.registryPicker.SetFilteringEnabled(false)
+				m.registryPicker.DisableQuitKeybindings()
+
+				// Search input.
+				si := textinput.New()
+				si.Placeholder = "type to search registry…"
+				si.Prompt = "Search: "
+				si.CharLimit = 100
+				si.Width = m.width - 12
+				si.Focus()
+				m.registrySearchInput = si
+
+				// Installed list.
+				m.registryInstalledList = list.New(
+					buildInstalledItems(m.configuredMCPServers),
+					list.NewDefaultDelegate(),
+					m.width,
+					m.height-fixedLines,
+				)
+				m.registryInstalledList.Title = "Installed MCP Servers  [Tab → Browse]  — Ctrl+D to remove · Esc to close"
+				m.registryInstalledList.SetShowStatusBar(true)
+				m.registryInstalledList.SetFilteringEnabled(true)
+				m.registryInstalledList.DisableQuitKeybindings()
+
 				ctx, cancel := context.WithCancel(m.ctx)
 				m.registryCancelCtx = cancel
-				return []tea.Cmd{doFetchRegistry(ctx, "", "")}
+				m.registrySearchSeq++
+				return []tea.Cmd{doFetchRegistry(ctx, m.registrySearchSeq, "", "")}
 			},
 		},
 		{
@@ -788,11 +859,21 @@ type Model struct {
 	completionIdx  int
 
 	// Registry browser state (only valid during statePickingRegistry).
-	registryPicker     list.Model
-	registryNextCursor string // non-empty if another page can be loaded
-	registryCancelCtx  context.CancelFunc
+	registryPicker        list.Model
+	registryNextCursor    string // non-empty if another page can be loaded
+	registryCancelCtx     context.CancelFunc
+	registryTab           int             // 0 = browse, 1 = installed
+	registrySearchInput   textinput.Model
+	registrySearchSeq     uint64          // for stale-result detection
+	registryInstalledList list.Model
+	// configuredMCPServers is the mutable live list of all configured MCP servers.
+	// Starts from opts.MCPServers and updated on add/remove in the registry browser.
+	configuredMCPServers   []config.MCPServerConfig
+	registryInstalledNames map[string]bool // set from configuredMCPServers; rebuilt on change
 	// persistMCPServer, if non-nil, saves a server to the config file.
 	persistMCPServer func(cfg config.MCPServerConfig) error
+	// removeRegistryServer, if non-nil, removes a server from the config file.
+	removeRegistryServer func(serverName string) error
 
 	// Todo sidebar.
 	todoStore   *todostore.Store
@@ -1557,20 +1638,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingRegistry:
 			switch msg.Type {
 			case tea.KeyEsc, tea.KeyCtrlC:
-				if m.registryCancelCtx != nil {
-					m.registryCancelCtx()
-					m.registryCancelCtx = nil
+				// On browse tab: Esc clears search first, then closes on second press.
+				if m.registryTab == 0 && m.registrySearchInput.Value() != "" {
+					m.registrySearchInput.Reset()
+					if m.registryCancelCtx != nil {
+						m.registryCancelCtx()
+					}
+					ctx, cancel := context.WithCancel(m.ctx)
+					m.registryCancelCtx = cancel
+					m.registrySearchSeq++
+					cmds = append(cmds, doFetchRegistry(ctx, m.registrySearchSeq, "", ""))
+				} else {
+					if m.registryCancelCtx != nil {
+						m.registryCancelCtx()
+						m.registryCancelCtx = nil
+					}
+					m.state = stateIdle
+					m.updateCompletion()
+					cmds = append(cmds, m.input.Focus())
 				}
-				m.state = stateIdle
-				m.updateCompletion()
-				cmds = append(cmds, m.input.Focus())
+
+			case tea.KeyTab:
+				m.registryTab = 1 - m.registryTab
+
 			case tea.KeyEnter:
-				if sel := m.registryPicker.SelectedItem(); sel != nil {
-					srv := sel.(registryItem).srv
-					if srv.HasPackage {
+				if m.registryTab == 0 {
+					sel := m.registryPicker.SelectedItem()
+					if sel == nil {
+						break
+					}
+					ri := sel.(registryItem)
+					if ri.installed {
 						m.items = append(m.items, displayItem{
 							kind:    itemInfo,
-							content: `Server "` + srv.Title + `" requires a local package install and cannot be added automatically. See: https://registry.modelcontextprotocol.io`,
+							content: `"` + ri.srv.Title + `" is already installed.`,
+						})
+						needRebuild = true
+						break
+					}
+					if ri.srv.HasPackage {
+						m.items = append(m.items, displayItem{
+							kind:    itemInfo,
+							content: `Server "` + ri.srv.Title + `" requires a local package install and cannot be added automatically. See: https://registry.modelcontextprotocol.io`,
 						})
 						needRebuild = true
 						break
@@ -1583,12 +1692,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						needRebuild = true
 						break
 					}
-					cmds = append(cmds, doSaveMCPServer(srv, m.persistMCPServer))
+					cmds = append(cmds, doSaveMCPServer(ri.srv, m.persistMCPServer))
 				}
+
+			case tea.KeyCtrlD:
+				if m.registryTab == 1 {
+					sel := m.registryInstalledList.SelectedItem()
+					if sel == nil {
+						break
+					}
+					srv := sel.(registryInstalledItem).srv
+					if m.removeRegistryServer == nil {
+						m.items = append(m.items, displayItem{
+							kind:    itemError,
+							content: "Config persistence is not available in this session.",
+						})
+						needRebuild = true
+						break
+					}
+					cmds = append(cmds, doRemoveMCPServer(srv.Name, m.removeRegistryServer))
+				}
+
 			default:
-				var pickerCmd tea.Cmd
-				m.registryPicker, pickerCmd = m.registryPicker.Update(msg)
-				cmds = append(cmds, pickerCmd)
+				if m.registryTab == 0 {
+					// Text keys go to search input; nav keys go to list.
+					prev := m.registrySearchInput.Value()
+					var searchCmd tea.Cmd
+					m.registrySearchInput, searchCmd = m.registrySearchInput.Update(msg)
+					cmds = append(cmds, searchCmd)
+					if m.registrySearchInput.Value() != prev {
+						if m.registryCancelCtx != nil {
+							m.registryCancelCtx()
+						}
+						ctx, cancel := context.WithCancel(m.ctx)
+						m.registryCancelCtx = cancel
+						m.registrySearchSeq++
+						cmds = append(cmds, doFetchRegistry(ctx, m.registrySearchSeq, m.registrySearchInput.Value(), ""))
+					}
+					switch msg.Type {
+					case tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown:
+						var listCmd tea.Cmd
+						m.registryPicker, listCmd = m.registryPicker.Update(msg)
+						cmds = append(cmds, listCmd)
+					}
+				} else {
+					var listCmd tea.Cmd
+					m.registryInstalledList, listCmd = m.registryInstalledList.Update(msg)
+					cmds = append(cmds, listCmd)
+				}
 			}
 
 		case stateConnectingMCP:
@@ -1893,7 +2044,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case registryLoadedMsg:
-		if m.state == statePickingRegistry {
+		if m.state == statePickingRegistry && msg.seq == m.registrySearchSeq {
 			if msg.err != nil {
 				m.items = append(m.items, displayItem{
 					kind:    itemError,
@@ -1906,15 +2057,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			items := make([]list.Item, len(msg.servers))
 			for i, s := range msg.servers {
-				items[i] = registryItem{s}
+				items[i] = registryItem{srv: s, installed: m.registryInstalledNames[s.Name]}
 			}
 			m.registryNextCursor = msg.nextCursor
 			m.registryPicker.SetItems(items)
-			m.registryPicker.SetSize(m.width, m.height-fixedLines)
+			m.registryPicker.SetSize(m.width, m.height-fixedLines-2)
 		}
 
 	case registrySavedMsg:
-		content := `Added MCP server "` + msg.name + `" — restart werkler to connect.`
+		if msg.err == nil {
+			// Keep configuredMCPServers in sync.
+			alreadyKnown := false
+			for _, s := range m.configuredMCPServers {
+				if s.Name == msg.cfg.Name {
+					alreadyKnown = true
+					break
+				}
+			}
+			if !alreadyKnown {
+				m.configuredMCPServers = append(m.configuredMCPServers, msg.cfg)
+				m.rebuildRegistryInstalledState()
+			}
+		}
+		content := `Added MCP server "` + msg.cfg.Name + `" — restart werkler to connect.`
 		if msg.err != nil {
 			content = "Failed to save MCP server: " + msg.err.Error()
 		}
@@ -1925,6 +2090,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.items = append(m.items, displayItem{kind: itemInfo, content: content})
 		needRebuild = true
 		cmds = append(cmds, m.input.Focus())
+
+	case registryRemovedMsg:
+		if msg.err == nil {
+			filtered := m.configuredMCPServers[:0]
+			for _, s := range m.configuredMCPServers {
+				if s.Name != msg.name {
+					filtered = append(filtered, s)
+				}
+			}
+			m.configuredMCPServers = filtered
+			if m.state == statePickingRegistry {
+				m.rebuildRegistryInstalledState()
+			}
+		}
+		content := `Removed MCP server "` + msg.name + `" — restart werkler to apply.`
+		if msg.err != nil {
+			content = "Failed to remove MCP server: " + msg.err.Error()
+		}
+		m.items = append(m.items, displayItem{kind: itemInfo, content: content})
+		needRebuild = true
 
 	case sessionHintMsg:
 		m.resumeHint = msg.sess
@@ -2022,6 +2207,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modelPicker.SetSize(m.width, m.height-fixedLines)
 		m.toolPicker.SetSize(m.width, m.height-fixedLines)
 		m.skillPicker.SetSize(m.width, m.height-fixedLines)
+		if m.state == statePickingRegistry {
+			m.registryPicker.SetSize(m.width, m.height-fixedLines-2)
+			m.registryInstalledList.SetSize(m.width, m.height-fixedLines)
+			m.registrySearchInput.Width = m.width - 12
+		}
 		m.recalcLayout() // sets viewport.Width, input.Width, viewport.Height
 		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
 		needRebuild = true
@@ -2370,7 +2560,7 @@ func (m Model) View() string {
 		return m.skillPicker.View()
 	}
 	if m.state == statePickingRegistry {
-		return m.registryPicker.View()
+		return m.registryView()
 	}
 
 	sep := separator(m.width)
@@ -3443,13 +3633,13 @@ func (m *Model) applyCompaction(summary string) []tea.Cmd {
 
 // doFetchRegistry fetches a page of servers from the MCP registry.
 // search is the query string (may be empty). cursor is empty for the first page.
-func doFetchRegistry(ctx context.Context, search, cursor string) tea.Cmd {
+func doFetchRegistry(ctx context.Context, seq uint64, search, cursor string) tea.Cmd {
 	return func() tea.Msg {
 		page, err := registry.Fetch(ctx, search, cursor, 50)
 		if err != nil {
-			return registryLoadedMsg{err: err}
+			return registryLoadedMsg{seq: seq, err: err}
 		}
-		return registryLoadedMsg{servers: page.Servers, nextCursor: page.NextCursor}
+		return registryLoadedMsg{seq: seq, servers: page.Servers, nextCursor: page.NextCursor}
 	}
 }
 
@@ -3461,8 +3651,38 @@ func doSaveMCPServer(srv registry.Server, persistFn func(config.MCPServerConfig)
 			Transport: config.MCPTransportStreamable,
 			URL:       srv.FirstRemoteURL(),
 		}
-		return registrySavedMsg{name: srv.Name, err: persistFn(cfg)}
+		return registrySavedMsg{cfg: cfg, err: persistFn(cfg)}
 	}
+}
+
+// doRemoveMCPServer calls removeFn to delete the server config from disk.
+func doRemoveMCPServer(name string, removeFn func(string) error) tea.Cmd {
+	return func() tea.Msg {
+		return registryRemovedMsg{name: name, err: removeFn(name)}
+	}
+}
+
+func (m Model) registryView() string {
+	if m.registryTab == 1 {
+		return m.registryInstalledList.View()
+	}
+	return m.registrySearchInput.View() + "\n" + m.registryPicker.View()
+}
+
+func (m *Model) rebuildRegistryInstalledState() {
+	m.registryInstalledNames = make(map[string]bool, len(m.configuredMCPServers))
+	for _, s := range m.configuredMCPServers {
+		m.registryInstalledNames[s.Name] = true
+	}
+	m.registryInstalledList.SetItems(buildInstalledItems(m.configuredMCPServers))
+}
+
+func buildInstalledItems(servers []config.MCPServerConfig) []list.Item {
+	items := make([]list.Item, len(servers))
+	for i, srv := range servers {
+		items[i] = registryInstalledItem{srv}
+	}
+	return items
 }
 
 func (m *Model) filteredFromAllDefs() []ai.ToolDefinition {
@@ -3826,6 +4046,11 @@ func RunTUI(
 	m.persistToolApproval = opts.PersistToolApproval
 	m.persistPathApproval = opts.PersistPathApproval
 	m.persistMCPServer = opts.PersistMCPServer
+	m.removeRegistryServer = opts.RemoveMCPServer
+	if opts.MCPServers != nil {
+		m.configuredMCPServers = make([]config.MCPServerConfig, len(opts.MCPServers))
+		copy(m.configuredMCPServers, opts.MCPServers)
+	}
 	if opts.TodoStore != nil {
 		m.todoStore = opts.TodoStore
 		m.todoStore.SetNotify(func() {
