@@ -319,22 +319,38 @@ func TestUpdate_ToolResult_Success_ProcessesNext(t *testing.T) {
 	assert.Equal(t, "result text", last.Content)
 }
 
-func TestUpdate_ToolResult_Failure_GoesIdle_KeepsQueue(t *testing.T) {
+func TestUpdate_ToolResult_Failure_InformsAI(t *testing.T) {
+	sc := &mockStreamCompleter{}
+	sc.On("CompleteStream", mock.Anything, mock.Anything, mock.Anything).
+		Return(chanOf(ai.StreamChunk{Done: true, Msg: ai.Message{Role: "assistant", Content: "ok"}}))
+
 	tm := &mockToolManager{}
 	session := chat.NewSession(tm, nil, nil)
-	m := initialModel(context.Background(), nil, session, nil, "m", nil, "dark", nil)
+	m := initialModel(context.Background(), sc, session, nil, "m", nil, "dark", nil)
 	m.state = stateCallingTool
 	m.callingToolName = "bad_tool"
 	m.toolCallIdx["c1"] = 0
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusRunning})
 	m.queuedPrompts = []string{"follow-up"}
+	// Pre-seed an assistant message with a tool call so history is valid.
+	m.messages = append(m.messages, ai.Message{
+		Role:      "assistant",
+		ToolCalls: []ai.ToolCall{{ID: "c1", Name: "bad_tool"}},
+	})
 
 	m, _ = update(t, m, toolResultMsg{callID: "c1", toolName: "bad_tool", err: assert.AnError})
 
-	assert.Equal(t, stateIdle, m.state)
+	// Tool item marked failed in display.
 	assert.Equal(t, toolStatusFailed, m.items[0].toolStatus)
-	// Queue must be preserved on error — not consumed.
-	require.Len(t, m.queuedPrompts, 1, "queued prompts must survive tool errors")
+	// Error forwarded to AI as a tool result message.
+	last := m.messages[len(m.messages)-1]
+	assert.Equal(t, "tool", last.Role)
+	assert.Equal(t, "c1", last.ToolCallID)
+	assert.Contains(t, last.Content, "Error:")
+	// New stream started so AI can respond.
+	assert.Equal(t, stateThinking, m.state)
+	// Queued prompts preserved.
+	require.Len(t, m.queuedPrompts, 1)
 	assert.Nil(t, m.pendingCalls)
 	assert.Nil(t, m.currentCall)
 }

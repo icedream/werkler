@@ -1549,18 +1549,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingApprovalChoice = ""
 				needRebuild = true
 			default:
-				// Tool execution error: go idle but keep queued prompts intact.
+				// Tool execution error: add the error as a tool result so the AI
+				// can see it and decide how to recover. Mark remaining calls as
+				// not-executed and let the AI respond via a new stream.
 				if idx, ok := m.toolCallIdx[msg.callID]; ok {
 					m.items[idx].toolStatus = toolStatusFailed
 				}
-				m.items = append(m.items, displayItem{kind: itemError, content: msg.err.Error()})
-				m.callingToolName = ""
-				m.executingCall = nil
+				m.messages = append(m.messages, ai.Message{
+					Role:       "tool",
+					ToolCallID: msg.callID,
+					Content:    "Error: " + msg.err.Error(),
+				})
+				for _, pc := range m.pendingCalls {
+					m.messages = append(m.messages, ai.Message{
+						Role:       "tool",
+						ToolCallID: pc.ID,
+						Content:    "(not executed — previous call failed)",
+					})
+					if idx, ok := m.toolCallIdx[pc.ID]; ok {
+						m.items[idx].toolStatus = toolStatusFailed
+					}
+				}
 				m.pendingCalls = nil
+				m.executingCall = nil
 				m.currentCall = nil
-				m.state = stateIdle
+				m.callingToolName = ""
 				needRebuild = true
-				cmds = append(cmds, m.input.Focus())
+				cmds = append(cmds, m.processNextCall())
 			}
 		} else {
 			debugLog("toolResult: ok tool=%q result=%q", msg.toolName, msg.result[:min(len(msg.result), 80)])
