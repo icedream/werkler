@@ -208,6 +208,12 @@ type mcpToolsRefreshedMsg struct {
 	err   error
 }
 
+// modelInfoMsg is sent when a GetModelInfo probe completes.
+type modelInfoMsg struct {
+	info ai.ModelInfo
+	err  error
+}
+
 // modelItem implements list.Item for a model picker entry.
 type modelItem struct{ ai.ModelItem }
 
@@ -485,6 +491,11 @@ type Model struct {
 	modelName   string
 	serverNames []string
 
+	// modelInfo holds the most recently fetched model metadata (e.g. context
+	// window size). It is refetched on model switches and used when building
+	// the system prompt for new conversations.
+	modelInfo ai.ModelInfo
+
 	// mouseEnabled tracks whether the terminal mouse reporting mode is active.
 	// When false, the terminal handles mouse events natively (text selection works).
 	mouseEnabled bool
@@ -593,21 +604,25 @@ func initialModel(
 
 // --- Slash-command helpers ---
 
-// newConversation builds an initial messages list for a fresh conversation,
-// injecting a skills hint into the system prompt when skills are loaded.
+// newConversation builds an initial messages list for a fresh conversation.
+// The system prompt is enriched with skills hints and live model info.
+// Always builds from the canonical base prompt to avoid duplication on rebuild.
 func (m *Model) newConversation() []ai.Message {
-	if len(m.skills) == 0 {
-		return chat.NewConversation()
+	var extras []string
+	if len(m.skills) > 0 {
+		parts := make([]string, len(m.skills))
+		for i, s := range m.skills {
+			parts[i] = s.Name + ": " + s.Description
+		}
+		hint := "Available skills (call use_skill to load instructions):\n"
+		for _, p := range parts {
+			hint += "- " + p + "\n"
+		}
+		extras = append(extras, strings.TrimRight(hint, "\n"))
 	}
-	parts := make([]string, len(m.skills))
-	for i, s := range m.skills {
-		parts[i] = s.Name + ": " + s.Description
-	}
-	hint := "Available skills (call use_skill to load instructions):\n"
-	for _, p := range parts {
-		hint += "- " + p + "\n"
-	}
-	return chat.NewConversation(strings.TrimRight(hint, "\n"))
+	msgs := chat.NewConversation(extras...)
+	msgs[0].Content = chat.EnrichSystemPrompt(msgs[0].Content, m.modelInfo)
+	return msgs
 }
 
 // filteredCmds returns slash commands whose names start with the given prefix
@@ -688,6 +703,9 @@ func (m Model) Init() tea.Cmd {
 	}
 	if len(m.mcpInitCmds) > 0 {
 		cmds = append(cmds, m.mcpInitCmds...)
+	}
+	if getter, ok := m.client.(ai.ModelInfoGetter); ok {
+		cmds = append(cmds, doGetModelInfo(m.ctx, getter))
 	}
 	return tea.Batch(cmds...)
 }
@@ -1036,6 +1054,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					item := sel.(modelItem)
 					m.modelManager.SetModel(item.ModelItem)
 					m.modelName = item.Display()
+					// Invalidate cached model info and re-fetch for the new model.
+					m.modelInfo = ai.ModelInfo{}
+					if getter, ok := m.client.(ai.ModelInfoGetter); ok {
+						cmds = append(cmds, doGetModelInfo(m.ctx, getter))
+					}
 				}
 				m.state = stateIdle
 				m.updateCompletion()
@@ -1266,6 +1289,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Placeholder = inputPlaceholder(stateIdle)
 		m.updateCompletion()
 		needRebuild = true
+
+	case modelInfoMsg:
+		if msg.err == nil && msg.info.HasContext() {
+			m.modelInfo = msg.info
+			// Update the system prompt in a fresh (non-resumed) conversation.
+			// A conversation is considered fresh when it has only the system message
+			// and no user turns yet.
+			if len(m.messages) == 1 && m.messages[0].Role == "system" {
+				m.messages = m.newConversation()
+			}
+		}
 
 	case modelsLoadedMsg:
 		// Only process if we're still in model-picking state (guard against stale results).
@@ -2119,6 +2153,13 @@ func doRefreshMCPTools(ctx context.Context, session *chat.Session) tea.Cmd {
 	return func() tea.Msg {
 		tools, err := session.Tools(ctx)
 		return mcpToolsRefreshedMsg{tools: tools, err: err}
+	}
+}
+
+func doGetModelInfo(ctx context.Context, getter ai.ModelInfoGetter) tea.Cmd {
+	return func() tea.Msg {
+		info, err := getter.GetModelInfo(ctx)
+		return modelInfoMsg{info: info, err: err}
 	}
 }
 

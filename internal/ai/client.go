@@ -15,8 +15,9 @@ import (
 
 // Client wraps the OpenAI-compatible API for chat completions with tool use.
 type Client struct {
-	inner openai.Client
-	model string
+	inner    openai.Client
+	model    string
+	endpoint string // base URL, stored for provider-specific probing (e.g. Ollama /api/show)
 }
 
 // New creates a Client using the given base URL, API key and model name.
@@ -24,8 +25,9 @@ func New(endpoint, apiKey, model string) *Client {
 	cfg := openai.DefaultConfig(apiKey)
 	cfg.BaseURL = endpoint
 	return &Client{
-		inner: *openai.NewClientWithConfig(cfg),
-		model: model,
+		inner:    *openai.NewClientWithConfig(cfg),
+		model:    model,
+		endpoint: endpoint,
 	}
 }
 
@@ -111,8 +113,9 @@ func NewWithHTTPClient(baseURL, model string, httpClient *http.Client) *Client {
 	cfg.BaseURL = baseURL
 	cfg.HTTPClient = httpClient
 	return &Client{
-		inner: *openai.NewClientWithConfig(cfg),
-		model: model,
+		inner:    *openai.NewClientWithConfig(cfg),
+		model:    model,
+		endpoint: baseURL,
 	}
 }
 
@@ -367,4 +370,82 @@ func fromOpenAIMessage(m openai.ChatCompletionMessage) (Message, error) {
 		})
 	}
 	return msg, nil
+}
+
+// GetModelInfo probes the provider for model metadata. Currently only Ollama
+// is supported: it tries <base>/api/show (stripping a /v1 suffix from the
+// configured endpoint). Returns an empty ModelInfo without error for
+// non-Ollama providers or when the probe fails.
+//
+// For Ollama, num_ctx from the Modelfile parameters is preferred over the
+// architectural context length because it reflects the actually-configured
+// context window.
+func (c *Client) GetModelInfo(ctx context.Context) (ModelInfo, error) {
+	base := strings.TrimSuffix(strings.TrimSuffix(strings.TrimRight(c.endpoint, "/"), "/v1"), "/")
+	if base == "" {
+		return ModelInfo{}, nil
+	}
+
+	type showRequest struct {
+		Model string `json:"model"`
+	}
+	body, err := json.Marshal(showRequest{Model: c.model})
+	if err != nil {
+		return ModelInfo{}, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/show", strings.NewReader(string(body)))
+	if err != nil {
+		return ModelInfo{}, nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ModelInfo{}, nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var payload struct {
+		Parameters string         `json:"parameters"`
+		ModelInfo  map[string]any `json:"model_info"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return ModelInfo{}, nil
+	}
+
+	info := ModelInfo{Model: c.model}
+
+	// Prefer num_ctx from the Modelfile parameters (effective limit) over the
+	// architectural maximum reported in model_info.
+	if n := parseNumCtx(payload.Parameters); n > 0 {
+		info.Context.MaxTokens = n
+	} else {
+		// Fall back to the architectural context length from model_info.
+		for k, v := range payload.ModelInfo {
+			if strings.HasSuffix(k, ".context_length") {
+				if f, ok := v.(float64); ok {
+					info.Context.MaxTokens = int(f)
+					break
+				}
+			}
+		}
+	}
+	return info, nil
+}
+
+// parseNumCtx extracts the num_ctx value from an Ollama parameters string.
+// The format is one parameter per line: "num_ctx    4096".
+// Returns 0 if not present.
+func parseNumCtx(params string) int {
+	for _, line := range strings.Split(params, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "num_ctx" {
+			var n int
+			if _, err := fmt.Sscanf(fields[1], "%d", &n); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }

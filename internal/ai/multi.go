@@ -211,3 +211,16 @@ func (mc *MultiClient) ListModels(ctx context.Context) ([]ModelItem, error) {
 	}
 	return out, nil
 }
+
+// GetModelInfo delegates to the active provider's ModelInfoGetter if supported.
+// Returns empty ModelInfo without error when the active provider doesn't support it.
+func (mc *MultiClient) GetModelInfo(ctx context.Context) (ModelInfo, error) {
+	e := mc.activeEntry()
+	if e == nil {
+		return ModelInfo{}, nil
+	}
+	if g, ok := e.sc.(ModelInfoGetter); ok {
+		return g.GetModelInfo(ctx)
+	}
+	return ModelInfo{}, nil
+}

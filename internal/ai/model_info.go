@@ -1,38 +1,28 @@
 package ai
 
-// ModelInfo contains metadata about an AI model's capabilities and limitations.
+import "context"
+
+// ModelInfo contains metadata about an AI model's capabilities.
 type ModelInfo struct {
-	// Model name or identifier
+	// Model is the model name or identifier.
 	Model string
-	
-	// Context represents the model's token context window
+
+	// Context holds the model's token window limits.
 	Context struct {
-		// MaxInputTokens is the maximum number of tokens allowed in the input/prompt
-		MaxInputTokens int
-		
-		// MaxOutputTokens is the maximum number of tokens allowed in the output/completion
-		MaxOutputTokens int
+		// MaxTokens is the effective context window size (tokens).
+		// For Ollama, this is the active num_ctx value (overrides the
+		// architectural default when set in the Modelfile or at runtime).
+		MaxTokens int
 	}
-	
-	// SupportedFeatures lists features the model supports
-	SupportedFeatures []string
 }
 
-// HasContext returns true if the model has defined context limits.
+// HasContext reports whether ModelInfo contains a usable context limit.
 func (m ModelInfo) HasContext() bool {
-	return m.Context.MaxInputTokens > 0 || m.Context.MaxOutputTokens > 0
+	return m.Context.MaxTokens > 0
 }
 
-// ModelInfoProvider is an optional interface that AI clients can implement
-// to expose model info for better context-aware prompting.
-type ModelInfoProvider interface {
-	GetModelInfo() ModelInfo
-}
-
-// ModelInfoRetriever can be used by external systems to get model info.
-// This allows MCP servers or other extensions to provide model-specific metadata.
-type ModelInfoRetriever interface {
-	// GetModelContextLimits retrieves model context limits for the given model name.
-	// Returns empty ModelInfo if no limits are available.
-	GetModelContextLimits(modelName string) (ModelInfo, error)
+// ModelInfoGetter is an optional interface implemented by AI clients that can
+// fetch live model metadata (e.g. context window size) from the provider.
+type ModelInfoGetter interface {
+	GetModelInfo(ctx context.Context) (ModelInfo, error)
 }
