@@ -228,6 +228,32 @@ transport = "..."
 # transport-specific fields follow
 ```
 
+### Lazy connection
+
+MCP servers are **not connected at startup**. Instead, they are registered
+with the AI as a list of "available but not yet connected" servers. The AI
+calls the built-in `connect_server` tool whenever it decides a server's tools
+would help with the current task, and the connection happens at that point.
+
+This keeps startup instant and avoids connecting servers the AI never ends up
+needing.
+
+#### Helping the AI decide: the `hint` field
+
+Without a hint, the AI only knows a server by name and has to guess what tools
+it might provide. A short `hint` tells it up front:
+
+```toml
+[[mcp.servers]]
+name      = "github"
+transport = "streamable"
+url       = "https://api.githubcopilot.com/mcp/"
+hint      = "GitHub — search repos, read issues and PRs, create comments"
+```
+
+The hint is injected into the system prompt before every AI turn. Keep it to
+one sentence. If no hint is set, the server name alone is shown.
+
 ### Built-in filesystem server
 
 A built-in read/write filesystem server is bundled with Werkler. It does not
@@ -338,9 +364,13 @@ Make sure to use `http://localhost:34217/callback` as callback URL. Adjust the p
 
 #### How authentication works
 
-OAuth-enabled servers are not connected at startup. The first time you submit
-a prompt that requires those tools, Werkler pauses and shows you a browser
-link directly in the chat:
+OAuth-enabled servers follow the same lazy connection model as other servers
+— they are not connected at startup — but the connection itself triggers a
+browser-based flow instead of a silent TCP connection.
+
+The first time you submit a prompt that causes the AI to call `connect_server`
+for an OAuth server, Werkler pauses and shows you a browser link directly in
+the chat:
 
 ```
 To connect to atlassian, open this URL in your browser:
