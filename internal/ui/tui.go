@@ -1401,19 +1401,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, doLoadSessions(m.sessionStore))
 				}
 
+			case tea.KeyPgUp, tea.KeyPgDown:
+				// Explicit page scroll — forward to viewport only (not to textinput).
+				var vpCmd tea.Cmd
+				m.viewport, vpCmd = m.viewport.Update(msg)
+				cmds = append(cmds, vpCmd)
+
 			default:
-				// Forward to textinput; do NOT forward to viewport when completion is
-				// showing (Up/Down are captured above; other nav keys close completion).
+				// Forward to textinput only. Do NOT forward to viewport: the viewport's
+				// default keymap binds printable runes (b, f, space, u, d, j, k, …) as
+				// scroll keys; forwarding them here would scroll the view while typing.
+				// Viewport scrolling is handled via arrow keys and PgUp/PgDn above.
 				var inputCmd tea.Cmd
 				m.input, inputCmd = m.input.Update(msg)
 				cmds = append(cmds, inputCmd)
 				m.updateCompletion()
-				if !m.showCompletion {
-					// Safe to forward scroll keys to viewport when completion is hidden.
-					var vpCmd tea.Cmd
-					m.viewport, vpCmd = m.viewport.Update(msg)
-					cmds = append(cmds, vpCmd)
-				}
 			}
 
 		case statePickingModel:
@@ -3675,11 +3677,11 @@ func RunTUI(
 		m.todoStore.SetNotify(func() {
 			todos := m.todoStore.List()
 			// Auto-open sidebar when the first todo is added.
-			if len(todos) == 1 {
-				sendFn(todoUpdateMsg{autoOpen: true})
-			} else {
-				sendFn(todoUpdateMsg{})
-			}
+			// Send in a goroutine: prog.Send blocks on an unbuffered channel and
+			// this callback can be called from within Update (e.g. applySession →
+			// todoStore.Restore), which would deadlock the event loop.
+			autoOpen := len(todos) == 1
+			go sendFn(todoUpdateMsg{autoOpen: autoOpen})
 		})
 	}
 	if opts.Autopilot {
