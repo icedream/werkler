@@ -45,7 +45,8 @@ Always use these built-in tools for file operations — do NOT use any fs__* MCP
 - file_delete  — delete a file
 - file_append  — append to a file
 
-Always call file_read on a file before calling file_edit — copy old_str verbatim from the file_read output, including exact whitespace and indentation.`
+Always call file_read on a file before calling file_edit — copy old_str verbatim from the file_read output, including exact whitespace and indentation.
+file_read output has line numbers like "   1│<line>" — these are decorative display only. Do NOT include them in file_write or file_edit content.`
 
 // maxAgentSteps is the maximum number of AI→tool round-trips per user turn,
 // preventing runaway loops from misbehaving or looping models.

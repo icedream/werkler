@@ -476,7 +476,8 @@ up, down, left, right, ctrl+a through ctrl+z, f1-f12.`,
 			def: ai.ToolDefinition{
 				Name: "file_read",
 				Description: `Read the contents of a file.
-Returns the content with line numbers, total line count, and the range returned.
+Returns content with line numbers (format: "   1│<line>"), total line count, and the range returned.
+Line numbers are decorative — do NOT include them when writing or editing file content.
 For large files, use start_line and end_line to read sections (1-indexed, inclusive).
 Returns an error for binary files; use process_start to handle those.`,
 				InputSchema: map[string]any{
@@ -870,10 +871,11 @@ func (m *Manager) handleFileRead(_ context.Context, args map[string]any) (string
 		}
 	}
 
-	// Format with line numbers.
+	// Format with line numbers. Use a │ separator that is visually distinct
+	// from file content so models don't copy the line-number prefix verbatim.
 	var sb strings.Builder
 	for i, l := range selected {
-		fmt.Fprintf(&sb, "%d\t%s\n", startLine+i, l)
+		fmt.Fprintf(&sb, "%4d│%s\n", startLine+i, l)
 	}
 
 	return jsonResult(map[string]any{
