@@ -21,6 +21,8 @@ import (
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
+	"github.com/icedream/werkler/internal/config"
+	mcppkg "github.com/icedream/werkler/internal/mcp"
 	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/tools"
@@ -51,6 +53,7 @@ const (
 	stateCallingTool
 	stateAwaitingApproval
 	stateAwaitingPathApproval // waiting for user to approve a path access
+	stateConnectingMCP        // MCP servers connecting in background
 	stateConnectingOAuth      // running deferred OAuth server connections
 	statePickingModel         // model selection list is open
 	statePickingSession       // session picker list is open
@@ -68,6 +71,8 @@ func inputPlaceholder(state tuiState) string {
 		return "Approve path access (y / n / a)…"
 	case stateAwaitingUserQuestion:
 		return "Use ↑/↓ to select a choice, Enter to confirm…"
+	case stateConnectingMCP:
+		return "Connecting to MCP servers…"
 	case stateConnectingOAuth:
 		return "Waiting for authorization in browser…"
 	case statePickingModel, statePickingSession, statePickingTools:
@@ -188,6 +193,21 @@ type askUserMsg struct {
 	resultCh      chan<- askUserResult
 }
 
+// mcpServerStatusMsg is sent by a background MCP connect tea.Cmd when a single
+// server finishes connecting (or fails, or is deferred for OAuth).
+type mcpServerStatusMsg struct {
+	name     string
+	deferred bool // true = OAuth deferred, not an error
+	err      error
+}
+
+// mcpToolsRefreshedMsg is sent after all MCP servers have finished connecting,
+// once the tool list has been re-fetched from the session.
+type mcpToolsRefreshedMsg struct {
+	tools []ai.ToolDefinition
+	err   error
+}
+
 // modelItem implements list.Item for a model picker entry.
 type modelItem struct{ ai.ModelItem }
 
@@ -261,6 +281,11 @@ type SessionOptions struct {
 	PersistPathApproval func(path string, write bool) error
 	// Skills is the list of loaded skills to mention in the system prompt.
 	Skills []skills.Skill
+	// MCPManager and MCPServers, when both non-nil/non-empty, enable background
+	// MCP server connection. The TUI starts in stateConnectingMCP and transitions
+	// to stateIdle once all servers have been connected (or failed).
+	MCPManager *mcppkg.Manager
+	MCPServers []config.MCPServerConfig
 }
 
 // --- Slash commands ---
@@ -467,6 +492,19 @@ type Model struct {
 	// skills holds loaded skills, used to build the system prompt hint.
 	skills []skills.Skill
 
+	// MCP background connection state.
+	// mcpManager is the manager used for ConnectOne calls during startup.
+	// mcpPending is decremented by each mcpServerStatusMsg; when it hits 0,
+	// doRefreshMCPTools is dispatched and state transitions to stateIdle.
+	// mcpConnectingInfoIdx is the index of the status display item.
+	// mcpInitCmds holds the per-server tea.Cmds returned from Init().
+	mcpManager           *mcppkg.Manager
+	mcpPending           int
+	mcpConnected         int
+	mcpFailed            int
+	mcpConnectingInfoIdx int
+	mcpInitCmds          []tea.Cmd
+
 	// Slash-command autocomplete state.
 	// showCompletion is derived: true when state==stateIdle and input starts with "/".
 	// completionIdx is the currently highlighted item in the completion popup.
@@ -647,6 +685,9 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.sessionStore != nil {
 		cmds = append(cmds, doLoadSessionHint(m.sessionStore, m.sessionCWD))
+	}
+	if len(m.mcpInitCmds) > 0 {
+		cmds = append(cmds, m.mcpInitCmds...)
 	}
 	return tea.Batch(cmds...)
 }
@@ -1050,6 +1091,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, pickerCmd)
 			}
 
+		case stateConnectingMCP:
+			// Block all text input; only allow viewport scrolling.
+			var vpCmd tea.Cmd
+			m.viewport, vpCmd = m.viewport.Update(msg)
+			cmds = append(cmds, vpCmd)
+
 		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth:
 			switch msg.Type {
 			case tea.KeyEnter:
@@ -1154,6 +1201,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var vpCmd tea.Cmd
 		m.viewport, vpCmd = m.viewport.Update(msg)
 		cmds = append(cmds, vpCmd)
+
+	case mcpServerStatusMsg:
+		// One MCP server finished connecting (or failed, or was deferred for OAuth).
+		m.mcpPending--
+		if msg.err != nil {
+			m.mcpFailed++
+		} else {
+			m.mcpConnected++
+		}
+		// Update the connecting status item.
+		if m.mcpConnectingInfoIdx >= 0 && m.mcpConnectingInfoIdx < len(m.items) {
+			var content string
+			switch {
+			case m.mcpPending > 0:
+				content = fmt.Sprintf("⟳ Connecting to MCP servers… (%d/%d done", m.mcpConnected+m.mcpFailed, m.mcpConnected+m.mcpFailed+m.mcpPending)
+				if m.mcpFailed > 0 {
+					content += fmt.Sprintf(", %d failed", m.mcpFailed)
+				}
+				content += ")"
+			case m.mcpFailed == 0:
+				content = fmt.Sprintf("✓ Connected to %d MCP server(s)", m.mcpConnected)
+			default:
+				content = fmt.Sprintf("⚠ MCP servers: %d connected, %d failed", m.mcpConnected, m.mcpFailed)
+			}
+			m.items[m.mcpConnectingInfoIdx].content = content
+		}
+		needRebuild = true
+		if m.mcpPending == 0 {
+			// All servers done — refresh the tool list and unblock input.
+			cmds = append(cmds, doRefreshMCPTools(m.ctx, m.session))
+		}
+
+	case mcpToolsRefreshedMsg:
+		if msg.err != nil {
+			m.items = append(m.items, displayItem{kind: itemError, content: "loading MCP tools: " + msg.err.Error()})
+		} else {
+			m.tools = msg.tools
+			m.allToolDefs = msg.tools
+		}
+		m.state = stateIdle
+		m.input.Placeholder = inputPlaceholder(stateIdle)
+		m.updateCompletion()
+		needRebuild = true
 
 	case modelsLoadedMsg:
 		// Only process if we're still in model-picking state (guard against stale results).
@@ -1983,6 +2073,24 @@ func doListAllTools(ctx context.Context, session *chat.Session) tea.Cmd {
 	}
 }
 
+// doConnectMCPServer connects a single MCP server in the background and returns
+// a mcpServerStatusMsg when done.
+func doConnectMCPServer(ctx context.Context, mgr *mcppkg.Manager, srv config.MCPServerConfig) tea.Cmd {
+	return func() tea.Msg {
+		deferred, err := mgr.ConnectOne(ctx, srv)
+		return mcpServerStatusMsg{name: srv.Name, deferred: deferred, err: err}
+	}
+}
+
+// doRefreshMCPTools re-fetches the full tool list from the session (after MCP
+// servers have finished connecting) and returns a mcpToolsRefreshedMsg.
+func doRefreshMCPTools(ctx context.Context, session *chat.Session) tea.Cmd {
+	return func() tea.Msg {
+		tools, err := session.Tools(ctx)
+		return mcpToolsRefreshedMsg{tools: tools, err: err}
+	}
+}
+
 // filteredFromAllDefs returns the enabled subset of m.allToolDefs according to
 // the current session disabled set. Used to refresh m.tools after picker changes.
 func (m *Model) filteredFromAllDefs() []ai.ToolDefinition {
@@ -2163,6 +2271,7 @@ func RunTUI(
 	serverNames []string,
 	opts SessionOptions,
 ) error {
+	// Fetch initially-available tools (builtin only when background MCP is used).
 	sessionTools, err := session.Tools(ctx)
 	if err != nil {
 		return fmt.Errorf("fetching tools: %w", err)
@@ -2191,14 +2300,31 @@ func RunTUI(
 		m.messages = m.newConversation()
 	}
 
+	// Set up background MCP connection when servers are provided.
+	if opts.MCPManager != nil && len(opts.MCPServers) > 0 {
+		m.mcpManager = opts.MCPManager
+		m.mcpPending = len(opts.MCPServers)
+		m.mcpConnectingInfoIdx = len(m.items)
+		m.items = append(m.items, displayItem{
+			kind:    itemInfo,
+			content: fmt.Sprintf("⟳ Connecting to %d MCP server(s)…", len(opts.MCPServers)),
+		})
+		m.state = stateConnectingMCP
+		m.input.Placeholder = inputPlaceholder(stateConnectingMCP)
+		for _, srv := range opts.MCPServers {
+			m.mcpInitCmds = append(m.mcpInitCmds, doConnectMCPServer(ctx, opts.MCPManager, srv))
+		}
+	}
+
 	// Apply session persistence options.
 	m.sessionStore = opts.Store
 	m.persistToolApproval = opts.PersistToolApproval
 	m.persistPathApproval = opts.PersistPathApproval
 	if opts.Initial != nil {
 		m.applySession(opts.Initial)
-	} else if opts.OpenPicker && opts.Store != nil {
+	} else if opts.OpenPicker && opts.Store != nil && m.state == stateIdle {
 		// Pre-schedule opening the session picker as the first action.
+		// Skip when MCP background connection is running (stateConnectingMCP takes priority).
 		m.state = statePickingSession
 	}
 

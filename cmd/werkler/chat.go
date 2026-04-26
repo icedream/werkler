@@ -69,11 +69,20 @@ func runChat(_ *cobra.Command, _ []string) error {
 	manager := mcppkg.NewManager()
 	defer manager.Close()
 
-	if len(cfg.MCP.Servers) == 0 {
+	switch {
+	case chatPrompt != "":
+		// Prompt mode: connect synchronously before running the prompt.
+		if len(cfg.MCP.Servers) > 0 {
+			fmt.Fprintf(os.Stderr, "Connecting to %d MCP server(s)...\n", len(cfg.MCP.Servers))
+			if err := manager.Connect(ctx, cfg.MCP.Servers); err != nil {
+				return fmt.Errorf("MCP setup: %w", err)
+			}
+		}
+	case len(cfg.MCP.Servers) == 0:
 		fmt.Fprintln(os.Stderr, "Note: no MCP servers configured — AI will have no tools available.")
-	} else {
-		fmt.Fprintf(os.Stderr, "Connecting to %d MCP server(s)...\n", len(cfg.MCP.Servers))
-		if err := manager.Connect(ctx, cfg.MCP.Servers); err != nil {
+	default:
+		// TUI mode with servers: validate names upfront, then connect in background.
+		if err := mcppkg.ValidateServerNames(cfg.MCP.Servers); err != nil {
 			return fmt.Errorf("MCP setup: %w", err)
 		}
 	}
@@ -129,6 +138,10 @@ func runChat(_ *cobra.Command, _ []string) error {
 		PersistPathApproval: func(path string, _ bool) error {
 			return config.AppendAutoApprovePath(flagConfigPath, path)
 		},
+	}
+	if len(cfg.MCP.Servers) > 0 {
+		opts.MCPManager = manager
+		opts.MCPServers = cfg.MCP.Servers
 	}
 	if chatSessionID != "" {
 		sess, err := store.LoadByPrefix(chatSessionID)

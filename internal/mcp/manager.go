@@ -91,31 +91,49 @@ func NewManager() *Manager {
 	}
 }
 
-// Connect establishes connections to all configured MCP servers.
-// Streamable servers with OAuth enabled are deferred: they are not connected here
-// but instead queued for [ConnectPendingOAuth].
-// Call Close when done.
-func (m *Manager) Connect(ctx context.Context, servers []config.MCPServerConfig) error {
-	seen := make(map[string]bool)
+// ValidateServerNames checks that all server names are unique after sanitization.
+// Call this before Connect or ConnectOne to surface duplicate names early.
+func ValidateServerNames(servers []config.MCPServerConfig) error {
+	seen := make(map[string]bool, len(servers))
 	for _, srv := range servers {
 		safe := sanitize(srv.Name)
 		if seen[safe] {
 			return fmt.Errorf("duplicate MCP server safe-name %q (from %q)", safe, srv.Name)
 		}
 		seen[safe] = true
+	}
+	return nil
+}
 
-		if srv.Transport == config.MCPTransportStreamable && srv.OAuth {
-			m.mu.Lock()
-			m.pendingOAuth = append(m.pendingOAuth, srv)
-			m.mu.Unlock()
-			continue
-		}
-
-		if err := m.connectOne(ctx, srv, safe); err != nil {
+// Connect establishes connections to all configured MCP servers.
+// Streamable servers with OAuth enabled are deferred: they are not connected here
+// but instead queued for [ConnectPendingOAuth].
+// Call Close when done.
+func (m *Manager) Connect(ctx context.Context, servers []config.MCPServerConfig) error {
+	if err := ValidateServerNames(servers); err != nil {
+		return err
+	}
+	for _, srv := range servers {
+		if _, err := m.ConnectOne(ctx, srv); err != nil {
 			return fmt.Errorf("connecting to MCP server %q: %w", srv.Name, err)
 		}
 	}
 	return nil
+}
+
+// ConnectOne establishes a connection to a single MCP server.
+// Streamable+OAuth servers are queued for [ConnectPendingOAuth]; in that case
+// deferred=true is returned with a nil error.
+// [ValidateServerNames] should be called before ConnectOne to prevent duplicate safe-names.
+func (m *Manager) ConnectOne(ctx context.Context, srv config.MCPServerConfig) (deferred bool, err error) {
+	if srv.Transport == config.MCPTransportStreamable && srv.OAuth {
+		m.mu.Lock()
+		m.pendingOAuth = append(m.pendingOAuth, srv)
+		m.mu.Unlock()
+		return true, nil
+	}
+	safe := sanitize(srv.Name)
+	return false, m.connectOne(ctx, srv, safe)
 }
 
 // HasPendingOAuth reports whether there are OAuth MCP servers not yet connected.
