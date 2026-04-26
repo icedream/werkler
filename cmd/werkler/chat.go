@@ -19,6 +19,7 @@ import (
 	"github.com/icedream/werkler/internal/copilot"
 	mcppkg "github.com/icedream/werkler/internal/mcp"
 	"github.com/icedream/werkler/internal/sessionstore"
+	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/tools"
 	"github.com/icedream/werkler/internal/ui"
 )
@@ -95,6 +96,20 @@ func runChat(_ *cobra.Command, _ []string) error {
 		toolMgr.SetReviewer(reviewer, reviewerLabel)
 	}
 
+	// Load skills from the configured directory (default: ~/.agents/skills).
+	skillsDir := skills.DefaultDir()
+	if cfg.Skills.Dir != "" {
+		skillsDir = skills.ExpandTilde(cfg.Skills.Dir)
+	}
+	loadedSkills, err := skills.LoadDir(skillsDir, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: skills load error: %v\n", err)
+	}
+	if len(loadedSkills) > 0 {
+		fmt.Fprintf(os.Stderr, "Loaded %d skill(s).\n", len(loadedSkills))
+		toolMgr.SetSkills(loadedSkills)
+	}
+
 	store := sessionstore.New(sessionstore.DefaultDir())
 
 	if chatPrompt != "" {
@@ -106,7 +121,8 @@ func runChat(_ *cobra.Command, _ []string) error {
 	}
 
 	opts := ui.SessionOptions{
-		Store: store,
+		Store:  store,
+		Skills: loadedSkills,
 		PersistToolApproval: func(toolName string) error {
 			return config.AppendAutoApproveTool(flagConfigPath, toolName)
 		},

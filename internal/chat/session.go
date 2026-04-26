@@ -81,10 +81,15 @@ func NewSession(tools ToolManager, autoApproveGlobs []string, autoApprovePaths [
 	}
 }
 
-// NewConversation returns an initial message list containing only the system prompt.
-func NewConversation() []ai.Message {
+// NewConversation returns an initial message list containing the system prompt,
+// optionally extended with additional sections appended with blank lines.
+func NewConversation(extraSections ...string) []ai.Message {
+	prompt := SystemPrompt
+	for _, s := range extraSections {
+		prompt += "\n\n" + s
+	}
 	return []ai.Message{
-		{Role: "system", Content: SystemPrompt},
+		{Role: "system", Content: prompt},
 	}
 }
 

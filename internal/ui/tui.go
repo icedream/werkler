@@ -22,6 +22,7 @@ import (
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/sessionstore"
+	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/tools"
 )
 
@@ -258,6 +259,8 @@ type SessionOptions struct {
 	// approves a path (adds it to auto_approve_paths in the config file).
 	// write indicates whether write access was granted (false = read-only).
 	PersistPathApproval func(path string, write bool) error
+	// Skills is the list of loaded skills to mention in the system prompt.
+	Skills []skills.Skill
 }
 
 // --- Slash commands ---
@@ -301,7 +304,7 @@ func init() {
 			name:        "clear",
 			description: "Clear the conversation history",
 			action: func(m *Model) []tea.Cmd {
-				m.messages = chat.NewConversation()
+				m.messages = m.newConversation()
 				m.items = nil
 				m.toolCallIdx = make(map[string]int)
 				m.streamingItemIdx = -1
@@ -461,6 +464,9 @@ type Model struct {
 	// When false, the terminal handles mouse events natively (text selection works).
 	mouseEnabled bool
 
+	// skills holds loaded skills, used to build the system prompt hint.
+	skills []skills.Skill
+
 	// Slash-command autocomplete state.
 	// showCompletion is derived: true when state==stateIdle and input starts with "/".
 	// completionIdx is the currently highlighted item in the completion popup.
@@ -548,6 +554,23 @@ func initialModel(
 }
 
 // --- Slash-command helpers ---
+
+// newConversation builds an initial messages list for a fresh conversation,
+// injecting a skills hint into the system prompt when skills are loaded.
+func (m *Model) newConversation() []ai.Message {
+	if len(m.skills) == 0 {
+		return chat.NewConversation()
+	}
+	parts := make([]string, len(m.skills))
+	for i, s := range m.skills {
+		parts[i] = s.Name + ": " + s.Description
+	}
+	hint := "Available skills (call use_skill to load instructions):\n"
+	for _, p := range parts {
+		hint += "- " + p + "\n"
+	}
+	return chat.NewConversation(strings.TrimRight(hint, "\n"))
+}
 
 // filteredCmds returns slash commands whose names start with the given prefix
 // and whose available predicate (if any) passes.
@@ -1864,10 +1887,11 @@ func (m *Model) processNextCall() tea.Cmd {
 	m.currentCall = &callCopy
 
 	debugLog("processNextCall: dispatching tool=%q id=%q approved=%v", call.Name, call.ID, m.session.IsApproved(call.Name))
-	// ask_user and rubber_duck_review are always dispatched immediately without
-	// an approval dialog: ask_user suspends the goroutine waiting for the user,
-	// and rubber_duck_review sends data only to a user-configured reviewer.
-	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "rubber_duck_review" {
+	// ask_user, rubber_duck_review, and use_skill are always dispatched immediately
+	// without an approval dialog: ask_user suspends the goroutine waiting for the user,
+	// rubber_duck_review sends data only to a user-configured reviewer, and use_skill
+	// only returns pre-computed skill content (no side effects).
+	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "rubber_duck_review" || call.Name == "use_skill" {
 		if idx, ok := m.toolCallIdx[call.ID]; ok {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
@@ -2160,6 +2184,12 @@ func RunTUI(
 	sendFn = func(msg tea.Msg) {}
 
 	m := initialModel(ctx, client, session, sessionTools, modelName, serverNames, glamourStyle, sendFn)
+
+	// Apply skills so the system prompt hint is correct from the first message.
+	m.skills = opts.Skills
+	if len(opts.Skills) > 0 {
+		m.messages = m.newConversation()
+	}
 
 	// Apply session persistence options.
 	m.sessionStore = opts.Store

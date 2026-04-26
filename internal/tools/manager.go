@@ -26,6 +26,7 @@ import (
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/process"
+	"github.com/icedream/werkler/internal/skills"
 )
 
 // PathApprover checks path-level access approvals.
@@ -76,6 +77,7 @@ type Manager struct {
 	userAsker     UserAsker
 	reviewer      ai.Completer
 	reviewerLabel string
+	skills        []skills.Skill
 }
 
 type builtin struct {
@@ -106,7 +108,13 @@ func (m *Manager) SetOutputNotify(fn OutputNotification) {
 	m.processes = process.New(fn)
 }
 
-// SetPathApprover sets the path approver after construction. This allows the
+// SetSkills provides the list of skills available via the use_skill built-in.
+// Rebuilds the built-in tool list. Must be called at setup time only (not concurrency-safe).
+func (m *Manager) SetSkills(s []skills.Skill) {
+	m.skills = s
+	m.builtins = m.makeBuiltins()
+}
+
 // Session (which wraps this Manager) to serve as its own path approver without
 // a circular dependency at construction time.
 func (m *Manager) SetPathApprover(pa PathApprover) {
@@ -587,6 +595,31 @@ Set recommended_choice to highlight a suggested option.`,
 		})
 	}
 
+	if len(m.skills) > 0 {
+		names := make([]any, len(m.skills))
+		for i, s := range m.skills {
+			names[i] = s.Name
+		}
+		builtins = append(builtins, builtin{
+			def: ai.ToolDefinition{
+				Name:        "use_skill",
+				Description: "Load the instructions for a named skill into the conversation.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"name": map[string]any{
+							"type":        "string",
+							"enum":        names,
+							"description": "Name of the skill to load",
+						},
+					},
+					"required": []string{"name"},
+				},
+			},
+			handle: m.handleUseSkill,
+		})
+	}
+
 	return builtins
 }
 
@@ -1060,4 +1093,14 @@ func (m *Manager) handleRubberDuck(ctx context.Context, args map[string]any) (st
 		return "", fmt.Errorf("rubber duck review failed: %w", err)
 	}
 	return msg.Content, nil
+}
+
+func (m *Manager) handleUseSkill(_ context.Context, args map[string]any) (string, error) {
+	name := stringArg(args, "name")
+	for _, s := range m.skills {
+		if s.Name == name {
+			return s.Content, nil
+		}
+	}
+	return "skill not found: " + name, nil
 }

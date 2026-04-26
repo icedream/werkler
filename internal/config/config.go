@@ -100,10 +100,18 @@ type AIConfig struct {
 	RubberDuck RubberDuckConfig `mapstructure:"rubber_duck"`
 }
 
+// SkillsConfig holds settings for loading agent skills.
+type SkillsConfig struct {
+	// Dir is the directory to scan for skills. Defaults to ~/.agents/skills.
+	// A leading ~ is expanded to the user's home directory.
+	Dir string `mapstructure:"dir"`
+}
+
 // Config is the root configuration structure.
 type Config struct {
-	AI  AIConfig  `mapstructure:"ai"`
-	MCP MCPConfig `mapstructure:"mcp"`
+	AI     AIConfig     `mapstructure:"ai"`
+	MCP    MCPConfig    `mapstructure:"mcp"`
+	Skills SkillsConfig `mapstructure:"skills"`
 }
 
 // DefaultConfigPath returns the default config file path.
