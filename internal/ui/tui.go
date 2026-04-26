@@ -72,7 +72,7 @@ func inputPlaceholder(state tuiState) string {
 	case stateAwaitingUserQuestion:
 		return "Use ↑/↓ to select a choice, Enter to confirm…"
 	case stateConnectingMCP:
-		return "Connecting to MCP servers…"
+		return "Connecting to MCP servers… (queue a message with Enter)"
 	case stateConnectingOAuth:
 		return "Waiting for authorization in browser…"
 	case statePickingModel, statePickingSession, statePickingTools:
@@ -1092,10 +1092,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case stateConnectingMCP:
-			// Block all text input; only allow viewport scrolling.
-			var vpCmd tea.Cmd
-			m.viewport, vpCmd = m.viewport.Update(msg)
-			cmds = append(cmds, vpCmd)
+			// Allow viewport scrolling and prompt queuing; block submission until connected.
+			switch msg.Type {
+			case tea.KeyEnter:
+				text := strings.TrimSpace(m.input.Value())
+				if text != "" {
+					m.input.Reset()
+					m.queuedPrompts = append(m.queuedPrompts, text)
+					needRebuild = true
+				}
+			case tea.KeyEsc:
+				if m.input.Value() != "" {
+					m.input.Reset()
+				} else if len(m.queuedPrompts) > 0 {
+					m.queuedPrompts = m.queuedPrompts[:len(m.queuedPrompts)-1]
+					needRebuild = true
+				}
+			default:
+				var inputCmd tea.Cmd
+				m.input, inputCmd = m.input.Update(msg)
+				cmds = append(cmds, inputCmd)
+				var vpCmd tea.Cmd
+				m.viewport, vpCmd = m.viewport.Update(msg)
+				cmds = append(cmds, vpCmd)
+			}
 
 		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth:
 			switch msg.Type {
