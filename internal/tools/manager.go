@@ -691,7 +691,10 @@ Set recommended_choice to highlight a suggested option.`,
 				def: ai.ToolDefinition{
 					Name: "todo_add",
 					Description: `Add a todo item to the session task list.
-Use proactively at the start of multi-step tasks. Returns the todo ID for later updates.`,
+Use proactively at the start of multi-step tasks. Returns the todo ID for later updates.
+IMPORTANT: Duplicate titles are not allowed. If a todo with the same title already exists
+you will receive the existing item back — do NOT call todo_add again with the same title.
+Only rephrase if this is genuinely a distinct task.`,
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -1285,8 +1288,14 @@ func (m *Manager) handleTodoAdd(_ context.Context, args map[string]any) (string,
 	if title == "" {
 		return "error: title is required", nil
 	}
+	// Reject exact-duplicate titles so the AI doesn't create ghost copies.
+	for _, t := range m.todoStore.List() {
+		if t.Title == title {
+			return fmt.Sprintf("duplicate: todo %q already exists with id=%s status=%s — use todo_update to change it", title, t.ID, t.Status), nil
+		}
+	}
 	id := m.todoStore.Add(title, stringArg(args, "description"))
-	return fmt.Sprintf("todo %s added", id), nil
+	return fmt.Sprintf("added: id=%s status=pending title=%q", id, title), nil
 }
 
 func (m *Manager) handleTodoUpdate(_ context.Context, args map[string]any) (string, error) {
@@ -1307,7 +1316,13 @@ func (m *Manager) handleTodoUpdate(_ context.Context, args map[string]any) (stri
 	if err := m.todoStore.Update(id, f); err != nil {
 		return "error: " + err.Error(), nil
 	}
-	return "todo " + id + " updated", nil
+	// Echo the updated todo so the AI knows exactly what changed.
+	for _, t := range m.todoStore.List() {
+		if t.ID == id {
+			return fmt.Sprintf("updated: id=%s status=%s title=%q", t.ID, t.Status, t.Title), nil
+		}
+	}
+	return "updated: " + id, nil
 }
 
 func (m *Manager) handleTodoList(_ context.Context, _ map[string]any) (string, error) {
