@@ -144,6 +144,7 @@ auto_approve_tools = [
 ## 📚 Documentation
 
 - [Configuration](docs/configuration.md) - Complete configuration reference
+- [TUI Reference](docs/tui.md) - Keyboard shortcuts, slash commands, and interactive features
 - [Skills](docs/skills.md) - Reusable instruction sets
 - [Autopilot Mode](docs/autopilot.md) - Autonomous task execution
 
