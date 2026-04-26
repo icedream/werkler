@@ -71,6 +71,7 @@ const (
 	stateAwaitingUserQuestion // AI asked a question; waiting for the user's reply
 	stateCompacting           // compacting conversation history via AI summary
 	statePickingRegistry      // MCP registry browser is open
+	statePickingSkills        // skill enable/disable picker is open
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -89,7 +90,7 @@ func inputPlaceholder(state tuiState) string {
 		return "Waiting for authorization in browser…"
 	case stateCompacting:
 		return "Compacting context… (queue a follow-up, press Enter)"
-	case statePickingModel, statePickingSession, statePickingTools, statePickingRegistry:
+	case statePickingModel, statePickingSession, statePickingTools, statePickingRegistry, statePickingSkills:
 		return ""
 	case stateIdle:
 		return "Type a message, press Enter to send…"
@@ -340,6 +341,30 @@ func (t toolItem) Description() string {
 	return "[" + server + "] " + desc
 }
 
+// skillItem implements list.Item for the skill enable/disable picker.
+type skillItem struct {
+	name        string
+	description string
+	enabled     bool
+}
+
+func (s skillItem) FilterValue() string { return s.name }
+func (s skillItem) Title() string {
+	check := "[ ]"
+	if s.enabled {
+		check = "[✓]"
+	}
+	return check + " " + s.name
+}
+func (s skillItem) Description() string {
+	const maxDesc = 100
+	desc := s.description
+	if len(desc) > maxDesc {
+		desc = desc[:maxDesc] + "…"
+	}
+	return desc
+}
+
 // registryItem implements list.Item for the MCP registry picker.
 type registryItem struct{ srv registry.Server }
 
@@ -434,6 +459,25 @@ func init() {
 			},
 		},
 		{
+			name:        "skills",
+			description: "Enable or disable individual skills for this session",
+			available:   func(m *Model) bool { return len(m.skills) > 0 },
+			action: func(m *Model) []tea.Cmd {
+				m.state = statePickingSkills
+				items := make([]list.Item, len(m.skills))
+				for i, s := range m.skills {
+					items[i] = skillItem{
+						name:        s.Name,
+						description: s.Description,
+						enabled:     !m.disabledSkills[s.Name],
+					}
+				}
+				m.skillPicker.SetItems(items)
+				m.skillPicker.SetSize(m.width, m.height-fixedLines)
+				return nil
+			},
+		},
+		{
 			name:        "clear",
 			description: "Clear the conversation history",
 			action: func(m *Model) []tea.Cmd {
@@ -457,6 +501,10 @@ func init() {
 				m.oauthInfoIdx = -1
 				m.sessionID = ""
 				m.sessionCreatedAt = time.Time{}
+				m.disabledSkills = make(map[string]bool)
+				if m.toolMgr != nil {
+					m.toolMgr.SetSkills(m.skills)
+				}
 				if m.todoStore != nil {
 					m.todoStore.Clear()
 					m.sidebarOpen = false
@@ -704,7 +752,10 @@ type Model struct {
 	mouseEnabled bool
 
 	// skills holds loaded skills, used to build the system prompt hint.
-	skills []skills.Skill
+	skills         []skills.Skill
+	disabledSkills map[string]bool // per-session skill toggles
+	skillPicker    list.Model      // skill enable/disable picker
+	toolMgr        *tools.Manager  // needed for mid-session skill updates
 
 	// MCP background connection state.
 	// mcpManager is the manager used for ConnectOne calls during startup.
@@ -789,6 +840,14 @@ func initialModel(
 	toolPickerM.SetFilteringEnabled(true)
 	toolPickerM.DisableQuitKeybindings()
 
+	// Skill picker: same style as tool picker.
+	skillDel := list.NewDefaultDelegate()
+	skillPickerM := list.New(nil, skillDel, 0, 0)
+	skillPickerM.Title = "Toggle skills  [space] enable/disable"
+	skillPickerM.SetShowStatusBar(false)
+	skillPickerM.SetFilteringEnabled(true)
+	skillPickerM.DisableQuitKeybindings()
+
 	// Use modelManager when the client also implements ModelManager.
 	var mm ai.ModelManager
 	if m, ok := client.(ai.ModelManager); ok {
@@ -816,6 +875,8 @@ func initialModel(
 		modelPicker:        picker,
 		sessionPicker:      sessPicker,
 		toolPicker:         toolPickerM,
+		skillPicker:        skillPickerM,
+		disabledSkills:     make(map[string]bool),
 		input:              ti,
 		spinner:            sp,
 		modelName:          modelName,
@@ -833,9 +894,10 @@ func initialModel(
 // Always builds from the canonical base prompt to avoid duplication on rebuild.
 func (m *Model) newConversation() []ai.Message {
 	var extras []string
-	if len(m.skills) > 0 {
-		parts := make([]string, len(m.skills))
-		for i, s := range m.skills {
+	active := m.activeSkills()
+	if len(active) > 0 && m.session.IsToolEnabled("use_skill") {
+		parts := make([]string, len(active))
+		for i, s := range active {
 			parts[i] = s.Name + ": " + s.Description
 		}
 		hint := "Available skills (call use_skill to load instructions):\n"
@@ -849,7 +911,48 @@ func (m *Model) newConversation() []ai.Message {
 	return msgs
 }
 
-// filteredCmds returns slash commands whose names start with the given prefix
+// activeSkills returns the subset of loaded skills that are currently enabled.
+func (m *Model) activeSkills() []skills.Skill {
+	if len(m.disabledSkills) == 0 {
+		return m.skills
+	}
+	out := make([]skills.Skill, 0, len(m.skills))
+	for _, s := range m.skills {
+		if !m.disabledSkills[s.Name] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// rebuildSystemPrompt replaces messages[0] with a freshly built system message
+// reflecting the current active skills and model context. Call after toggling skills.
+func (m *Model) rebuildSystemPrompt() {
+	if len(m.messages) == 0 {
+		return
+	}
+	m.messages[0] = m.newConversation()[0]
+}
+
+// applySkillToggle synchronises the tool manager and system prompt after a
+// skill has been enabled or disabled via the picker.
+func (m *Model) applySkillToggle() {
+	active := m.activeSkills()
+	if m.toolMgr != nil {
+		m.toolMgr.SetSkills(active)
+		// Refresh m.tools (for AI requests) from the filtered list; refresh
+		// m.allToolDefs from the full unfiltered list so the /tools picker
+		// still shows all tools regardless of skill changes.
+		if filtered, err := m.session.Tools(m.ctx); err == nil {
+			m.tools = filtered
+		}
+		if all, err := m.session.AllTools(m.ctx); err == nil {
+			m.allToolDefs = all
+		}
+	}
+	m.rebuildSystemPrompt()
+}
+
 // and whose available predicate (if any) passes.
 func (m Model) filteredCmds() []slashCommand {
 	text := m.input.Value()
@@ -1398,6 +1501,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, pickerCmd)
 			}
 
+		case statePickingSkills:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.state = stateIdle
+				m.updateCompletion()
+			case tea.KeyRunes:
+				if msg.String() == " " {
+					if sel := m.skillPicker.SelectedItem(); sel != nil {
+						item := sel.(skillItem)
+						item.enabled = !item.enabled
+						m.disabledSkills[item.name] = !item.enabled
+						m.skillPicker.SetItem(m.skillPicker.Index(), item)
+						m.applySkillToggle()
+					}
+					break
+				}
+				var pickerCmd tea.Cmd
+				m.skillPicker, pickerCmd = m.skillPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			default:
+				var pickerCmd tea.Cmd
+				m.skillPicker, pickerCmd = m.skillPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			}
+
 		case statePickingRegistry:
 			switch msg.Type {
 			case tea.KeyEsc, tea.KeyCtrlC:
@@ -1860,6 +1988,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, vpCmd)
 		m.modelPicker.SetSize(m.width, m.height-fixedLines)
 		m.toolPicker.SetSize(m.width, m.height-fixedLines)
+		m.skillPicker.SetSize(m.width, m.height-fixedLines)
 		m.recalcLayout() // sets viewport.Width, input.Width, viewport.Height
 		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
 		needRebuild = true
@@ -2190,6 +2319,9 @@ func (m Model) View() string {
 	}
 	if m.state == statePickingTools {
 		return m.toolPicker.View()
+	}
+	if m.state == statePickingSkills {
+		return m.skillPicker.View()
 	}
 	if m.state == statePickingRegistry {
 		return m.registryPicker.View()
@@ -3507,6 +3639,9 @@ func RunTUI(
 	sendFn = func(msg tea.Msg) {}
 
 	m := initialModel(ctx, client, session, sessionTools, modelName, serverNames, glamourStyle, sendFn)
+
+	// Store toolMgr so the TUI can call SetSkills on skill toggles.
+	m.toolMgr = toolMgr
 
 	// Apply skills so the system prompt hint is correct from the first message.
 	m.skills = opts.Skills
