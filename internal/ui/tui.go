@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -59,6 +60,7 @@ const (
 	statePickingSession       // session picker list is open
 	statePickingTools         // tool enable/disable picker is open
 	stateAwaitingUserQuestion // AI asked a question; waiting for the user's reply
+	stateCompacting           // compacting conversation history via AI summary
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -75,6 +77,8 @@ func inputPlaceholder(state tuiState) string {
 		return "Connecting to MCP servers… (queue a message with Enter)"
 	case stateConnectingOAuth:
 		return "Waiting for authorization in browser…"
+	case stateCompacting:
+		return "Compacting context… (queue a follow-up, press Enter)"
 	case statePickingModel, statePickingSession, statePickingTools:
 		return ""
 	case stateIdle:
@@ -134,6 +138,13 @@ type contextDoneMsg struct{}
 // tokenCountMsg carries the result of an async token-count operation.
 type tokenCountMsg struct {
 	count ai.TokenCount
+}
+
+// compactDoneMsg is returned by doCompact when the AI summary is complete or
+// an error has occurred.
+type compactDoneMsg struct {
+	summary string
+	err     error
 }
 
 // --- OAuth messages ---
@@ -350,6 +361,17 @@ func init() {
 			},
 		},
 		{
+			name:        "compact",
+			description: "Summarize the conversation to free up context window space",
+			available: func(m *Model) bool {
+				return m.hasCompactableHistory()
+			},
+			action: func(m *Model) []tea.Cmd {
+				m.state = stateCompacting
+				return []tea.Cmd{doCompact(m.newOpCtx(), m.client, m.messages)}
+			},
+		},
+		{
 			name:        "allow-all",
 			description: "Toggle allow-all mode — auto-approve all tool calls and path access without prompting",
 			action: func(m *Model) []tea.Cmd {
@@ -519,6 +541,11 @@ type Model struct {
 	// the current user turn. Resets when the user sends a new message. Used to
 	// warn when the agent is looping excessively.
 	turnRoundtrips int
+
+	// autoCompactPending is set when context compaction was triggered
+	// automatically (not by the user). After compaction completes, the
+	// interrupted AI turn is restarted.
+	autoCompactPending bool
 
 	// mouseEnabled tracks whether the terminal mouse reporting mode is active.
 	// When false, the terminal handles mouse events natively (text selection works).
@@ -982,11 +1009,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
 							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.turnRoundtrips = 0
-							m.state = stateThinking
 							if cmd := m.recountContext(); cmd != nil {
 								cmds = append(cmds, cmd)
 							}
-							cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
+							if m.shouldAutoCompact() {
+								m.autoCompactPending = true
+								m.state = stateCompacting
+								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages))
+							} else {
+								m.state = stateThinking
+								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
+							}
 						}
 					}
 				}
@@ -1173,7 +1206,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, vpCmd)
 			}
 
-		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth:
+		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth, stateCompacting:
 			switch msg.Type {
 			case tea.KeyEnter:
 				text := strings.TrimSpace(m.input.Value())
@@ -1191,7 +1224,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.queuedPrompts = m.queuedPrompts[:len(m.queuedPrompts)-1]
 					m.cancelPending = false
 					needRebuild = true
-				case m.state != stateConnectingOAuth && m.cancelOp != nil:
+				case m.state != stateConnectingOAuth && m.state != stateCompacting && m.cancelOp != nil:
 					if m.cancelPending {
 						// Second Esc — cancel the operation.
 						m.cancelOp()
@@ -1350,6 +1383,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tokenCountMsg:
 		if msg.count.Total > 0 {
 			m.contextUsage = msg.count
+		}
+
+	case compactDoneMsg:
+		if msg.err != nil {
+			// Compaction failed: keep history intact, show error, go idle.
+			m.items = append(m.items, displayItem{
+				kind:    itemError,
+				content: "Context compaction failed: " + msg.err.Error(),
+			})
+			m.autoCompactPending = false
+			m.state = stateIdle
+			needRebuild = true
+			cmds = append(cmds, m.input.Focus())
+		} else {
+			cmds = append(cmds, m.applyCompaction(msg.summary)...)
 		}
 
 	case modelsLoadedMsg:
@@ -1860,6 +1908,8 @@ func (m Model) statusLines() (line1, line2 string) {
 		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + allowAllIndicator, ""
 	case stateConnectingOAuth:
 		return statusStyle.Render(m.spinner.View()+" Waiting for OAuth authorization…") + queueHint + allowAllIndicator, ""
+	case stateCompacting:
+		return statusStyle.Render(m.spinner.View()+" Compacting context…") + queueHint + allowAllIndicator, ""
 	case stateStreaming:
 		cancelHint := ""
 		if m.cancelPending {
@@ -2190,6 +2240,11 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 		m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
 		m.items = append(m.items, displayItem{kind: itemUser, content: text})
 		m.turnRoundtrips = 0
+		if m.shouldAutoCompact() {
+			m.autoCompactPending = true
+			m.state = stateCompacting
+			return doCompact(m.newOpCtx(), m.client, m.messages)
+		}
 		m.state = stateThinking
 		return doStartStream(m.newOpCtx(), m.client, m.messages, m.tools)
 	}
@@ -2204,6 +2259,11 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 func (m *Model) processNextCall() tea.Cmd {
 	if len(m.pendingCalls) == 0 {
 		debugLog("processNextCall: no more pending calls, starting new stream (messages=%d)", len(m.messages))
+		if m.shouldAutoCompact() {
+			m.autoCompactPending = true
+			m.state = stateCompacting
+			return doCompact(m.newOpCtx(), m.client, m.messages)
+		}
 		m.state = stateThinking
 		m.turnRoundtrips++
 		return doStartStream(m.newOpCtx(), m.client, m.messages, m.tools)
@@ -2371,6 +2431,180 @@ func (m *Model) recountContext() tea.Cmd {
 		return nil
 	}
 	return doCountTokens(m.modelName, m.messages)
+}
+
+// hasCompactableHistory returns true when the conversation has enough real turns
+// to make compaction meaningful (at least 3 user messages beyond any summary).
+func (m *Model) hasCompactableHistory() bool {
+	count := 0
+	for _, msg := range m.messages {
+		if msg.Role == "user" {
+			count++
+		}
+	}
+	return count >= 3
+}
+
+// shouldAutoCompact returns true when the context is approaching the model's
+// limit and compaction hasn't already been triggered. Requires a known context
+// limit and a non-approximate token count.
+func (m *Model) shouldAutoCompact() bool {
+	if m.autoCompactPending {
+		return false // already in progress
+	}
+	maxTok := m.modelInfo.Context.MaxTokens
+	if maxTok <= 0 {
+		return false // limit unknown
+	}
+	// Use the last known async count; if not yet computed, skip.
+	if m.contextUsage.Total == 0 || m.contextUsage.Approx {
+		return false
+	}
+	const autoCompactThreshold = 0.75
+	return m.contextUsage.UsageFraction(maxTok) >= autoCompactThreshold && m.hasCompactableHistory()
+}
+
+// doCompact sends the current message history to the AI as a summarization
+// request and returns a compactDoneMsg with the resulting summary text.
+func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Message) tea.Cmd {
+	// Build the transcript from a snapshot, so the goroutine doesn't race.
+	snap := make([]ai.Message, len(messages))
+	copy(snap, messages)
+	return func() tea.Msg {
+		var transcript strings.Builder
+		for _, msg := range snap {
+			if msg.Role == "system" {
+				continue
+			}
+			switch msg.Role {
+			case "user":
+				transcript.WriteString("User: ")
+				transcript.WriteString(msg.Content)
+			case "assistant":
+				if msg.Content != "" {
+					transcript.WriteString("Assistant: ")
+					transcript.WriteString(msg.Content)
+				}
+				for _, tc := range msg.ToolCalls {
+					fmt.Fprintf(&transcript, "Assistant called tool %q", tc.Name)
+				}
+			case "tool":
+				result := msg.Content
+				if len(result) > 300 {
+					result = result[:300] + "…"
+				}
+				transcript.WriteString("Tool result: ")
+				transcript.WriteString(result)
+			}
+			transcript.WriteString("\n\n")
+		}
+
+		summaryMessages := []ai.Message{
+			{
+				Role: "system",
+				Content: "You are a conversation summarizer. " +
+					"Write a concise but complete summary of the conversation transcript below. " +
+					"Preserve: the main objective, key decisions, files created or modified " +
+					"(with exact paths), tool calls and their outcomes, unresolved errors or items. " +
+					"Write in past tense. Do not add commentary — just the facts.",
+			},
+			{
+				Role:    "user",
+				Content: "Summarize this conversation:\n\n" + transcript.String(),
+			},
+		}
+
+		ch := client.CompleteStream(ctx, summaryMessages, nil)
+		var summary strings.Builder
+		for chunk := range ch {
+			if chunk.Err != nil {
+				if errors.Is(chunk.Err, io.EOF) {
+					break
+				}
+				return compactDoneMsg{err: chunk.Err}
+			}
+			if chunk.Done {
+				break
+			}
+			summary.WriteString(chunk.Delta)
+		}
+		s := strings.TrimSpace(summary.String())
+		if s == "" {
+			return compactDoneMsg{err: fmt.Errorf("summarization returned empty response")}
+		}
+		return compactDoneMsg{summary: s}
+	}
+}
+
+// extractLastTurns returns the last n complete user turns (and everything
+// between/after them) from messages, excluding any system messages.
+// If there are fewer than n user turns, all non-system messages are returned.
+func extractLastTurns(messages []ai.Message, n int) []ai.Message {
+	// Collect indices of user messages.
+	var userIdxs []int
+	for i, msg := range messages {
+		if msg.Role == "user" {
+			userIdxs = append(userIdxs, i)
+		}
+	}
+	var cutAt int
+	if len(userIdxs) > n {
+		cutAt = userIdxs[len(userIdxs)-n]
+	}
+	// Return non-system messages from cutAt onward.
+	var out []ai.Message
+	for _, msg := range messages[cutAt:] {
+		if msg.Role != "system" {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+// applyCompaction replaces the message history with the system message plus a
+// summary system message plus the last 2 complete user turns, then rebuilds
+// display items and schedules a recount.
+func (m *Model) applyCompaction(summary string) []tea.Cmd {
+	oldMessages := m.messages
+
+	// Build the new history: original system + summary system + last 2 turns.
+	newMessages := make([]ai.Message, 0, 8)
+	if len(oldMessages) > 0 && oldMessages[0].Role == "system" {
+		newMessages = append(newMessages, oldMessages[0]) // original system prompt
+	}
+	newMessages = append(newMessages, ai.Message{
+		Role:    "system",
+		Content: "## Summary of previous conversation\n\n" + summary,
+	})
+	newMessages = append(newMessages, extractLastTurns(oldMessages, 2)...)
+	m.messages = newMessages
+
+	// Rebuild display from the new history.
+	m.items = rebuildItemsFromMessages(m.messages)
+	m.toolCallIdx = make(map[string]int)
+	m.streamingItemIdx = -1
+	// Add a compaction banner at the top of the visible history.
+	banner := displayItem{kind: itemInfo, content: "Context compacted — conversation summarized."}
+	m.items = append([]displayItem{banner}, m.items...)
+
+	m.rebuildContent()
+
+	var cmds []tea.Cmd
+	if cmd := m.recountContext(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if m.autoCompactPending {
+		// Auto-compact: restart the AI turn that was interrupted.
+		m.autoCompactPending = false
+		m.turnRoundtrips++
+		m.state = stateThinking
+		cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.messages, m.tools))
+	} else {
+		m.state = stateIdle
+		cmds = append(cmds, m.input.Focus())
+	}
+	return cmds
 }
 
 // filteredFromAllDefs returns the enabled subset of m.allToolDefs according to
