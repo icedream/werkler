@@ -2358,8 +2358,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reasoningItemIdx = -1
 			// Skip empty assistant messages (no content, no tool calls, no reasoning) — they
 			// provide no value and some providers reject them with a 400 error.
-			if chunk.Msg.Content != "" || len(chunk.Msg.ToolCalls) > 0 || chunk.Msg.Reasoning != "" {
+			isEmpty := chunk.Msg.Content == "" && len(chunk.Msg.ToolCalls) == 0 && chunk.Msg.Reasoning == ""
+			if !isEmpty {
 				m.messages = append(m.messages, chunk.Msg)
+			} else if chunk.Usage.CompletionTokens > 0 {
+				// The model generated tokens but the provider returned empty content and no
+				// tool calls. This is a known issue with some Ollama-backed deployments where
+				// the model output is silently dropped. Surface it so the user can diagnose.
+				m.items = append(m.items, displayItem{
+					kind:    itemError,
+					content: fmt.Sprintf("Provider returned %d completion tokens but no content or tool calls — the model output may have been silently dropped by the backend. Try rephrasing your prompt or switching models.", chunk.Usage.CompletionTokens),
+				})
 			}
 			if len(chunk.Msg.ToolCalls) == 0 {
 				// If the provider cut off the response due to output token limits,
