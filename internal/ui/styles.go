@@ -124,6 +124,32 @@ var (
 				Bold(true).
 				Reverse(true).
 				Foreground(lipgloss.Color("220")) // highlighted/staged approval choice
+
+	sidebarTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("212")).
+				Padding(0, 1)
+
+	sidebarItemStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("250"))
+
+	sidebarDoneStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244")).
+				Strikethrough(true)
+
+	sidebarBlockedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("196"))
+
+	sidebarActiveStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("220"))
+
+	sidebarSepStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("238"))
+
+	todoIndicatorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220")).
+				Bold(true)
 )
 
 func separator(width int) string {

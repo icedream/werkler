@@ -1192,56 +1192,56 @@ func (m *Manager) handleUseSkill(_ context.Context, args map[string]any) (string
 }
 
 func (m *Manager) handleTodoAdd(_ context.Context, args map[string]any) (string, error) {
-title := stringArg(args, "title")
-if title == "" {
-return "error: title is required", nil
-}
-id := m.todoStore.Add(title, stringArg(args, "description"))
-return fmt.Sprintf("todo %s added", id), nil
+	title := stringArg(args, "title")
+	if title == "" {
+		return "error: title is required", nil
+	}
+	id := m.todoStore.Add(title, stringArg(args, "description"))
+	return fmt.Sprintf("todo %s added", id), nil
 }
 
 func (m *Manager) handleTodoUpdate(_ context.Context, args map[string]any) (string, error) {
-id := stringArg(args, "id")
-if id == "" {
-return "error: id is required", nil
-}
-var f todostore.UpdateFields
-if v := stringArg(args, "status"); v != "" {
-f.Status = &v
-}
-if v := stringArg(args, "title"); v != "" {
-f.Title = &v
-}
-if v := stringArg(args, "description"); v != "" {
-f.Description = &v
-}
-if err := m.todoStore.Update(id, f); err != nil {
-return "error: " + err.Error(), nil
-}
-return "todo " + id + " updated", nil
+	id := stringArg(args, "id")
+	if id == "" {
+		return "error: id is required", nil
+	}
+	var f todostore.UpdateFields
+	if v := stringArg(args, "status"); v != "" {
+		f.Status = &v
+	}
+	if v := stringArg(args, "title"); v != "" {
+		f.Title = &v
+	}
+	if v := stringArg(args, "description"); v != "" {
+		f.Description = &v
+	}
+	if err := m.todoStore.Update(id, f); err != nil {
+		return "error: " + err.Error(), nil
+	}
+	return "todo " + id + " updated", nil
 }
 
 func (m *Manager) handleTodoList(_ context.Context, _ map[string]any) (string, error) {
-todos := m.todoStore.List()
-if len(todos) == 0 {
-return "no todos", nil
-}
-var sb strings.Builder
-icons := map[string]string{
-todostore.StatusPending:    "○",
-todostore.StatusInProgress: "▶",
-todostore.StatusDone:       "✓",
-todostore.StatusBlocked:    "✗",
-}
-for _, t := range todos {
-icon := icons[t.Status]
-if icon == "" {
-icon = "?"
-}
-fmt.Fprintf(&sb, "%s [%s] %s: %s\n", icon, t.ID, t.Status, t.Title)
-if t.Description != "" {
-fmt.Fprintf(&sb, "    %s\n", t.Description)
-}
-}
-return strings.TrimRight(sb.String(), "\n"), nil
+	todos := m.todoStore.List()
+	if len(todos) == 0 {
+		return "no todos", nil
+	}
+	var sb strings.Builder
+	icons := map[string]string{
+		todostore.StatusPending:    "○",
+		todostore.StatusInProgress: "▶",
+		todostore.StatusDone:       "✓",
+		todostore.StatusBlocked:    "✗",
+	}
+	for _, t := range todos {
+		icon := icons[t.Status]
+		if icon == "" {
+			icon = "?"
+		}
+		fmt.Fprintf(&sb, "%s [%s] %s: %s\n", icon, t.ID, t.Status, t.Title)
+		if t.Description != "" {
+			fmt.Fprintf(&sb, "    %s\n", t.Description)
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n"), nil
 }

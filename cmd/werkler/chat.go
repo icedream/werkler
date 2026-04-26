@@ -20,6 +20,7 @@ import (
 	mcppkg "github.com/icedream/werkler/internal/mcp"
 	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/skills"
+	"github.com/icedream/werkler/internal/todostore"
 	"github.com/icedream/werkler/internal/tools"
 	"github.com/icedream/werkler/internal/ui"
 )
@@ -119,6 +120,9 @@ func runChat(_ *cobra.Command, _ []string) error {
 		toolMgr.SetSkills(loadedSkills)
 	}
 
+	todoStore := todostore.New()
+	toolMgr.SetTodoStore(todoStore)
+
 	store := sessionstore.New(sessionstore.DefaultDir())
 
 	if chatPrompt != "" {
@@ -130,8 +134,9 @@ func runChat(_ *cobra.Command, _ []string) error {
 	}
 
 	opts := ui.SessionOptions{
-		Store:  store,
-		Skills: loadedSkills,
+		Store:     store,
+		Skills:    loadedSkills,
+		TodoStore: todoStore,
 		PersistToolApproval: func(toolName string) error {
 			return config.AppendAutoApproveTool(flagConfigPath, toolName)
 		},

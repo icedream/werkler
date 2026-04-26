@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/icedream/werkler/internal/ai"
+	"github.com/icedream/werkler/internal/todostore"
 )
 
 // Session is the full persisted state of a chat conversation.
@@ -27,6 +28,8 @@ type Session struct {
 	Messages  []ai.Message `json:"messages"`
 	// ApprovedTools persists session-level tool approvals so they carry over on resume.
 	ApprovedTools []string `json:"approved_tools,omitempty"`
+	// Todos persists the AI-managed todo list for this session.
+	Todos []todostore.Todo `json:"todos,omitempty"`
 }
 
 // Store reads and writes sessions to a directory on disk.

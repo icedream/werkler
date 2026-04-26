@@ -254,6 +254,7 @@ type modelInfoMsg struct {
 
 // todoUpdateMsg is sent by the todo store notify callback when todos change.
 type todoUpdateMsg struct{ autoOpen bool }
+
 // modelItem implements list.Item for a model picker entry.
 type modelItem struct{ ai.ModelItem }
 
@@ -430,6 +431,11 @@ func init() {
 				m.oauthInfoIdx = -1
 				m.sessionID = ""
 				m.sessionCreatedAt = time.Time{}
+				if m.todoStore != nil {
+					m.todoStore.Clear()
+					m.sidebarOpen = false
+					m.recalcLayout()
+				}
 				m.rebuildContent()
 				return nil
 			},
@@ -457,6 +463,17 @@ func init() {
 				ctx, cancel := context.WithCancel(m.ctx)
 				m.registryCancelCtx = cancel
 				return []tea.Cmd{doFetchRegistry(ctx, "", "")}
+			},
+		},
+		{
+			name:        "todos",
+			description: "Toggle the todo sidebar",
+			available:   func(m *Model) bool { return m.todoStore != nil },
+			action: func(m *Model) []tea.Cmd {
+				m.sidebarOpen = !m.sidebarOpen
+				m.recalcLayout()
+				m.rebuildContent()
+				return nil
 			},
 		},
 		{
@@ -2050,7 +2067,20 @@ func (m Model) View() string {
 	b.WriteString(sep)
 	b.WriteString("\n")
 
-	b.WriteString(m.viewport.View())
+	// Main viewport, optionally with todo sidebar on the right.
+	showSidebar := m.sidebarOpen && m.todoStore != nil && m.width-sidebarWidth >= minMainWidth
+	if showSidebar {
+		sepCol := sidebarSepStyle.Render(strings.Repeat("│\n", m.viewport.Height))
+		// Trim the trailing newline from the sep column before joining.
+		sepCol = strings.TrimSuffix(sepCol, "\n")
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
+			m.viewport.View(),
+			sepCol,
+			m.sidebarView(),
+		))
+	} else {
+		b.WriteString(m.viewport.View())
+	}
 	b.WriteString("\n")
 
 	b.WriteString(sep)
@@ -2213,7 +2243,13 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.sessionStore != nil {
 			sessionHint = "  " + keyHintStyle.Render("ctrl+r") + " sessions"
 		}
-		line1 := mouseHint + pickerHint + sessionHint + allowAllIndicator
+		todoHint := ""
+		if m.todoStore != nil && !m.sidebarOpen {
+			if p, a, d, b := m.todoStore.Counts(); p+a+d+b > 0 {
+				todoHint = "  " + todoIndicatorStyle.Render(fmt.Sprintf("✓%d ▶%d ○%d", d, a, p))
+			}
+		}
+		line1 := mouseHint + pickerHint + sessionHint + todoHint + allowAllIndicator
 		// Show rate limit info when the provider has reported it.
 		if m.lastRateLimits.IsKnown() {
 			parts := []string{}
@@ -2242,6 +2278,65 @@ func (m Model) statusLines() (line1, line2 string) {
 func (m Model) inputView() string {
 	prefix := inputPrefixStyle.Render("You> ")
 	return prefix + m.input.View()
+}
+
+// sidebarView renders the todo sidebar panel. Width is sidebarWidth-1 (the
+// caller prepends the "│" separator). Height matches the viewport height.
+func (m Model) sidebarView() string {
+	contentW := sidebarWidth - 1 // 1 col reserved for the "│" separator
+	todos := m.todoStore.List()
+	vpH := m.viewport.Height
+
+	lines := make([]string, 0, vpH)
+	title := sidebarTitleStyle.Width(contentW).Render("Todos")
+	lines = append(lines, title)
+
+	icons := map[string]string{
+		todostore.StatusPending:    "○",
+		todostore.StatusInProgress: "▶",
+		todostore.StatusDone:       "✓",
+		todostore.StatusBlocked:    "✗",
+	}
+
+	for _, t := range todos {
+		icon := icons[t.Status]
+		if icon == "" {
+			icon = "?"
+		}
+		// Max width for title: contentW - 3 (icon + space + padding)
+		maxTitle := contentW - 3
+		title := t.Title
+		if len([]rune(title)) > maxTitle {
+			title = string([]rune(title)[:maxTitle-1]) + "…"
+		}
+		label := icon + " " + title
+		var rendered string
+		switch t.Status {
+		case todostore.StatusDone:
+			rendered = sidebarDoneStyle.Width(contentW).Render(label)
+		case todostore.StatusInProgress:
+			rendered = sidebarActiveStyle.Width(contentW).Render(label)
+		case todostore.StatusBlocked:
+			rendered = sidebarBlockedStyle.Width(contentW).Render(label)
+		default:
+			rendered = sidebarItemStyle.Width(contentW).Render(label)
+		}
+		lines = append(lines, rendered)
+	}
+
+	if len(todos) == 0 {
+		lines = append(lines, sidebarItemStyle.Width(contentW).Render("  (empty)"))
+	}
+
+	// Pad to viewport height so the sidebar fills the full column.
+	blank := strings.Repeat(" ", contentW)
+	for len(lines) < vpH {
+		lines = append(lines, blank)
+	}
+	if len(lines) > vpH {
+		lines = lines[:vpH]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // roundtripHint returns a status-bar fragment warning the user when the agent
@@ -2917,6 +3012,16 @@ func (m *Model) applySession(sess *sessionstore.Session) {
 	m.sessionCWD = sess.CWD
 	m.messages = sess.Messages
 	m.items = rebuildItemsFromMessages(sess.Messages)
+	if m.todoStore != nil {
+		if len(sess.Todos) > 0 {
+			m.todoStore.Restore(sess.Todos)
+			m.sidebarOpen = true
+		} else {
+			m.todoStore.Clear()
+			m.sidebarOpen = false
+		}
+		m.recalcLayout()
+	}
 	// Show a resume banner as the first visible item.
 	banner := displayItem{
 		kind:    itemInfo,
@@ -2998,7 +3103,7 @@ func (m *Model) currentSessionSnapshot() sessionstore.Session {
 	}
 	// Generate a title from the first user message if possible.
 	title := sessionstore.GenerateTitle(m.messages)
-	return sessionstore.Session{
+	snap := sessionstore.Session{
 		ID:        id,
 		Title:     title,
 		CWD:       m.sessionCWD,
@@ -3006,6 +3111,10 @@ func (m *Model) currentSessionSnapshot() sessionstore.Session {
 		CreatedAt: createdAt,
 		UpdatedAt: now,
 	}
+	if m.todoStore != nil {
+		snap.Todos = m.todoStore.List()
+	}
+	return snap
 }
 
 // --- Entry point ---
