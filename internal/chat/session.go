@@ -83,6 +83,11 @@ Always use these built-in tools for file operations — do NOT use any fs__* MCP
 Always call file_read on a file before calling file_edit — copy old_str verbatim from the file_read output, including exact whitespace and indentation.
 file_read output has line numbers like "   1│<line>" — these are decorative display only. Do NOT include them in file_write or file_edit content.
 
+Performance — batch file operations to minimise round-trips:
+- Read multiple independent files in one turn by calling file_read several times in the same tool-call batch.
+- For multiple changes to the same file, use file_edit with the edits:[{old_str,new_str},...] array to apply all hunks in one call.
+- When a file needs many changes (rewrites, large refactors), prefer file_write over many sequential file_edit calls — read the file fully first, then write the complete new version in one call.
+
 To search for patterns across many files, use process_start to run rg (ripgrep) or grep rather than reading files one by one. This is significantly faster for exploring a codebase.
 Example: command="rg", args=["--type", "go", "MyFunc"] — args contains only the arguments, NOT the command name itself.
 
