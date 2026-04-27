@@ -1,17 +1,18 @@
 package ai
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"bytes"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -722,8 +723,7 @@ func parseNumCtx(params string) int {
 	for _, line := range strings.Split(params, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && fields[0] == "num_ctx" {
-			var n int
-			if _, err := fmt.Sscanf(fields[1], "%d", &n); err == nil && n > 0 {
+			if n, err := strconv.Atoi(fields[1]); err == nil && n > 0 {
 				return n
 			}
 		}
