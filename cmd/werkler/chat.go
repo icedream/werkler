@@ -256,6 +256,10 @@ func resolveAutopilotMax(flagVal, cfgVal int) int {
 
 // buildProviderClient constructs a single AI client from a ProviderConfig.
 func buildProviderClient(p config.ProviderConfig) (*ai.Client, error) {
+	var extraOpts []ai.ClientOption
+	if p.ReasoningEffort != "" {
+		extraOpts = append(extraOpts, ai.WithReasoningEffort(p.ReasoningEffort))
+	}
 	switch p.Type {
 	case config.ProviderTypeOpenAI, "": // empty type defaults to openai
 		// Apply the reasoning alias transport so that Ollama-hosted thinking
@@ -263,7 +267,7 @@ func buildProviderClient(p config.ProviderConfig) (*ai.Client, error) {
 		// are displayed correctly. The transform is a no-op for providers that
 		// already use reasoning_content or don't emit thinking tokens at all.
 		return ai.NewWithTransport(p.Endpoint, p.APIKey, p.Model,
-			ai.NewReasoningAliasTransport(nil)), nil
+			ai.NewReasoningAliasTransport(nil), extraOpts...), nil
 	case config.ProviderTypeCopilot:
 		tok, loadErr := copilot.LoadGitHubToken()
 		if loadErr != nil {
@@ -277,7 +281,7 @@ func buildProviderClient(p config.ProviderConfig) (*ai.Client, error) {
 		}
 		transport := ai.NewReasoningAliasTransport(copilot.NewTransport(tok.AccessToken))
 		return ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport},
-			ai.WithNoStreamUsage(),
+			append([]ai.ClientOption{ai.WithNoStreamUsage()}, extraOpts...)...,
 		), nil
 	default:
 		return nil, fmt.Errorf("unknown provider type %q for provider %q", p.Type, p.Name)

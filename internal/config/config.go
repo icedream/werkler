@@ -73,6 +73,9 @@ type ProviderConfig struct {
 	// (e.g. GitHub Copilot) to enable automatic context compaction.
 	// 0 means auto-detect only.
 	ContextWindow int `mapstructure:"context_window"`
+	// ReasoningEffort controls the depth of reasoning for models that support it
+	// (e.g. "low", "medium", "high"). Leave empty to use the model's default.
+	ReasoningEffort string `mapstructure:"reasoning_effort"`
 }
 
 // RubberDuckConfig configures an optional secondary AI model used for critical

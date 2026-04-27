@@ -24,6 +24,7 @@ type Client struct {
 	endpoint           string       // base URL, stored for provider-specific probing (e.g. Ollama /api/show)
 	probeClient        *http.Client // HTTP client used for model-info probes; nil = use http.DefaultClient
 	disableStreamUsage atomic.Bool  // set after a 400 caused by unsupported stream_options
+	reasoningEffort    string       // optional: "low", "medium", "high" (model-specific)
 }
 
 // New creates a Client using the given base URL, API key and model name.
@@ -40,15 +41,19 @@ func New(endpoint, apiKey, model string) *Client {
 // NewWithTransport creates a Client that sends requests through the given
 // transport. If transport is nil, http.DefaultTransport is used. The API key
 // is included in the Authorization header as usual.
-func NewWithTransport(endpoint, apiKey, model string, transport http.RoundTripper) *Client {
+func NewWithTransport(endpoint, apiKey, model string, transport http.RoundTripper, opts ...ClientOption) *Client {
 	cfg := openai.DefaultConfig(apiKey)
 	cfg.BaseURL = endpoint
 	cfg.HTTPClient = &http.Client{Transport: transport}
-	return &Client{
+	c := &Client{
 		inner:    *openai.NewClientWithConfig(cfg),
 		model:    model,
 		endpoint: endpoint,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // ToolDefinition describes a callable tool for the AI.
@@ -159,6 +164,14 @@ type ClientOption func(*Client)
 func WithNoStreamUsage() ClientOption {
 	return func(c *Client) {
 		c.disableStreamUsage.Store(true)
+	}
+}
+
+// WithReasoningEffort sets the reasoning_effort for models that support it
+// (e.g. "low", "medium", "high"). Ignored if empty.
+func WithReasoningEffort(effort string) ClientOption {
+	return func(c *Client) {
+		c.reasoningEffort = effort
 	}
 }
 
@@ -300,6 +313,9 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			Model:    c.model,
 			Messages: toOpenAIMessages(messages),
 			Tools:    toOpenAITools(tools),
+		}
+		if c.reasoningEffort != "" {
+			req.ReasoningEffort = c.reasoningEffort
 		}
 		if !c.disableStreamUsage.Load() {
 			req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
