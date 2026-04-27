@@ -9,15 +9,17 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	openai "github.com/sashabaranov/go-openai"
 )
 
 // Client wraps the OpenAI-compatible API for chat completions with tool use.
 type Client struct {
-	inner    openai.Client
-	model    string
-	endpoint string // base URL, stored for provider-specific probing (e.g. Ollama /api/show)
+	inner              openai.Client
+	model              string
+	endpoint           string      // base URL, stored for provider-specific probing (e.g. Ollama /api/show)
+	disableStreamUsage atomic.Bool // set after a 400 caused by unsupported stream_options
 }
 
 // New creates a Client using the given base URL, API key and model name.
@@ -247,13 +249,24 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 		}
 
 		req := openai.ChatCompletionRequest{
-			Model:         c.model,
-			Messages:      toOpenAIMessages(messages),
-			Tools:         toOpenAITools(tools),
-			StreamOptions: &openai.StreamOptions{IncludeUsage: true},
+			Model:    c.model,
+			Messages: toOpenAIMessages(messages),
+			Tools:    toOpenAITools(tools),
+		}
+		if !c.disableStreamUsage.Load() {
+			req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
 		}
 
 		stream, err := c.inner.CreateChatCompletionStream(ctx, req)
+		if err != nil {
+			// Some providers (e.g. GitHub Copilot) reject stream_options with a plain
+			// 400 "Bad Request".  Retry once without it and remember for future calls.
+			if req.StreamOptions != nil && isHTTPStatusError(err, http.StatusBadRequest) {
+				c.disableStreamUsage.Store(true)
+				req.StreamOptions = nil
+				stream, err = c.inner.CreateChatCompletionStream(ctx, req)
+			}
+		}
 		if err != nil {
 			send(StreamChunk{Err: fmt.Errorf("chat completion stream: %w", err)})
 			return
@@ -346,6 +359,21 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 		send(StreamChunk{Done: true, Msg: msg, RateLimits: rateLimits, FinishReason: finishReason, Usage: usage})
 	}()
 	return ch
+}
+
+// isHTTPStatusError reports whether err carries the given HTTP status code.
+// go-openai wraps HTTP errors as *openai.RequestError (for non-JSON bodies)
+// or *openai.APIError (for JSON error bodies); both carry HTTPStatusCode.
+func isHTTPStatusError(err error, code int) bool {
+	var re *openai.RequestError
+	if errors.As(err, &re) {
+		return re.HTTPStatusCode == code
+	}
+	var ae *openai.APIError
+	if errors.As(err, &ae) {
+		return ae.HTTPStatusCode == code
+	}
+	return false
 }
 
 func toOpenAIMessages(msgs []Message) []openai.ChatCompletionMessage {
