@@ -57,15 +57,15 @@ After receiving any review:
 - Read the feedback carefully.
 - If it identifies bugs, logic errors, design flaws, or missing edge cases, STOP and revise the plan file to address them before proceeding.
 - Only proceed to implementation once you have incorporated the feedback. Do not treat the review as a formality.
-- Once the plan is finalised (review passed or issues resolved), give the user a brief summary and the file path, then STOP.
-  Use ask_user with choices=["Implement it", "Implement it with autopilot", "Reject"] and allow_freeform=true to ask whether to proceed.
-  - "Implement it": call start_implementation(autopilot=false), then proceed with the first implementation step.
-  - "Implement it with autopilot": call start_implementation(autopilot=true), then STOP — the autopilot loop will continue.
-  - "Reject" or any freeform rejection: acknowledge the feedback or reason, then STOP. Do not start implementing.
+- Once the plan is finalised (review passed or issues resolved), give the user a brief summary and the file path, then call confirm_plan(summary="…") — do NOT use ask_user for this step.
+  confirm_plan presents the choice to the user and returns one of:
+  - "approved": proceed with implementation immediately.
+  - "approved_with_autopilot": STOP your response — autopilot will continue.
+  - "rejected: <reason>": acknowledge the reason and STOP. Do not start implementing.
 
 ## Key checkpoints — always stop and ask the user
 These are moments where you MUST pause and use ask_user before continuing:
-- After finalising a plan — use ask_user with the implementation choices (see Planning and review section above).
+- After finalising a plan — call confirm_plan(summary="…") (see Planning and review section above).
 - Before making changes that go significantly beyond the original request.
 - When you discover the task is substantially more complex or risky than expected.
 - When you are unsure which of several valid approaches to take.

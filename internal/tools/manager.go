@@ -110,11 +110,12 @@ type mcpConnector interface {
 // goroutine and blocks until the user responds or ctx is cancelled.
 type UserAsker func(ctx context.Context, question string, choices []string, recommendedChoice string, allowFreeform bool) (string, error)
 
-// ImplementationStarter is implemented by interactive callers to switch to the
-// configured implementation mode (and optionally enable autopilot) when the AI
-// calls start_implementation. It is called from a tool execution goroutine and
-// blocks until the TUI has applied the mode change or ctx is cancelled.
-type ImplementationStarter func(ctx context.Context, autopilot bool) error
+// PlanConfirmer is implemented by interactive callers to present a plan-confirmation
+// dialog to the user. The TUI owns all mode-switching and autopilot logic;
+// the callback blocks until the user responds or ctx is cancelled, and returns
+// one of: "approved", "approved_with_autopilot", or "rejected: <reason>".
+// When nil (non-interactive), the tool auto-approves without a dialog.
+type PlanConfirmer func(ctx context.Context, summary string) (string, error)
 
 // subagentDef describes a subagent that the AI can invoke as a tool.
 // Each registered subagent becomes one built-in tool in the manager.
@@ -130,19 +131,19 @@ type subagentDef struct {
 
 // Manager wraps a chat.ToolManager and adds built-in tools.
 type Manager struct {
-	wrapped               chat.ToolManager
-	processes             *process.Manager
-	pathApprover          PathApprover
-	builtins              []builtin
-	userAsker             UserAsker
-	implementationStarter ImplementationStarter
-	subagents             []subagentDef
-	mcpMgr                mcpConnector
-	skills                []skills.Skill
-	todoStore             *todostore.Store
-	memoryStore           *memorystore.MemoryStore
-	taskTitle             func(string) // optional; called when the AI sets a task title via task_start
-	activeCallID          atomic.Value // stores string; set/cleared by doCallTool goroutine
+	wrapped       chat.ToolManager
+	processes     *process.Manager
+	pathApprover  PathApprover
+	builtins      []builtin
+	userAsker     UserAsker
+	planConfirmer PlanConfirmer
+	subagents     []subagentDef
+	mcpMgr        mcpConnector
+	skills        []skills.Skill
+	todoStore     *todostore.Store
+	memoryStore   *memorystore.MemoryStore
+	taskTitle     func(string) // optional; called when the AI sets a task title via task_start
+	activeCallID  atomic.Value // stores string; set/cleared by doCallTool goroutine
 }
 
 type builtin struct {
@@ -220,12 +221,10 @@ func (m *Manager) SetPathApprover(pa PathApprover) {
 // "not available in non-interactive mode" message.
 func (m *Manager) SetUserAsker(fn UserAsker) { m.userAsker = fn }
 
-// SetImplementationStarter provides the callback used by the start_implementation
-// built-in to trigger a mode switch (and optional autopilot enable) in the TUI.
-// When nil (the default), start_implementation returns a static message.
-func (m *Manager) SetImplementationStarter(fn ImplementationStarter) {
-	m.implementationStarter = fn
-}
+// SetPlanConfirmer provides the callback used by the confirm_plan built-in to
+// present a plan-confirmation dialog and handle mode/autopilot switching.
+// When nil (the default), confirm_plan auto-approves without a dialog.
+func (m *Manager) SetPlanConfirmer(fn PlanConfirmer) { m.planConfirmer = fn }
 
 // SetTaskTitleNotify registers a callback invoked whenever the AI calls
 // task_start to report what it is currently working on. Pass nil to disable.
@@ -1143,23 +1142,27 @@ Provide a concise summary of what was accomplished.`,
 	})
 	builtins = append(builtins, builtin{
 		def: ai.ToolDefinition{
-			Name: "start_implementation",
-			Description: `Switch to the implementation mode and optionally enable autopilot to begin implementing the plan that was just discussed.
-Call this only AFTER the user has confirmed they want to proceed with implementation (via ask_user).
-- autopilot=false: switch to the implementation mode; you then proceed with implementation in the conversation.
-- autopilot=true: switch to the implementation mode and enable autopilot; the autonomous loop will continue the work.
-In both cases the current mode (e.g. plan mode) is replaced by the configured implementation mode.`,
+			Name: "confirm_plan",
+			Description: `Present the finalised plan to the user and ask whether to proceed with implementation.
+Call this ONLY after writing the plan file and completing any review cycles.
+Provide a brief 2-3 sentence summary of the plan for the user to review.
+The user will choose one of: implement now, implement with autopilot, or reject.
+The return value tells you how to proceed:
+- "approved": implement immediately in the current conversation turn.
+- "approved_with_autopilot": autopilot has been enabled — STOP your response; the autonomous loop will continue.
+- "rejected: <reason>": acknowledge the reason and stop; do NOT start implementing.`,
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"autopilot": map[string]any{
-						"type":        "boolean",
-						"description": "If true, enable autopilot so the implementation runs autonomously without further user interaction",
+					"summary": map[string]any{
+						"type":        "string",
+						"description": "Brief 2-3 sentence summary of the plan for the user",
 					},
 				},
+				"required": []string{"summary"},
 			},
 		},
-		handle: m.handleStartImplementation,
+		handle: m.handleConfirmPlan,
 	})
 
 	return builtins
@@ -1964,21 +1967,13 @@ func (m *Manager) handleTaskComplete(_ context.Context, args map[string]any) (st
 	return summary, nil
 }
 
-func (m *Manager) handleStartImplementation(ctx context.Context, args map[string]any) (string, error) {
-	autopilot := false
-	if v, ok := args["autopilot"].(bool); ok {
-		autopilot = v
+func (m *Manager) handleConfirmPlan(ctx context.Context, args map[string]any) (string, error) {
+	summary := stringArg(args, "summary")
+	if m.planConfirmer == nil {
+		// Non-interactive (prompt mode or no TUI): auto-approve without a dialog.
+		return "approved: proceed with implementation", nil
 	}
-	if m.implementationStarter == nil {
-		return "(start_implementation requires interactive mode — run werkler interactively)", nil
-	}
-	if err := m.implementationStarter(ctx, autopilot); err != nil {
-		return fmt.Sprintf("start_implementation failed: %v", err), nil
-	}
-	if autopilot {
-		return "Switched to implementation mode with autopilot enabled. Proceeding autonomously.", nil
-	}
-	return "Switched to implementation mode. Proceeding with implementation.", nil
+	return m.planConfirmer(ctx, summary)
 }
 
 func (m *Manager) handleGetTime(_ context.Context, args map[string]any) (string, error) {

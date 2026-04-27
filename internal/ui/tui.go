@@ -287,22 +287,13 @@ type askUserResult struct {
 // askUserMsg is sent by the ask_user tool goroutine to the TUI so it can present
 // the question and collect a reply. resultCh is buffered (capacity 1).
 type askUserMsg struct {
-	callID        string
-	question      string
-	choices       []string
-	recommended   string
-	allowFreeform bool
-	resultCh      chan<- askUserResult
-}
-
-// switchModeMsg is sent by the start_implementation tool goroutine to the TUI
-// so it can switch to the implementation mode (and optionally enable autopilot).
-// resultCh is buffered (capacity 1) and receives nil on success or a non-nil
-// error if the mode name is unknown.
-type switchModeMsg struct {
-	callID    string
-	autopilot bool
-	resultCh  chan<- error
+	callID             string
+	question           string
+	choices            []string
+	recommended        string
+	allowFreeform      bool
+	isPlanConfirmation bool // when true, override choices with fixed plan-confirm options
+	resultCh           chan<- askUserResult
 }
 
 // mcpServerStatusMsg is sent by a background MCP connect tea.Cmd when a single
@@ -601,7 +592,7 @@ type SessionOptions struct {
 	// when restoring a session.
 	ConfiguredModes []config.ModeConfig
 	// ImplementationMode is the name of the mode preset to apply when the AI
-	// calls start_implementation. Empty string uses the default mode.
+	// calls confirm_plan and the user approves. Empty string uses the default mode.
 	ImplementationMode string
 	// MemoryStore, if non-nil, enables cross-session project memory tools and
 	// injects the current memory into the system prompt at request time.
@@ -975,15 +966,16 @@ type Model struct {
 	pendingApprovalChoice string
 
 	// ask_user state (stateAwaitingUserQuestion).
-	askUserCallID        string
-	askUserQuestion      string
-	askUserChoices       []string
-	askUserRecommended   string
-	askUserAllowFreeform bool
-	askUserSelectedIdx   int // index of highlighted choice; -1 = freeform input active
-	askUserItemIdx       int // index of the question display item in items; -1 if none
-	askUserResultCh      chan<- askUserResult
-	askUserSavedDraft    string // input text saved on entry, restored on exit
+	askUserCallID             string
+	askUserQuestion           string
+	askUserChoices            []string
+	askUserRecommended        string
+	askUserAllowFreeform      bool
+	askUserSelectedIdx        int // index of highlighted choice; -1 = freeform input active
+	askUserItemIdx            int // index of the question display item in items; -1 if none
+	askUserResultCh           chan<- askUserResult
+	askUserSavedDraft         string // input text saved on entry, restored on exit
+	askUserIsPlanConfirmation bool   // when true, answer submission applies mode/autopilot switch
 
 	// Per-operation cancellation for in-flight streams and tool calls.
 	// cancelOp is nil when idle. cancelPending is true after the first Esc
@@ -1118,7 +1110,7 @@ type Model struct {
 	// configuredModes holds the raw config entries for re-resolving modes on session restore.
 	configuredModes []config.ModeConfig
 	// implementationMode is the name of the mode preset to apply when the AI calls
-	// start_implementation. Empty string means use the default mode.
+	// confirm_plan and the user approves. Empty string means use the default mode.
 	implementationMode string
 	// modePicker is the list used for /mode selection.
 	modePicker list.Model
@@ -2330,9 +2322,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				ch := m.askUserResultCh
+				isPlanConfirm := m.askUserIsPlanConfirmation
 				m.teardownAskUser()
 				m.state = stateCallingTool
 				needRebuild = true
+				if isPlanConfirm {
+					// TUI owns mode/autopilot — apply before returning to the AI.
+					switch answer {
+					case "Implement it":
+						targetMode, err := chat.ResolveMode(m.implementationMode, m.configuredModes)
+						if err == nil {
+							m.applyMode(targetMode)
+						}
+						if m.autopilot || m.autopilotPaused {
+							m.autopilotDisable()
+						}
+						answer = "approved: proceed with implementation"
+					case "Implement it with autopilot":
+						targetMode, err := chat.ResolveMode(m.implementationMode, m.configuredModes)
+						if err == nil {
+							m.applyMode(targetMode)
+						}
+						m.autopilotEnable()
+						answer = "approved_with_autopilot: autopilot will continue — stop your current response"
+					default:
+						if !strings.HasPrefix(answer, "rejected:") {
+							answer = "rejected: " + answer
+						}
+					}
+				}
 				if ch != nil {
 					ch <- askUserResult{answer: answer}
 				}
@@ -2662,39 +2680,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case switchModeMsg:
-		// Guard against stale messages (context cancelled before Update processed it).
-		if m.executingCall == nil || m.executingCall.ID != msg.callID {
-			break
-		}
-		// Resolve the target mode: use implementationMode if set, else default.
-		targetModeName := m.implementationMode
-		targetMode, resolveErr := chat.ResolveMode(targetModeName, m.configuredModes)
-		if resolveErr != nil {
-			go func() { msg.resultCh <- resolveErr }()
-			break
-		}
-		m.applyMode(targetMode)
-		// Make autopilot authoritative: honour the user's explicit choice regardless
-		// of what the target mode specifies.
-		if msg.autopilot {
-			m.autopilotEnable()
-		} else if m.autopilot || m.autopilotPaused {
-			m.autopilotDisable()
-		}
-		go func() { msg.resultCh <- nil }()
-
 	case askUserMsg:
 		// Guard against stale messages that arrive after the call already finished
 		// (e.g. context was cancelled between send and receive).
 		if m.executingCall == nil || m.executingCall.ID != msg.callID {
 			break
 		}
+
+		if msg.isPlanConfirmation {
+			// Plan confirmation: the TUI owns all mode/autopilot decisions.
+			// If autopilot is already running, auto-confirm without showing a dialog.
+			if m.autopilot {
+				targetMode, err := chat.ResolveMode(m.implementationMode, m.configuredModes)
+				if err == nil {
+					wasAutopilot := m.autopilot
+					m.applyMode(targetMode)
+					if !m.autopilot && wasAutopilot {
+						m.autopilotEnable() // restore if applyMode disabled it
+					}
+				}
+				go func() {
+					msg.resultCh <- askUserResult{answer: "approved_with_autopilot: autopilot will continue"}
+				}()
+				break
+			}
+			// Override to fixed plan-confirmation choices; freeform allows a rejection reason.
+			msg.choices = []string{"Implement it", "Implement it with autopilot", "Reject"}
+			msg.recommended = "Implement it"
+			msg.allowFreeform = true
+		}
+
 		m.askUserCallID = msg.callID
 		m.askUserQuestion = msg.question
 		m.askUserChoices = msg.choices
 		m.askUserRecommended = msg.recommended
 		m.askUserAllowFreeform = msg.allowFreeform
+		m.askUserIsPlanConfirmation = msg.isPlanConfirmation
 
 		// Pre-select only when freeform is disabled; otherwise just mark recommended.
 		m.askUserSelectedIdx = -1
@@ -3842,6 +3863,7 @@ func (m *Model) teardownAskUser() {
 	m.askUserResultCh = nil
 	m.askUserItemIdx = -1
 	m.askUserSelectedIdx = -1
+	m.askUserIsPlanConfirmation = false
 	m.input.SetValue(m.askUserSavedDraft)
 	m.askUserSavedDraft = ""
 	m.syncViewportHeight()
@@ -4116,9 +4138,9 @@ func (m *Model) processNextCall() tea.Cmd {
 		return func() tea.Msg { return taskCompleteMsg{callID: call.ID, summary: summary} }
 	}
 
-	// ask_user, start_implementation, subagent tools, use_skill, task_start, todo_*, memory_*, and connect_server
+	// ask_user, confirm_plan, subagent tools, use_skill, task_start, todo_*, memory_*, and connect_server
 	// are always dispatched immediately without an approval dialog.
-	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "start_implementation" ||
+	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "confirm_plan" ||
 		m.session.IsSubagentTool(call.Name) ||
 		call.Name == "use_skill" || call.Name == "task_start" ||
 		call.Name == "todo_add" || call.Name == "todo_update" || call.Name == "todo_list" ||
@@ -5370,21 +5392,22 @@ func RunTUI(
 		toolMgr.SetTaskTitleNotify(func(title string) {
 			sendFn(taskTitleMsg{title: title})
 		})
-		toolMgr.SetImplementationStarter(func(ctx context.Context, autopilot bool) error {
-			resultCh := make(chan error, 1)
+		toolMgr.SetPlanConfirmer(func(ctx context.Context, summary string) (string, error) {
+			resultCh := make(chan askUserResult, 1)
 			callID := toolMgr.ActiveCallID()
 			if callID != "" {
-				sendFn(switchModeMsg{
-					callID:    callID,
-					autopilot: autopilot,
-					resultCh:  resultCh,
+				sendFn(askUserMsg{
+					callID:             callID,
+					question:           summary,
+					isPlanConfirmation: true,
+					resultCh:           resultCh,
 				})
 			}
 			select {
-			case err := <-resultCh:
-				return err
+			case r := <-resultCh:
+				return r.answer, r.err
 			case <-ctx.Done():
-				return ctx.Err()
+				return "", ctx.Err()
 			}
 		})
 	}
