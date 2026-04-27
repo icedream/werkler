@@ -108,6 +108,7 @@ const (
 	itemUser          = "user"
 	itemAssistant     = "assistant"
 	itemReasoning     = "reasoning" // thinking/reasoning content from reasoning models
+	itemMarkdown      = "markdown"  // rendered markdown (e.g. /help output)
 	itemToolCall      = "tool_call"
 	itemError         = "error"
 	itemInfo          = "info"        // neutral status/system messages
@@ -706,10 +707,26 @@ func init() {
 			},
 		},
 		{
+			name:          "allow-all",
 			description:   "Toggle allow-all mode — auto-approve all tool calls and path access without prompting",
 			safeWhileBusy: true,
 			action: func(m *Model) []tea.Cmd {
 				m.session.SetAllowAll(!m.session.AllowAll())
+				m.rebuildContent()
+				return nil
+			},
+		},
+		{
+			name:          "reasoning",
+			description:   "Toggle display of model reasoning/thinking content",
+			safeWhileBusy: true,
+			action: func(m *Model) []tea.Cmd {
+				m.showReasoning = !m.showReasoning
+				if m.showReasoning {
+					m.items = append(m.items, displayItem{kind: itemInfo, content: "💭 Reasoning display: on"})
+				} else {
+					m.items = append(m.items, displayItem{kind: itemInfo, content: "💭 Reasoning display: off"})
+				}
 				m.rebuildContent()
 				return nil
 			},
@@ -744,7 +761,7 @@ func init() {
 					lines = append(lines, fmt.Sprintf("- `/%s` — %s", cmd.name, cmd.description))
 				}
 				m.items = append(m.items, displayItem{
-					kind:    itemInfo,
+					kind:    itemMarkdown,
 					content: strings.Join(lines, "\n"),
 				})
 				m.rebuildContent()
@@ -962,6 +979,10 @@ type Model struct {
 	autopilotPaused bool // cap reached — waiting for user to resume
 	autopilotCycle  int  // cycles completed since autopilot started
 	autopilotMax    int  // configured cap (0 → autopilotDefaultMax)
+
+	// showReasoning controls whether reasoning/thinking items are displayed.
+	// Toggled by /reasoning. Defaults to true.
+	showReasoning bool
 }
 
 func initialModel(
@@ -1052,6 +1073,7 @@ func initialModel(
 		glamourStyle:       glamourStyle,
 		mouseEnabled:       true,
 		sessionCWD:         cwd,
+		showReasoning:      true,
 	}
 }
 
@@ -3221,8 +3243,8 @@ func (m *Model) rebuildContent() {
 func (m Model) renderItem(item displayItem) string {
 	switch item.kind {
 	case itemReasoning:
-		if item.content == "" {
-			return "" // empty slot — reasoning not emitted by this model
+		if item.content == "" || !m.showReasoning {
+			return "" // empty slot or reasoning display is off
 		}
 		prefix := reasoningPrefixStyle.Render("💭 Thinking")
 		body := item.content
@@ -3323,6 +3345,9 @@ func (m Model) renderItem(item displayItem) string {
 			content = wordwrap.String(content, m.width)
 		}
 		return infoStyle.Render(content)
+
+	case itemMarkdown:
+		return renderMarkdown(m.renderer, item.content)
 
 	case itemProcessOutput:
 		prefix := processHandleStyle.Render("[process:" + item.handle + "]")
