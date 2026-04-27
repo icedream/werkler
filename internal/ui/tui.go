@@ -42,8 +42,8 @@ import (
 // header(1) + sep(1) + sep(1) + statusLine1(1) + statusLine2(1) + sep(1) + input(1) = 7
 const fixedLines = 7
 
-// sidebarWidth is the fixed column width of the todo sidebar (including 1 separator column).
-const sidebarWidth = 33 // 32 content + 1 for "│"
+// defaultSidebarWidth is the default column width of the todo sidebar (including 1 separator column).
+const defaultSidebarWidth = 33 // 32 content + 1 for "│"
 
 // minMainWidth is the minimum width of the main pane; below this the sidebar is hidden.
 const minMainWidth = 40
@@ -951,6 +951,17 @@ func init() {
 			},
 		},
 		{
+			name:          "sidebar",
+			description:   "Resize the todo sidebar  (usage: /sidebar wider | /sidebar narrower | /sidebar reset)",
+			safeWhileBusy: true,
+			available:     func(m *Model) bool { return m.todoStore != nil },
+			action: func(m *Model) []tea.Cmd {
+				m.items = append(m.items, displayItem{kind: itemInfo, content: fmt.Sprintf("Sidebar width: %d. Use /sidebar wider, /sidebar narrower, or /sidebar reset.", m.sidebarWidth)})
+				m.rebuildContent()
+				return nil
+			},
+		},
+		{
 			name:          "help",
 			description:   "Show available keyboard shortcuts and commands",
 			safeWhileBusy: true,
@@ -1213,8 +1224,9 @@ type Model struct {
 	removeRegistryServer func(serverName string) error
 
 	// Todo sidebar.
-	todoStore   *todostore.Store
-	sidebarOpen bool
+	todoStore    *todostore.Store
+	sidebarOpen  bool
+	sidebarWidth int // column width including 1-char separator; defaults to defaultSidebarWidth
 
 	// collapsedHandles tracks which process output handles are collapsed.
 	// By default all process outputs are collapsed (show first 2 lines).
@@ -1357,6 +1369,7 @@ func initialModel(
 		agentWizardExcluded:   make(map[string]bool),
 		disabledSkills:        make(map[string]bool),
 		collapsedHandles:      make(map[string]bool),
+		sidebarWidth:          defaultSidebarWidth,
 		input:                 ti,
 		spinner:               sp,
 		modelName:             modelName,
@@ -1780,8 +1793,8 @@ func (m *Model) syncViewportHeight() {
 // sidebar is open. Must be called after m.width, m.height, or m.sidebarOpen changes.
 func (m *Model) recalcLayout() {
 	mainW := m.width
-	if m.sidebarOpen && m.todoStore != nil && m.width-sidebarWidth >= minMainWidth {
-		mainW = m.width - sidebarWidth
+	if m.sidebarOpen && m.todoStore != nil && m.width-m.sidebarWidth >= minMainWidth {
+		mainW = m.width - m.sidebarWidth
 	}
 	m.viewport.Width = mainW
 	m.input.Width = mainW - 5 // 5 = len("You> ")
@@ -2198,6 +2211,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.collapsedHandles[arg] = true
 						}
 						needRebuild = true
+					case strings.HasPrefix(text, "/sidebar "):
+						arg := strings.TrimSpace(strings.TrimPrefix(text, "/sidebar "))
+						m.input.Reset()
+						m.updateCompletion()
+						const sidebarMin, sidebarMax = 20, 60
+						switch arg {
+						case "wider":
+							if m.sidebarWidth < sidebarMax {
+								m.sidebarWidth = min(m.sidebarWidth+4, sidebarMax)
+								m.recalcLayout()
+								needRebuild = true
+							}
+						case "narrower":
+							if m.sidebarWidth > sidebarMin {
+								m.sidebarWidth = max(m.sidebarWidth-4, sidebarMin)
+								m.recalcLayout()
+								needRebuild = true
+							}
+						case "reset":
+							m.sidebarWidth = defaultSidebarWidth
+							m.recalcLayout()
+							needRebuild = true
+						default:
+							m.items = append(m.items, displayItem{kind: itemInfo, content: "Usage: /sidebar wider | /sidebar narrower | /sidebar reset"})
+							needRebuild = true
+						}
 					case text != "":
 						m.input.Reset()
 						m.appendInputHistory(text)
@@ -3982,7 +4021,7 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Main viewport, optionally with todo sidebar on the right.
-	showSidebar := m.sidebarOpen && m.todoStore != nil && m.width-sidebarWidth >= minMainWidth
+	showSidebar := m.sidebarOpen && m.todoStore != nil && m.width-m.sidebarWidth >= minMainWidth
 	if showSidebar {
 		sidebarSep := lipgloss.NewStyle().Foreground(m.activeBorderColor())
 		sepCol := sidebarSep.Render(strings.Repeat("│\n", m.viewport.Height))
@@ -4239,7 +4278,7 @@ func (m Model) inputView() string {
 // sidebarView renders the todo sidebar panel. Width is sidebarWidth-1 (the
 // caller prepends the "│" separator). Height matches the viewport height.
 func (m Model) sidebarView() string {
-	contentW := sidebarWidth - 1 // 1 col reserved for the "│" separator
+	contentW := m.sidebarWidth - 1 // 1 col reserved for the "│" separator
 	todos := m.todoStore.List()
 	vpH := m.viewport.Height
 
