@@ -266,18 +266,6 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any
 	return m.wrapped.CallTool(ctx, name, args)
 }
 
-// callBuiltin dispatches only to built-in tool handlers, returning an error if
-// the named tool is not a registered built-in. Used by the rubber duck loop to
-// restrict the reviewer to read-only built-ins.
-func (m *Manager) callBuiltin(ctx context.Context, name string, args map[string]any) (string, error) {
-	for _, b := range m.builtins {
-		if b.def.Name == name {
-			return b.handle(ctx, args)
-		}
-	}
-	return "", fmt.Errorf("tool %q is not available to the reviewer", name)
-}
-
 // --- Path extraction ---
 
 // knownShells is the set of command basenames that accept inline scripts via -c.
@@ -843,9 +831,6 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 	if m.mcpMgr != nil {
 		configured := m.mcpMgr.ConfiguredServers()
 		if len(configured) > 0 {
-			// Build a plain-text list of names for the description rather than an
-			// enum constraint — some models (e.g. devstral) misformat tool call JSON
-			// when the schema contains an enum, causing the call to be silently dropped.
 			nameList := make([]string, len(configured))
 			for i, srv := range configured {
 				nameList[i] = srv.Name
@@ -856,14 +841,14 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 					Description: "Connect to a configured MCP server to make its tools available. " +
 						"Call this immediately when the user's request requires tools from that server — " +
 						"do not ask for permission first and do not connect servers unrelated to the current task. " +
-						"After connecting, the server's tools will be listed in the result. " +
-						"Available servers: " + strings.Join(nameList, ", ") + ".",
+						"After connecting, the server's tools will be listed in the result.",
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"name": map[string]any{
 								"type":        "string",
 								"description": "Name of the server to connect",
+								"enum":        nameList,
 							},
 						},
 						"required": []string{"name"},
