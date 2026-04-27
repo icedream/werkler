@@ -157,6 +157,23 @@ werkler chat --provider=copilot        # switch active provider
 The `--model` flag overrides the model for the active provider. Use `--provider`
 to select a different named provider from `[[ai.providers]]`.
 
+## Mode presets
+
+Named modes bundle a system-prompt extension, an optional TUI border color,
+and autopilot/tool-approval overrides. See [modes.md](modes.md) for the full
+reference.
+
+Quick example — an "autopilot-plan" mode that combines the built-in `plan`
+prompt with autopilot pre-enabled:
+
+```toml
+[[modes]]
+name                 = "plan-autopilot"
+base                 = "plan"
+autopilot            = true
+autopilot_max_cycles = 30
+```
+
 ## Rubber duck reviewer
 
 Werkler can optionally route planning and code-review requests to a second AI
@@ -547,6 +564,13 @@ model = "claude-sonnet-4-5"
 # [ai.rubber_duck]
 # provider = "copilot"         # reuse an existing provider
 # model    = "claude-opus-4-5" # with a more capable model for review
+
+# Optional: custom mode presets
+# [[modes]]
+# name                 = "plan-autopilot"
+# base                 = "plan"
+# autopilot            = true
+# autopilot_max_cycles = 30
 
 [mcp]
 auto_approve_tools = [

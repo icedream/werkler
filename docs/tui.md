@@ -7,6 +7,7 @@ features of the Werkler TUI (`werkler chat` without `--prompt`).
 
 | Key | Action |
 |-----|--------|
+| `Shift+Tab` | Cycle to the next mode preset (default → plan → document → custom modes) |
 | `Ctrl+C` / `Ctrl+D` | Quit |
 | `Ctrl+P` | Open model picker |
 | `Ctrl+R` | Open session picker (resume a saved session) |
@@ -24,6 +25,7 @@ Type `/` to open autocomplete. Press `↑`/`↓` to navigate, `Enter` to select,
 
 | Command | Description |
 |---------|-------------|
+| `/mode` | Switch the active mode preset (default, plan, document, or custom) |
 | `/model` | Switch the active AI model |
 | `/tools` | Enable or disable individual tools for this session |
 | `/skills` | Enable or disable individual skills for this session (only shown when skills are loaded) |
@@ -35,6 +37,7 @@ Type `/` to open autocomplete. Press `↑`/`↓` to navigate, `Enter` to select,
 | `/autopilot` | Toggle autopilot mode |
 | `/help` | Show keyboard shortcuts and slash commands inline |
 | `/quit` | Quit werkler |
+| `/image <path-or-url>` | Load a local image file and attach it to your next message so the AI can see it |
 | `/allow-all` | Toggle allow-all mode — approves all tool calls and path access without prompting. A `⚠ allow-all ON` indicator appears in the status bar when active. |
 | `/reasoning` | Toggle display of model reasoning/thinking content (on by default). |
 
@@ -52,6 +55,32 @@ The status bar shows `+N queued` (or `+N queued (M urgent)`) while prompts are p
 
 Press `↑` / `↓` while the input box is empty to navigate your prompt history for
 the current session. This does not affect conversation scroll.
+
+## Mode presets
+
+The active mode shapes the AI's behaviour for the current session (planning,
+documentation, etc.). The mode name and a colored border accent appear in the
+header when a non-default mode is active.
+
+Press **Shift+Tab** to cycle through modes, or use `/mode` to pick one directly.
+
+See [modes.md](modes.md) for a full reference including custom mode configuration.
+
+## Attaching images
+
+If your AI model supports vision, you can show it image files:
+
+```
+/image /path/to/screenshot.png
+/image ~/designs/mockup.jpg
+```
+
+After running `/image`, the image is staged as a pending attachment. Send your
+next message as normal and the image will be included. The AI can also load
+images itself using the built-in `read_image` tool when you ask it to look at a
+file.
+
+Supported formats: PNG, JPEG, GIF, WebP.
 
 ## Todo sidebar
 
