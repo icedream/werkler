@@ -867,6 +867,30 @@ Use only when the memory is fully obsolete. This cannot be undone without rewrit
 				},
 				handle: m.handleMemoryDelete,
 			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name: "memory_promote",
+					Description: `Move a named memory file to a parent directory's store, making it available to all sub-projects.
+Use this when a note turns out to be relevant across the whole project or workspace (e.g. a monorepo root),
+not just the current directory. The memory is deleted from the current directory after being moved.
+Call memory_list first if you are unsure which memories exist, and use ".." or "../.." as target_directory.`,
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"name": map[string]any{
+								"type":        "string",
+								"description": "Name of the memory to promote",
+							},
+							"target_directory": map[string]any{
+								"type":        "string",
+								"description": `Relative path to the target parent directory, e.g. ".." or "../.."`,
+							},
+						},
+						"required": []string{"name", "target_directory"},
+					},
+				},
+				handle: m.handleMemoryPromote,
+			},
 		)
 	}
 
@@ -1782,7 +1806,7 @@ func (m *Manager) handleMemoryList(_ context.Context, _ map[string]any) (string,
 	}
 	var sb strings.Builder
 	for _, e := range entries {
-		sb.WriteString(fmt.Sprintf("- %s (%d bytes)\n", e.Name, e.Size))
+		fmt.Fprintf(&sb, "- %s (%d bytes)\n", e.Name, e.Size)
 	}
 	return strings.TrimSpace(sb.String()), nil
 }
@@ -1823,4 +1847,19 @@ func (m *Manager) handleMemoryDelete(_ context.Context, args map[string]any) (st
 		return "error deleting project memory: " + err.Error(), nil
 	}
 	return fmt.Sprintf("memory %q deleted", name), nil
+}
+
+func (m *Manager) handleMemoryPromote(_ context.Context, args map[string]any) (string, error) {
+	name := stringArg(args, "name")
+	targetDir := stringArg(args, "target_directory")
+	if name == "" {
+		return "error: name is required", nil
+	}
+	if targetDir == "" {
+		return "error: target_directory is required", nil
+	}
+	if err := m.memoryStore.Promote(name, targetDir); err != nil {
+		return "error promoting memory: " + err.Error(), nil
+	}
+	return fmt.Sprintf("memory %q promoted to %s", name, targetDir), nil
 }
