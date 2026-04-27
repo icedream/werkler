@@ -33,3 +33,19 @@ func EnrichSystemPrompt(systemPrompt string, info ai.ModelInfo) string {
 	fmt.Fprintf(&sb, "\n\n## Model Context\nContext window: %d tokens. Manage conversation length accordingly.", info.Context.MaxTokens)
 	return sb.String()
 }
+
+// EnrichSystemPromptReasoningTools appends guidance about when to use the
+// enable_reasoning and think tools. Only call this when reasoning is enabled
+// (i.e. disable_reasoning is false for the active provider).
+func EnrichSystemPromptReasoningTools(systemPrompt string) string {
+	return systemPrompt + `
+
+## Reasoning tools
+Two tools are available to apply deeper thinking when needed:
+
+- **enable_reasoning** — use when the *entire* upcoming response needs deep analytical reasoning: complex architectural decisions, subtle bug root-cause analysis, hard algorithmic tradeoffs, or multi-step reasoning where small errors compound. Call it as your *sole* action with no other tools or response text. werkler immediately re-prompts you with enhanced reasoning enabled. Reasoning returns to the default level after that single turn.
+
+- **think(question)** — use for a focused sub-question *within* a response: picking an algorithm, evaluating a tradeoff, verifying correctness. It runs a small reasoning sub-call and returns an analysis you can use inline. The thinking is not stored in the conversation history.
+
+Only use these tools when genuinely needed — routine coding, simple lookups, and straightforward tasks do not benefit, and both add latency.`
+}

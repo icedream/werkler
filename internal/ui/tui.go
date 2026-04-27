@@ -643,6 +643,11 @@ type SessionOptions struct {
 	// ContextWindowOverride, if > 0, is used as the model's context window size
 	// when the provider does not report it (e.g. GitHub Copilot).
 	ContextWindowOverride int
+	// ReasoningEffort is the effort level to use when reasoning is active
+	// ("low", "medium", "high"). Empty means use the model's default.
+	ReasoningEffort string
+	// DisableReasoning suppresses reasoning tools and never sends reasoning_effort.
+	DisableReasoning bool
 	// MemoryStore, if non-nil, enables cross-session project memory tools and
 	// injects the current memory into the system prompt at request time.
 	MemoryStore *memorystore.MemoryStore
@@ -1110,6 +1115,15 @@ type Model struct {
 	// contextWindowOverride is set from SessionOptions when the config provides
 	// an explicit context window size to use when the provider doesn't report one.
 	contextWindowOverride int
+	// configuredReasoningEffort is the effort level from provider config, used
+	// when the AI enables reasoning via enable_reasoning or think.
+	configuredReasoningEffort string
+	// pendingReasoningEffort, when non-empty, is applied to the next AI stream
+	// and then cleared. Set by the AI's enable_reasoning tool call.
+	pendingReasoningEffort string
+	// disableReasoning mirrors SessionOptions.DisableReasoning; when true,
+	// reasoning tools are hidden and no effort is ever sent.
+	disableReasoning bool
 
 	// UI components.
 	viewport     viewport.Model
@@ -1435,6 +1449,9 @@ func (m *Model) newConversation() []ai.Message {
 	}
 	if wsDir := m.workspaceDir(); wsDir != "" {
 		msgs[0].Content = chat.EnrichSystemPromptWorkspace(msgs[0].Content, wsDir)
+	}
+	if !m.disableReasoning {
+		msgs[0].Content = chat.EnrichSystemPromptReasoningTools(msgs[0].Content)
 	}
 	return msgs
 }
@@ -4854,7 +4871,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 			return doCompact(m.newOpCtx(), m.client, m.messages)
 		}
 		m.setThinking()
-		return doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools)
+		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools)
 	}
 	m.setIdle()
 	m.cancelOp = nil
@@ -4880,7 +4897,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		}
 		m.setThinking()
 		m.turnRoundtrips++
-		return doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools)
+		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools)
 	}
 
 	call := m.pendingCalls[0]
@@ -4912,6 +4929,47 @@ func (m *Model) processNextCall() tea.Cmd {
 		m.pendingCalls = m.pendingCalls[:0]
 		m.currentCall = nil
 		return func() tea.Msg { return taskCompleteMsg{callID: call.ID, summary: summary} }
+	}
+
+	// enable_reasoning: set pending reasoning effort and auto-continue.
+	if call.Name == "enable_reasoning" {
+		effort, _ := call.Arguments["effort"].(string)
+		if effort == "" {
+			effort = m.configuredReasoningEffort
+		}
+		if effort == "" {
+			effort = "medium"
+		}
+		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
+			m.items[idx].toolStatus = toolStatusDone
+		}
+		m.currentCall = nil
+		callID := call.ID
+		if m.pendingReasoningEffort != "" {
+			return func() tea.Msg {
+				return toolResultMsg{callID: callID, toolName: "enable_reasoning",
+					result: "Reasoning is already enabled for your next response."}
+			}
+		}
+		m.pendingReasoningEffort = effort
+		return func() tea.Msg {
+			return toolResultMsg{callID: callID, toolName: "enable_reasoning",
+				result: fmt.Sprintf("Reasoning enabled (%s). Now produce your reasoning-backed response.", effort)}
+		}
+	}
+
+	// think: dispatch a focused sub-completion with reasoning enabled.
+	if call.Name == "think" {
+		question, _ := call.Arguments["question"].(string)
+		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
+			m.items[idx].toolStatus = toolStatusRunning
+		}
+		m.callingToolName = call.Name
+		m.currentCall = nil
+		m.executingCall = &callCopy
+		m.state = stateCallingTool
+		recent := recentContextMessages(m.messages, 6)
+		return doThinkTool(m.newOpCtx(), call.ID, m.client, question, recent, m.configuredReasoningEffort)
 	}
 
 	// ask_user, confirm_plan, subagent tools, use_skill, use_agent, task_start, todo_*, memory_*, and connect_server
@@ -4952,6 +5010,21 @@ func (m *Model) newOpCtx() context.Context {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancelOp = cancel
 	m.cancelPending = false
+	return ctx
+}
+
+// applyReasoningCtx annotates ctx with the pending reasoning effort (consumed
+// one-shot from m.pendingReasoningEffort). Call this just before starting a
+// new AI stream. Safe to call when reasoning is disabled — it is a no-op then.
+func (m *Model) applyReasoningCtx(ctx context.Context) context.Context {
+	if m.disableReasoning {
+		return ctx
+	}
+	if m.pendingReasoningEffort != "" {
+		effort := m.pendingReasoningEffort
+		m.pendingReasoningEffort = ""
+		return ai.WithReasoningEffortCtx(ctx, effort)
+	}
 	return ctx
 }
 
@@ -5002,6 +5075,58 @@ func doStartStream(ctx context.Context, client ai.StreamCompleter, messages []ai
 	return func() tea.Msg {
 		ch := client.CompleteStream(ctx, snapshot, tools)
 		return readNextChunk(ch)()
+	}
+}
+
+// recentContextMessages returns the last n user/assistant messages from msgs,
+// stripping tool calls and image parts for a clean context bundle.
+func recentContextMessages(msgs []ai.Message, n int) []ai.Message {
+	var filtered []ai.Message
+	for _, m := range msgs {
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
+		filtered = append(filtered, ai.Message{Role: m.Role, Content: m.Content})
+	}
+	if len(filtered) > n {
+		filtered = filtered[len(filtered)-n:]
+	}
+	return filtered
+}
+
+// doThinkTool makes a focused sub-completion for the think tool and returns the
+// answer as a toolResultMsg. The reasoning tokens from the sub-call are discarded;
+// only the final answer text is returned.
+func doThinkTool(ctx context.Context, callID string, client ai.StreamCompleter, question string, recentMsgs []ai.Message, effort string) tea.Cmd {
+	return func() tea.Msg {
+		msgs := []ai.Message{
+			{
+				Role: "system",
+				Content: "Reason carefully and step by step. Provide a thorough, accurate analysis. " +
+					"Focus only on the question asked — be concise but complete.",
+			},
+		}
+		msgs = append(msgs, recentMsgs...)
+		msgs = append(msgs, ai.Message{Role: "user", Content: question})
+		if effort != "" {
+			ctx = ai.WithReasoningEffortCtx(ctx, effort)
+		}
+		ch := client.CompleteStream(ctx, msgs, nil)
+		var answer strings.Builder
+		for chunk := range ch {
+			if chunk.Err != nil {
+				if errors.Is(chunk.Err, io.EOF) {
+					break
+				}
+				return toolResultMsg{callID: callID, toolName: "think", err: chunk.Err}
+			}
+			if chunk.Done {
+				answer.WriteString(chunk.Msg.Content)
+				break
+			}
+			answer.WriteString(chunk.Delta)
+		}
+		return toolResultMsg{callID: callID, toolName: "think", result: answer.String()}
 	}
 }
 
@@ -5455,7 +5580,7 @@ func (m *Model) applyCompaction(summary string) []tea.Cmd {
 		m.autoCompactPending = false
 		m.turnRoundtrips++
 		m.setThinking()
-		cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
+		cmds = append(cmds, doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools))
 	} else {
 		m.setIdle()
 		cmds = append(cmds, m.input.Focus())
@@ -5791,6 +5916,10 @@ func toolFriendlyName(name string) string {
 		return "Complete task"
 	case "ask_user":
 		return "Ask user"
+	case "enable_reasoning":
+		return "Enable reasoning"
+	case "think":
+		return "Think"
 	case "todo_add":
 		return "Add todo"
 	case "todo_update":
@@ -6220,6 +6349,10 @@ func RunTUI(
 		toolMgr.SetMCPManager(opts.MCPManager)
 	}
 
+	if opts.DisableReasoning {
+		toolMgr.SetReasoningDisabled(true)
+	}
+
 	// Fetch initially-available tools (includes connect_server when servers are registered).
 	sessionTools, err := session.Tools(ctx)
 	if err != nil {
@@ -6266,6 +6399,8 @@ func RunTUI(
 	m.configuredModes = opts.ConfiguredModes
 	m.implementationMode = opts.ImplementationMode
 	m.contextWindowOverride = opts.ContextWindowOverride
+	m.configuredReasoningEffort = opts.ReasoningEffort
+	m.disableReasoning = opts.DisableReasoning
 	if opts.ActiveMode.Name != "" {
 		m.activeMode = opts.ActiveMode
 		// Apply autopilot/approve settings from the mode (not using applyMode
