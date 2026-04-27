@@ -50,25 +50,6 @@ func DefaultDir() string {
 	return filepath.Join(home, ".agents", "skills")
 }
 
-// ExpandTilde replaces a leading ~ with the user's home directory.
-func ExpandTilde(path string) string {
-	if path == "~" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
-		}
-		return home
-	}
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
-		}
-		return filepath.Join(home, path[2:])
-	}
-	return path
-}
-
 // cmdLineRe matches lines of the form !`command` where command is the shell
 // command to execute, capturing the command in group 1.
 var cmdLineRe = regexp.MustCompile("^!`(.+)`$")

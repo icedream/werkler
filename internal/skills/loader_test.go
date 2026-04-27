@@ -123,13 +123,3 @@ func TestLoadDir_DuplicateNameSkipped(t *testing.T) {
 	assert.Len(t, loaded, 1)
 	assert.Contains(t, warn.String(), "clash")
 }
-
-func TestExpandTilde(t *testing.T) {
-	home, err := os.UserHomeDir()
-	require.NoError(t, err)
-
-	assert.Equal(t, home, skills.ExpandTilde("~"))
-	assert.Equal(t, filepath.Join(home, ".agents", "skills"), skills.ExpandTilde("~/.agents/skills"))
-	assert.Equal(t, "/absolute/path", skills.ExpandTilde("/absolute/path"))
-	assert.Equal(t, "relative/path", skills.ExpandTilde("relative/path"))
-}

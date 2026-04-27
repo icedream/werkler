@@ -19,6 +19,7 @@ import (
 	"github.com/icedream/werkler/internal/copilot"
 	mcppkg "github.com/icedream/werkler/internal/mcp"
 	"github.com/icedream/werkler/internal/memorystore"
+	"github.com/icedream/werkler/internal/pathutil"
 	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/todostore"
@@ -116,7 +117,7 @@ func runChat(_ *cobra.Command, _ []string) error {
 	// Load skills from the configured directory (default: ~/.agents/skills).
 	skillsDir := skills.DefaultDir()
 	if cfg.Skills.Dir != "" {
-		skillsDir = skills.ExpandTilde(cfg.Skills.Dir)
+		skillsDir = pathutil.ExpandTilde(cfg.Skills.Dir)
 	}
 	loadedSkills, err := skills.LoadDir(skillsDir, os.Stderr)
 	if err != nil {
