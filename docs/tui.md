@@ -5,41 +5,41 @@ features of the Werkler TUI (`werkler chat` without `--prompt`).
 
 ## Keyboard shortcuts
 
-| Key | Action |
-|-----|--------|
-| `Shift+Tab` | Cycle to the next mode preset (default → plan → document → custom modes) |
-| `Ctrl+C` / `Ctrl+D` | Quit |
-| `Ctrl+P` | Open model picker |
-| `Ctrl+R` | Open session picker (resume a saved session) |
-| `Alt+M` | Toggle mouse reporting — mouse on: scroll wheel works; mouse off: terminal text selection works |
-| `↑` / `↓` | Scroll conversation **or** navigate prompt history when the input is empty |
-| `PgUp` / `PgDn` | Scroll conversation |
-| `Esc` (once, while AI is running) | Arm cancellation — a second `Esc` cancels the current operation |
-| `Esc` (while input has text) | Clear the input |
-| `Esc` (with queued prompts, input empty) | Remove the last queued prompt |
+| Key                                      | Action                                                                                          |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `Shift+Tab`                              | Cycle to the next mode preset (default → plan → document → custom modes)                        |
+| `Ctrl+C` / `Ctrl+D`                      | Quit                                                                                            |
+| `Ctrl+P`                                 | Open model picker                                                                               |
+| `Ctrl+R`                                 | Open session picker (resume a saved session)                                                    |
+| `Alt+M`                                  | Toggle mouse reporting — mouse on: scroll wheel works; mouse off: terminal text selection works |
+| `↑` / `↓`                                | Scroll conversation **or** navigate prompt history when the input is empty                      |
+| `PgUp` / `PgDn`                          | Scroll conversation                                                                             |
+| `Esc` (once, while AI is running)        | Arm cancellation — a second `Esc` cancels the current operation                                 |
+| `Esc` (while input has text)             | Clear the input                                                                                 |
+| `Esc` (with queued prompts, input empty) | Remove the last queued prompt                                                                   |
 
 ## Slash commands
 
 Type `/` to open autocomplete. Press `↑`/`↓` to navigate, `Enter` to select,
 `Esc` to close.
 
-| Command | Description |
-|---------|-------------|
-| `/mode` | Switch the active mode preset (default, plan, document, or custom) |
-| `/model` | Switch the active AI model |
-| `/tools` | Enable or disable individual tools for this session |
-| `/skills` | Enable or disable individual skills for this session (only shown when skills are loaded) |
-| `/clear` | Clear the conversation history |
-| `/new` | Start a new session (clears history and detaches from current saved session) |
-| `/compact` | Summarize the conversation to free up context window space |
-| `/registry` | Browse and add MCP servers from the MCP registry |
-| `/todos` | Toggle the todo sidebar |
-| `/autopilot` | Toggle autopilot mode |
-| `/help` | Show keyboard shortcuts and slash commands inline |
-| `/quit` | Quit werkler |
-| `/image <path-or-url>` | Load a local image file and attach it to your next message so the AI can see it |
-| `/allow-all` | Toggle allow-all mode — approves all tool calls and path access without prompting. A `⚠ allow-all ON` indicator appears in the status bar when active. |
-| `/reasoning` | Toggle display of model reasoning/thinking content (on by default). |
+| Command                | Description                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/mode`                | Switch the active mode preset (default, plan, document, or custom)                                                                                     |
+| `/model`               | Switch the active AI model                                                                                                                             |
+| `/tools`               | Enable or disable individual tools for this session                                                                                                    |
+| `/skills`              | Enable or disable individual skills for this session (only shown when skills are loaded)                                                               |
+| `/clear`               | Clear the conversation history                                                                                                                         |
+| `/new`                 | Start a new session (clears history and detaches from current saved session)                                                                           |
+| `/compact`             | Summarize the conversation to free up context window space                                                                                             |
+| `/registry`            | Browse and add MCP servers from the MCP registry                                                                                                       |
+| `/todos`               | Toggle the todo sidebar                                                                                                                                |
+| `/autopilot`           | Toggle autopilot mode                                                                                                                                  |
+| `/help`                | Show keyboard shortcuts and slash commands inline                                                                                                      |
+| `/quit`                | Quit werkler                                                                                                                                           |
+| `/image <path-or-url>` | Load a local image file and attach it to your next message so the AI can see it                                                                        |
+| `/allow-all`           | Toggle allow-all mode — approves all tool calls and path access without prompting. A `⚠ allow-all ON` indicator appears in the status bar when active. |
+| `/reasoning`           | Toggle display of model reasoning/thinking content (on by default).                                                                                    |
 
 ## Prompt queuing
 
@@ -92,8 +92,8 @@ Todos have four statuses: `pending`, `in_progress`, `done`, `blocked`.
 ## Task title
 
 While the AI is working it may call the `task_start` tool to report what it is
-currently doing (e.g. *"Implementing OAuth callback"* or *"Writing tests for
-parser"*). The title is displayed in the status bar next to the activity
+currently doing (e.g. _"Implementing OAuth callback"_ or _"Writing tests for
+parser"_). The title is displayed in the status bar next to the activity
 indicator and updates as the AI moves between phases. It is cleared
 automatically when the turn ends.
 

@@ -8,11 +8,11 @@ overrides.
 
 ## Built-in modes
 
-| Mode | Color | Behaviour |
-|------|-------|-----------|
-| `default` | (none) | General-purpose assistant |
-| `plan` | Blue | Prioritises task decomposition, structured tickets, dependency analysis, and risk review. Will not write implementation code unless asked. |
-| `document` | Green | Prioritises clear, accurate prose, consistent terminology, and self-contained documents. |
+| Mode       | Color  | Behaviour                                                                                                                                  |
+| ---------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `default`  | (none) | General-purpose assistant                                                                                                                  |
+| `plan`     | Blue   | Prioritises task decomposition, structured tickets, dependency analysis, and risk review. Will not write implementation code unless asked. |
+| `document` | Green  | Prioritises clear, accurate prose, consistent terminology, and self-contained documents.                                                   |
 
 ## Switching modes
 
@@ -68,15 +68,15 @@ with autopilot enabled and a 30-cycle cap.
 
 ### All `[[modes]]` fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Mode name. Shadows a built-in when matching `default`, `plan`, or `document`. |
-| `base` | string | Inherit all settings from this mode before applying overrides. |
-| `color` | string | TUI border accent color. Accepts a `#rrggbb` hex value (e.g. `"#5f87ff"`) or a [256-color terminal index](https://www.ditig.com/publications/256-colors-cheat-sheet) (e.g. `"69"`, `"202"`). Hex is recommended — most modern terminals support true color. |
-| `system_prompt_extra` | string | Text appended to the system prompt while the mode is active. |
-| `autopilot` | bool | Override the autopilot on/off setting for this mode. |
-| `autopilot_max_cycles` | int | Override the autopilot cycle cap (0 = inherit). |
-| `auto_approve_tools` | list | Additional tool globs to auto-approve while this mode is active. |
+| Field                  | Type   | Description                                                                                                                                                                                                                                                 |
+| ---------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                 | string | Mode name. Shadows a built-in when matching `default`, `plan`, or `document`.                                                                                                                                                                               |
+| `base`                 | string | Inherit all settings from this mode before applying overrides.                                                                                                                                                                                              |
+| `color`                | string | TUI border accent color. Accepts a `#rrggbb` hex value (e.g. `"#5f87ff"`) or a [256-color terminal index](https://www.ditig.com/publications/256-colors-cheat-sheet) (e.g. `"69"`, `"202"`). Hex is recommended — most modern terminals support true color. |
+| `system_prompt_extra`  | string | Text appended to the system prompt while the mode is active.                                                                                                                                                                                                |
+| `autopilot`            | bool   | Override the autopilot on/off setting for this mode.                                                                                                                                                                                                        |
+| `autopilot_max_cycles` | int    | Override the autopilot cycle cap (0 = inherit).                                                                                                                                                                                                             |
+| `auto_approve_tools`   | list   | Additional tool globs to auto-approve while this mode is active.                                                                                                                                                                                            |
 
 ### Overriding a built-in
 

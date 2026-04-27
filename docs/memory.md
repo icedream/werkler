@@ -44,20 +44,20 @@ using `memory_promote`.
 The AI has the following built-in tools for managing memories. These are always
 available (no MCP server required).
 
-| Tool | Description |
-|------|-------------|
-| `memory_list` | List all named memory files for the current project |
-| `memory_read` | Read a specific named memory file |
-| `memory_write` | Write (replace) a named memory file |
-| `memory_delete` | Delete a named memory file |
-| `memory_promote` | Move a memory file to a parent directory's store |
+| Tool             | Description                                         |
+| ---------------- | --------------------------------------------------- |
+| `memory_list`    | List all named memory files for the current project |
+| `memory_read`    | Read a specific named memory file                   |
+| `memory_write`   | Write (replace) a named memory file                 |
+| `memory_delete`  | Delete a named memory file                          |
+| `memory_promote` | Move a memory file to a parent directory's store    |
 
 ### Limits
 
-| Limit | Value |
-|-------|-------|
-| Maximum file size | 8 KB per named memory |
-| Maximum files per project | 50 |
+| Limit                     | Value                 |
+| ------------------------- | --------------------- |
+| Maximum file size         | 8 KB per named memory |
+| Maximum files per project | 50                    |
 
 If a memory file is too large to fit in the system prompt budget, its content
 is omitted and a `(omitted, budget exhausted)` notice is shown instead. The AI

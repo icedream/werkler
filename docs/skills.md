@@ -77,10 +77,10 @@ Use `errors.As` for error type assertions, not type switches.
 
 ### Front-matter fields
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | ✓ | Machine-readable identifier. Used with `use_skill`. |
-| `description` | ✓ | Short summary shown to the AI when it decides which skill to load. |
+| Field         | Required | Description                                                        |
+| ------------- | -------- | ------------------------------------------------------------------ |
+| `name`        | ✓        | Machine-readable identifier. Used with `use_skill`.                |
+| `description` | ✓        | Short summary shown to the AI when it decides which skill to load. |
 
 ### Shell command expansion
 
@@ -221,12 +221,12 @@ TypeScript version:
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Skill not listed in `use_skill` | Missing or invalid front matter | Check that `SKILL.md` starts with `---` and has both `name` and `description` |
-| Skill not found at startup | Wrong directory | Check `skills.dir` in your config, or confirm `~/.agents/skills/<name>/SKILL.md` exists |
-| Warning printed on startup | A skill failed to load | Check stderr output; usually a malformed YAML front matter |
-| Shell expansion line not replaced | Command timed out or failed | The placeholder `[error: ...]` is injected; fix or remove the `!`...`` ` line |
+| Symptom                           | Cause                           | Fix                                                                                     |
+| --------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------- |
+| Skill not listed in `use_skill`   | Missing or invalid front matter | Check that `SKILL.md` starts with `---` and has both `name` and `description`           |
+| Skill not found at startup        | Wrong directory                 | Check `skills.dir` in your config, or confirm `~/.agents/skills/<name>/SKILL.md` exists |
+| Warning printed on startup        | A skill failed to load          | Check stderr output; usually a malformed YAML front matter                              |
+| Shell expansion line not replaced | Command timed out or failed     | The placeholder `[error: ...]` is injected; fix or remove the `!`...`` ` line           |
 
 Skills that fail to load are skipped with a warning printed to stderr. Werkler
 continues with the skills that loaded successfully.

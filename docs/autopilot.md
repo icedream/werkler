@@ -36,10 +36,10 @@ active.
 
 **Status bar indicators:**
 
-| Indicator | Meaning |
-|-----------|---------|
-| `⚡ 3/50` | Autopilot active, 3 cycles completed out of a cap of 50 |
-| `⚡ paused (50 cycles)` | Cap reached, waiting for you to resume or disable |
+| Indicator               | Meaning                                                 |
+| ----------------------- | ------------------------------------------------------- |
+| `⚡ 3/50`               | Autopilot active, 3 cycles completed out of a cap of 50 |
+| `⚡ paused (50 cycles)` | Cap reached, waiting for you to resume or disable       |
 
 ## Stopping autopilot
 

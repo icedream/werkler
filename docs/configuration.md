@@ -5,11 +5,11 @@ environment variables or command-line flags.
 
 ## Config file location
 
-| Platform | Default path |
-|----------|--------------|
+| Platform    | Default path                                                                     |
+| ----------- | -------------------------------------------------------------------------------- |
 | Linux / BSD | `$XDG_CONFIG_HOME/werkler/config.toml` (usually `~/.config/werkler/config.toml`) |
-| macOS | `~/Library/Application Support/werkler/config.toml` |
-| Windows | `%AppData%\werkler\config.toml` |
+| macOS       | `~/Library/Application Support/werkler/config.toml`                              |
+| Windows     | `%AppData%\werkler\config.toml`                                                  |
 
 Pass a different path with `--config /path/to/config.toml`.
 
@@ -45,10 +45,10 @@ model = "gpt-4o"   # default model; overridable in the TUI
 
 Provider types:
 
-| `type`    | Description |
-|-----------|-------------|
+| `type`    | Description                                                    |
+| --------- | -------------------------------------------------------------- |
 | `openai`  | Any OpenAI-compatible API (OpenAI, Ollama, vLLM, KubeAI, etc.) |
-| `copilot` | GitHub Copilot (requires `werkler auth copilot` first) |
+| `copilot` | GitHub Copilot (requires `werkler auth copilot` first)         |
 
 When multiple providers are configured you can switch between them live in the
 TUI model picker (`ctrl+p`): models from all providers appear in a flat list
@@ -141,11 +141,11 @@ model = "claude-sonnet-4-5"
 
 #### Authentication management
 
-| Command | Description |
-|---------|-------------|
-| `werkler auth copilot` | Authenticate (device flow) |
+| Command                        | Description                                   |
+| ------------------------------ | --------------------------------------------- |
+| `werkler auth copilot`         | Authenticate (device flow)                    |
 | `werkler auth copilot --force` | Re-authenticate even if already authenticated |
-| `werkler auth status` | Show authentication status for all providers |
+| `werkler auth status`          | Show authentication status for all providers  |
 
 ### Command-line flags
 
@@ -220,13 +220,13 @@ model = "claude-opus-4-5"
 
 ### Fields
 
-| Field | Description |
-|-------|-------------|
-| `provider` | Name of an existing `[[ai.providers]]` entry to reuse. When set, `type`/`endpoint`/`api_key` are ignored. |
-| `model` | Model to use. Overrides the referenced provider's default when `provider` is set; required for standalone configs. |
-| `type` | Provider type for standalone config: `openai` or `copilot`. Defaults to `openai` when omitted. |
-| `endpoint` | Base URL for standalone OpenAI-compatible providers. Defaults to `https://api.openai.com/v1`. |
-| `api_key` | API key for standalone OpenAI-compatible providers. Required when `type = "openai"`. |
+| Field      | Description                                                                                                        |
+| ---------- | ------------------------------------------------------------------------------------------------------------------ |
+| `provider` | Name of an existing `[[ai.providers]]` entry to reuse. When set, `type`/`endpoint`/`api_key` are ignored.          |
+| `model`    | Model to use. Overrides the referenced provider's default when `provider` is set; required for standalone configs. |
+| `type`     | Provider type for standalone config: `openai` or `copilot`. Defaults to `openai` when omitted.                     |
+| `endpoint` | Base URL for standalone OpenAI-compatible providers. Defaults to `https://api.openai.com/v1`.                      |
+| `api_key`  | API key for standalone OpenAI-compatible providers. Required when `type = "openai"`.                               |
 
 ## Tools (MCP servers)
 
@@ -412,17 +412,18 @@ revoked.
 
 #### OAuth configuration fields
 
-| Field | Default | Description |
-|---|---|---|
-| `oauth` | `false` | Enable OAuth for this streamable server |
-| `oauth_client_id` | — | Pre-registered client ID (required when the auth server has no Dynamic Client Registration) |
-| `oauth_client_secret` | — | Client secret (optional for public clients) |
+| Field                 | Default | Description                                                                                                                                                        |
+| --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `oauth`               | `false` | Enable OAuth for this streamable server                                                                                                                            |
+| `oauth_client_id`     | —       | Pre-registered client ID (required when the auth server has no Dynamic Client Registration)                                                                        |
+| `oauth_client_secret` | —       | Client secret (optional for public clients)                                                                                                                        |
 | `oauth_callback_port` | `34217` | Local TCP port werkler listens on for the browser redirect. Must match the callback URL registered in your OAuth App. Set to `0` to let the OS pick a random port. |
 
 > **Note:** Because the OAuth flow requires a browser, it cannot run in
 > non-interactive (`--prompt`) mode. If you try, Werkler will print an error
 > and exit. Run `werkler chat` once first to authenticate, then use
 > `--prompt` freely afterwards.
+
 ### Local server — stdio (Docker)
 
 If you do not have a Copilot subscription, or want full control, run the
@@ -484,12 +485,12 @@ Every time the AI wants to call a tool, Werkler asks for your approval —
 unless the tool matches an entry in `auto_approve_tools`. Approval choices
 in the interactive TUI:
 
-| Key | Effect |
-|-----|--------|
-| `y` | Allow this call once |
-| `a` | Allow this tool for the rest of the session |
+| Key | Effect                                                                                |
+| --- | ------------------------------------------------------------------------------------- |
+| `y` | Allow this call once                                                                  |
+| `a` | Allow this tool for the rest of the session                                           |
 | `p` | Allow permanently — appends the tool name to `auto_approve_tools` in your config file |
-| `n` | Deny this call (the AI is told it was denied) |
+| `n` | Deny this call (the AI is told it was denied)                                         |
 
 In non-interactive mode (`--prompt`), only tools that match
 `auto_approve_tools` are called. All others receive a denial message so the
@@ -516,13 +517,13 @@ File operations (read, write, edit, delete) additionally require per-path
 approval the first time the AI accesses a path. These prompts appear in the
 TUI as a separate dialog before the tool is executed.
 
-| Key | Effect |
-|-----|--------|
-| `y` | Allow this path access once |
+| Key | Effect                                                                              |
+| --- | ----------------------------------------------------------------------------------- |
+| `y` | Allow this path access once                                                         |
 | `d` | Allow the whole containing directory for this session (covers all files beneath it) |
-| `a` | Allow all remaining paths in this batch |
-| `p` | Allow permanently — appends the path to `auto_approve_paths` in your config file |
-| `n` | Deny and cancel the current tool call |
+| `a` | Allow all remaining paths in this batch                                             |
+| `p` | Allow permanently — appends the path to `auto_approve_paths` in your config file    |
+| `n` | Deny and cancel the current tool call                                               |
 
 By default, the AI may read any file under the **current working directory**
 without prompting — the assumption is you started werkler in a project you
