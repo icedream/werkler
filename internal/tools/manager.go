@@ -20,7 +20,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2417,9 +2416,6 @@ func (m *Manager) handleFileDelete(ctx context.Context, args map[string]any) (st
 
 // ensure Manager implements chat.ToolManager.
 var _ chat.ToolManager = (*Manager)(nil)
-
-// ensure slices is used (imported for future dedup use).
-var _ = slices.Contains[[]string, string]
 
 func (m *Manager) handleAskUser(ctx context.Context, args map[string]any) (string, error) {
 	question := stringArg(args, "question")
