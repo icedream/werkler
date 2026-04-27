@@ -165,6 +165,7 @@ type toolResultMsg struct {
 	callID   string
 	toolName string
 	result   string
+	parts    []ai.ImagePart // non-nil when the tool returned image data (e.g. read_image)
 	err      error
 }
 
@@ -3102,6 +3103,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Role:       "tool",
 				ToolCallID: msg.callID,
 				Content:    msg.result,
+				Parts:      msg.parts,
 			})
 			m.callingToolName = ""
 			m.executingCall = nil
@@ -4177,8 +4179,8 @@ func doCallTool(ctx context.Context, toolMgr *tools.Manager, session *chat.Sessi
 			toolMgr.SetActiveCallID(tc.ID)
 			defer toolMgr.SetActiveCallID("")
 		}
-		result, err := session.CallTool(ctx, tc)
-		return toolResultMsg{tc.ID, tc.Name, result, err}
+		result, parts, err := session.CallToolWithParts(ctx, tc)
+		return toolResultMsg{tc.ID, tc.Name, result, parts, err}
 	}
 }
 

@@ -182,23 +182,43 @@ func (s *Session) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 // are returned as actual errors. PathApprovalError is preserved as a structured error
 // so interactive callers (TUI) can present path approval dialogs.
 func (s *Session) CallTool(ctx context.Context, tc ai.ToolCall) (string, error) {
+	result, _, err := s.callToolWithParts(ctx, tc)
+	return result, err
+}
+
+// CallToolWithParts is like CallTool but also returns image parts produced by the tool.
+func (s *Session) CallToolWithParts(ctx context.Context, tc ai.ToolCall) (string, []ai.ImagePart, error) {
+	return s.callToolWithParts(ctx, tc)
+}
+
+func (s *Session) callToolWithParts(ctx context.Context, tc ai.ToolCall) (string, []ai.ImagePart, error) {
 	if !s.IsToolEnabled(tc.Name) {
-		return "(tool call was rejected — tool is disabled for this session)", nil
+		return "(tool call was rejected — tool is disabled for this session)", nil, nil
 	}
-	result, err := s.tools.CallTool(ctx, tc.Name, tc.Arguments)
+
+	type partsCalller interface {
+		CallToolWithParts(ctx context.Context, name string, args map[string]any) (string, []ai.ImagePart, error)
+	}
+
+	var result string
+	var parts []ai.ImagePart
+	var err error
+	if pc, ok := s.tools.(partsCalller); ok {
+		result, parts, err = pc.CallToolWithParts(ctx, tc.Name, tc.Arguments)
+	} else {
+		result, err = s.tools.CallTool(ctx, tc.Name, tc.Arguments)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", nil, ctx.Err()
 		}
-		// Propagate PathApprovalError as a structured error so the TUI can
-		// present interactive approval dialogs rather than showing it as text.
 		var pathErr PathApprovalError
 		if errors.As(err, &pathErr) {
-			return "", pathErr
+			return "", nil, pathErr
 		}
-		return fmt.Sprintf("error: %v", err), nil
+		return fmt.Sprintf("error: %v", err), nil, nil
 	}
-	return result, nil
+	return result, parts, nil
 }
 
 // pathCoveredBy returns true if requestedPath equals approvedPath or is

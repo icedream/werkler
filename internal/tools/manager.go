@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -127,8 +128,9 @@ type Manager struct {
 }
 
 type builtin struct {
-	def    ai.ToolDefinition
-	handle func(ctx context.Context, args map[string]any) (string, error)
+	def             ai.ToolDefinition
+	handle          func(ctx context.Context, args map[string]any) (string, error)
+	handleWithParts func(ctx context.Context, args map[string]any) (string, []ai.ImagePart, error) // optional; used when a tool returns image data
 }
 
 // OutputNotification is forwarded from the process manager to the caller
@@ -263,12 +265,24 @@ func (m *Manager) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 // For process-starting tools, path permissions are checked first and
 // *UnapprovedPathsError is returned if any paths lack approval.
 func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	result, _, err := m.CallToolWithParts(ctx, name, args)
+	return result, err
+}
+
+// CallToolWithParts is like CallTool but also returns any image parts the tool
+// produced (e.g. read_image). Parts is nil for all tools that don't produce images.
+func (m *Manager) CallToolWithParts(ctx context.Context, name string, args map[string]any) (string, []ai.ImagePart, error) {
 	for _, b := range m.builtins {
 		if b.def.Name == name {
-			return b.handle(ctx, args)
+			if b.handleWithParts != nil {
+				return b.handleWithParts(ctx, args)
+			}
+			result, err := b.handle(ctx, args)
+			return result, nil, err
 		}
 	}
-	return m.wrapped.CallTool(ctx, name, args)
+	result, err := m.wrapped.CallTool(ctx, name, args)
+	return result, nil, err
 }
 
 // --- Path extraction ---
@@ -578,6 +592,20 @@ Returns an error for binary files; use process_start to handle those.`,
 				},
 			},
 			handle: m.handleFileRead,
+		},
+		{
+			def: ai.ToolDefinition{
+				Name:        "read_image",
+				Description: "Load a local image file so you can see its visual content. Supported formats: PNG, JPEG, GIF, WebP.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string", "description": "Absolute or ~ path to the image file"},
+					},
+					"required": []string{"path"},
+				},
+			},
+			handleWithParts: m.handleReadImage,
 		},
 		{
 			def: ai.ToolDefinition{
@@ -1328,6 +1356,50 @@ func (m *Manager) handleFileRead(ctx context.Context, args map[string]any) (stri
 	}), nil
 }
 
+func (m *Manager) handleReadImage(ctx context.Context, args map[string]any) (string, []ai.ImagePart, error) {
+	rawPath := stringArg(args, "path")
+	if rawPath == "" {
+		return "", nil, fmt.Errorf("read_image: path is required")
+	}
+	path := canonicalizePath(rawPath)
+
+	if err := m.checkSingleRead(ctx, path); err != nil {
+		return "", nil, err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil, fmt.Errorf("read_image: %w", err)
+	}
+
+	mime := http.DetectContentType(data)
+	if mime == "application/octet-stream" {
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".png":
+			mime = "image/png"
+		case ".jpg", ".jpeg":
+			mime = "image/jpeg"
+		case ".gif":
+			mime = "image/gif"
+		case ".webp":
+			mime = "image/webp"
+		default:
+			return "", nil, fmt.Errorf("read_image: unsupported image format (extension %s)", ext)
+		}
+	}
+	if !strings.HasPrefix(mime, "image/") {
+		return "", nil, fmt.Errorf("read_image: %s is not an image file (detected content type: %s)", path, mime)
+	}
+
+	part := ai.ImagePart{
+		Data:     data,
+		MIMEType: mime,
+		Name:     filepath.Base(path),
+	}
+	return fmt.Sprintf("Image loaded: %s (%s, %d bytes)", filepath.Base(path), mime, len(data)), []ai.ImagePart{part}, nil
+}
+
 func (m *Manager) handleFileList(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := stringArg(args, "path")
 	if rawPath == "" {
@@ -1561,6 +1633,7 @@ const rubberDuckMaxSteps = 10
 var reviewerAllowedTools = map[string]bool{
 	"file_read":     true,
 	"file_list":     true,
+	"read_image":    true,
 	"process_start": true,
 	"process_read":  true,
 	"process_stop":  true,
