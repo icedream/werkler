@@ -1,27 +1,52 @@
 # Skills
 
-Skills are reusable instruction sets that can be loaded into a conversation on
-demand. When a skill is loaded, its content is injected into the AI's context
-so the AI follows the instructions it contains for the rest of the session.
+Skills are reusable instruction sets that the AI loads on demand. Each skill's
+full content is injected into the conversation the moment it is invoked, so the
+AI follows the instructions it contains for the rest of the session.
 
-Skills are similar to system-prompt extensions — they can contain anything: code
-style guides, project conventions, step-by-step process descriptions, or domain
-knowledge the AI should apply.
+Skills can contain anything: code style guides, project conventions,
+step-by-step process descriptions, or domain knowledge the AI should apply.
 
 ## How skills work
 
 1. Werkler scans the skills directory at startup and registers every valid skill
    it finds.
-2. The AI gains access to a `use_skill` tool. When the AI (or you, by asking
-   it) invokes `use_skill("skill-name")`, the skill's content is inserted into
-   the conversation context.
-3. The AI then follows the skill's instructions for the rest of the session.
+2. Each enabled skill's **name and description** are listed in the system prompt
+   so the AI knows what is available — but the full content is **not** injected
+   upfront.
+3. When the AI decides a skill is relevant (or you ask it to use one), it calls
+   the `use_skill` tool. The skill's full content is returned as the tool
+   result and from that point the AI follows its instructions.
+4. All loaded skills start **enabled** by default. You can toggle individual
+   skills on or off for the current session using `/skills` (see below).
 
-You can also ask the AI to use a skill explicitly:
+You can trigger a skill explicitly by just asking:
 
 ```
 > Use the go-guidelines skill and review my code.
 ```
+
+## Managing skills in the TUI
+
+### `/skills` — toggle skills for this session
+
+Type `/skills` (or press `/` and select it from the autocomplete list) to open
+the skill picker. Every loaded skill is shown with a checkbox:
+
+```
+[✓] go-guidelines   Go best practices for performance, modern syntax, and testing.
+[ ] my-conventions  Project-specific naming and style rules.
+```
+
+- **`space`** — toggle the highlighted skill on or off
+- **`enter`** / **`esc`** — close the picker
+
+Disabling a skill removes it from the AI's awareness for the rest of the
+session — its name and description are no longer listed in the system prompt so
+the AI will not call `use_skill` for it. Re-enabling restores it.
+
+> **Note:** Toggling a skill does not retroactively add or remove skill content
+> that was already injected into an earlier message in the conversation.
 
 ## Skill file format
 
