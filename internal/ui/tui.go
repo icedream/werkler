@@ -3266,15 +3266,22 @@ func (m Model) View() string {
 // --- Helper views ---
 
 func (m Model) headerView() string {
-	servers := "no servers"
-	if len(m.serverNames) > 0 {
-		servers = strings.Join(m.serverNames, ", ")
+	servers := "none"
+	if n := len(m.serverNames); n == 1 {
+		servers = m.serverNames[0]
+	} else if n > 1 {
+		servers = fmt.Sprintf("%d servers", n)
 	}
-	text := fmt.Sprintf("werkler  model: %s  servers: %s", m.modelName, servers)
+	text := fmt.Sprintf("werkler  model: %s  mcp: %s", m.modelName, servers)
 	if m.contextUsage.Total > 0 {
 		maxTok := m.modelInfo.Context.MaxTokens
 		ctx := m.contextUsage.FormatWithMax(maxTok)
 		text += "  ctx: " + ctx
+	}
+	// Truncate to terminal width to avoid wrapping (headerStyle pads to width but
+	// doesn't clip — add a hard cap so long model names don't push onto a second line).
+	if m.width > 0 && len(text) > m.width {
+		text = text[:m.width-1] + "…"
 	}
 	return headerStyle.Width(m.width).Render(text)
 }
