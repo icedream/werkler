@@ -837,6 +837,11 @@ type Model struct {
 	// warn when the agent is looping excessively.
 	turnRoundtrips int
 
+	// emptyResponseRetries counts how many times a retry-with-nudge has been
+	// attempted after an empty response within the current user turn. Resets
+	// alongside turnRoundtrips at every new-turn boundary.
+	emptyResponseRetries int
+
 	// autoCompactPending is set when context compaction was triggered
 	// automatically (not by the user). After compaction completes, the
 	// interrupted AI turn is restarted.
@@ -1418,6 +1423,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.items = append(m.items, displayItem{kind: itemInfo, content: "⚡ Autopilot resumed."})
 						needRebuild = true
 						m.turnRoundtrips = 0
+						m.emptyResponseRetries = 0
 						m.state = stateThinking
 						cmds = append(cmds, doStartStream(
 							m.newOpCtx(), m.client,
@@ -1446,6 +1452,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
 							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.turnRoundtrips = 0
+							m.emptyResponseRetries = 0
 							if cmd := m.recountContext(); cmd != nil {
 								cmds = append(cmds, cmd)
 							}
@@ -2362,9 +2369,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !isEmpty {
 				m.messages = append(m.messages, chunk.Msg)
 			} else if chunk.Usage.CompletionTokens > 0 {
-				// The model generated tokens but the provider returned empty content and no
-				// tool calls. This is a known issue with some Ollama-backed deployments where
-				// the model output is silently dropped. Surface it so the user can diagnose.
+				const maxEmptyRetries = 2
+				if m.emptyResponseRetries < maxEmptyRetries {
+					// Retry with a nudge: build an ephemeral message slice (copy to
+					// avoid mutating m.messages through append's backing array) and
+					// append a one-off user nudge that is NOT persisted to history.
+					m.emptyResponseRetries++
+					m.turnRoundtrips++
+					base := m.buildStreamMessages(m.messages)
+					nudgeMsgs := make([]ai.Message, len(base)+1)
+					copy(nudgeMsgs, base)
+					nudgeMsgs[len(base)] = ai.Message{
+						Role:    "user",
+						Content: "Your last response was empty. You must either call a tool or respond with text. Do not produce an empty response.",
+					}
+					debugLog("streamChunk: empty response (tokens=%d), retry %d/%d with nudge",
+						chunk.Usage.CompletionTokens, m.emptyResponseRetries, maxEmptyRetries)
+					m.state = stateThinking
+					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, nudgeMsgs, m.tools))
+					needRebuild = true
+					break
+				}
+				// All retries exhausted — surface the error to the user.
 				m.items = append(m.items, displayItem{
 					kind:    itemError,
 					content: fmt.Sprintf("Provider returned %d completion tokens but no content or tool calls — the model output may have been silently dropped by the backend. Try rephrasing your prompt or switching models.", chunk.Usage.CompletionTokens),
@@ -2416,6 +2442,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, m.processQueueOrIdle())
 					} else {
 						m.turnRoundtrips = 0
+						m.emptyResponseRetries = 0
 						m.state = stateThinking
 						cmds = append(cmds, doStartStream(
 							m.newOpCtx(), m.client,
@@ -3402,6 +3429,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 			m.items = append(m.items, displayItem{kind: itemUser, content: p.text})
 		}
 		m.turnRoundtrips = 0
+		m.emptyResponseRetries = 0
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
 			m.state = stateCompacting
