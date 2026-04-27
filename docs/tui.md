@@ -35,9 +35,8 @@ Type `/` to open autocomplete. Press `↑`/`↓` to navigate, `Enter` to select,
 | `/autopilot` | Toggle autopilot mode |
 | `/help` | Show keyboard shortcuts and slash commands inline |
 | `/quit` | Quit werkler |
-| `/allow-all` *(type `/` and select from list)* | Toggle allow-all mode — approves all tool calls and path access without prompting. A `⚠ allow-all ON` indicator appears in the status bar when active. |
-
-> **Note:** `/allow-all` has no short name; it only appears in the full `/` completion list and cannot be accessed by typing its name directly.
+| `/allow-all` | Toggle allow-all mode — approves all tool calls and path access without prompting. A `⚠ allow-all ON` indicator appears in the status bar when active. |
+| `/reasoning` | Toggle display of model reasoning/thinking content (on by default). |
 
 ## Prompt queuing
 

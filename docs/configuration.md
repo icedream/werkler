@@ -14,6 +14,8 @@ environment variables or command-line flags.
 Pass a different path with `--config /path/to/config.toml`.
 
 The file does not need to exist — missing keys fall back to defaults or flags.
+If the file contains a TOML syntax error, werkler will report the exact line and
+column number, e.g. `config.toml:12:5: ...`, to help you locate the problem.
 
 ## AI provider
 
