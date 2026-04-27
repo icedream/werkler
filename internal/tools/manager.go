@@ -182,7 +182,7 @@ func New(wrapped chat.ToolManager, pathApprover PathApprover, notify OutputNotif
 // SetOutputNotify sets the live output notification callback. Used by the TUI
 // to receive process output for streaming into the viewport.
 func (m *Manager) SetOutputNotify(fn OutputNotification) {
-	m.processes = process.New(fn)
+	m.processes.SetNotify(fn)
 }
 
 // SetSkills provides the list of skills available via the use_skill built-in.

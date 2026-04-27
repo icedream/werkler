@@ -154,6 +154,14 @@ func New(notify OutputNotification) *Manager {
 	}
 }
 
+// SetNotify replaces the output notification callback. Safe to call at any
+// time; new output from all processes will use the updated callback.
+func (m *Manager) SetNotify(fn OutputNotification) {
+	m.mu.Lock()
+	m.notify = fn
+	m.mu.Unlock()
+}
+
 // Start launches a subprocess. command must be an absolute path or a name
 // resolvable via PATH. args are the argv (without the command itself). cwd is
 // the working directory; "" uses the current directory. env is merged on top
@@ -235,13 +243,20 @@ func (m *Manager) readLoop(p *process, r io.Reader) {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 			_ = p.write(chunk)
-			if m.notify != nil {
-				handle := m.handleOf(p)
-				if handle != "" {
-					raw := string(chunk)
-					clean := string(stripANSI(chunk))
-					m.notify(handle, raw, clean)
+			m.mu.Lock()
+			notify := m.notify
+			handle := ""
+			for h, proc := range m.procs {
+				if proc == p {
+					handle = h
+					break
 				}
+			}
+			m.mu.Unlock()
+			if notify != nil && handle != "" {
+				raw := string(chunk)
+				clean := string(stripANSI(chunk))
+				notify(handle, raw, clean)
 			}
 		}
 		if err != nil {
@@ -276,18 +291,6 @@ func waitLoop(m *Manager, handle string, p *process) {
 	}
 	m.mu.Unlock()
 	close(p.done)
-}
-
-// handleOf finds the handle string for a process pointer. Called from readLoop.
-func (m *Manager) handleOf(target *process) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for h, p := range m.procs {
-		if p == target {
-			return h
-		}
-	}
-	return ""
 }
 
 // Send writes text to the process stdin / PTY master.
