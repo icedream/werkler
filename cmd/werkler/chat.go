@@ -206,8 +206,12 @@ func runChat(_ *cobra.Command, _ []string) error {
 		activeName = chatProvider
 	}
 	for _, p := range providers {
-		if p.Name == activeName && p.ContextWindow > 0 {
-			opts.ContextWindowOverride = p.ContextWindow
+		if p.Name == activeName {
+			if p.ContextWindow > 0 {
+				opts.ContextWindowOverride = p.ContextWindow
+			}
+			opts.ReasoningEffort = p.ReasoningEffort
+			opts.DisableReasoning = p.DisableReasoning
 			break
 		}
 	}
@@ -257,8 +261,8 @@ func resolveAutopilotMax(flagVal, cfgVal int) int {
 // buildProviderClient constructs a single AI client from a ProviderConfig.
 func buildProviderClient(p config.ProviderConfig) (*ai.Client, error) {
 	var extraOpts []ai.ClientOption
-	if p.ReasoningEffort != "" {
-		extraOpts = append(extraOpts, ai.WithReasoningEffort(p.ReasoningEffort))
+	if p.DisableReasoning {
+		extraOpts = append(extraOpts, ai.WithDisableReasoning())
 	}
 	switch p.Type {
 	case config.ProviderTypeOpenAI, "": // empty type defaults to openai

@@ -24,7 +24,26 @@ type Client struct {
 	endpoint           string       // base URL, stored for provider-specific probing (e.g. Ollama /api/show)
 	probeClient        *http.Client // HTTP client used for model-info probes; nil = use http.DefaultClient
 	disableStreamUsage atomic.Bool  // set after a 400 caused by unsupported stream_options
-	reasoningEffort    string       // optional: "low", "medium", "high" (model-specific)
+	disableReasoning   bool         // when true, reasoning_effort is never set regardless of context
+}
+
+// reasoningEffortKey is the context key for a per-call reasoning effort override.
+type reasoningEffortKey struct{}
+
+// WithReasoningEffortCtx returns a copy of ctx annotated with the given
+// reasoning effort level ("low", "medium", "high"). Pass the returned ctx to
+// CompleteStream or Complete to apply it for that call only.
+func WithReasoningEffortCtx(ctx context.Context, effort string) context.Context {
+	return context.WithValue(ctx, reasoningEffortKey{}, effort)
+}
+
+// ReasoningEffortFromCtx returns the reasoning effort level stored in ctx by
+// WithReasoningEffortCtx, or "" if none is set.
+func ReasoningEffortFromCtx(ctx context.Context) string {
+	if v, ok := ctx.Value(reasoningEffortKey{}).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // New creates a Client using the given base URL, API key and model name.
@@ -167,11 +186,12 @@ func WithNoStreamUsage() ClientOption {
 	}
 }
 
-// WithReasoningEffort sets the reasoning_effort for models that support it
-// (e.g. "low", "medium", "high"). Ignored if empty.
-func WithReasoningEffort(effort string) ClientOption {
+// WithDisableReasoning prevents reasoning_effort from ever being applied for
+// this client, regardless of what the caller passes via context. Use for
+// providers or models that do not support the reasoning_effort parameter.
+func WithDisableReasoning() ClientOption {
 	return func(c *Client) {
-		c.reasoningEffort = effort
+		c.disableReasoning = true
 	}
 }
 
@@ -278,6 +298,11 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []ToolD
 		Messages: toOpenAIMessages(messages),
 		Tools:    toOpenAITools(tools),
 	}
+	if !c.disableReasoning {
+		if effort := ReasoningEffortFromCtx(ctx); effort != "" {
+			req.ReasoningEffort = effort
+		}
+	}
 
 	resp, err := c.inner.CreateChatCompletion(ctx, req)
 	if err != nil {
@@ -314,8 +339,10 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 			Messages: toOpenAIMessages(messages),
 			Tools:    toOpenAITools(tools),
 		}
-		if c.reasoningEffort != "" {
-			req.ReasoningEffort = c.reasoningEffort
+		if !c.disableReasoning {
+			if effort := ReasoningEffortFromCtx(ctx); effort != "" {
+				req.ReasoningEffort = effort
+			}
 		}
 		if !c.disableStreamUsage.Load() {
 			req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
