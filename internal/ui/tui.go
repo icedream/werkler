@@ -76,6 +76,7 @@ const (
 	stateCompacting           // compacting conversation history via AI summary
 	statePickingRegistry      // MCP registry browser is open
 	statePickingSkills        // skill enable/disable picker is open
+	statePickingMode          // mode preset picker is open
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -94,7 +95,7 @@ func inputPlaceholder(state tuiState) string {
 		return "Waiting for authorization in browser…"
 	case stateCompacting:
 		return "Compacting context… (queue a follow-up, press Enter)"
-	case statePickingModel, statePickingSession, statePickingTools, statePickingRegistry, statePickingSkills:
+	case statePickingModel, statePickingSession, statePickingTools, statePickingRegistry, statePickingSkills, statePickingMode:
 		return ""
 	case stateIdle:
 		return "Type a message, press Enter to send…"
@@ -454,6 +455,38 @@ func (s skillItem) Description() string {
 	return desc
 }
 
+// modeItem implements list.Item for the mode picker.
+type modeItem struct {
+	mode   chat.ResolvedMode
+	active bool
+}
+
+func (m modeItem) FilterValue() string { return m.mode.Name }
+func (m modeItem) Title() string {
+	indicator := "  "
+	if m.active {
+		indicator = "● "
+	}
+	return indicator + m.mode.Name
+}
+func (m modeItem) Description() string {
+	if m.mode.IsDefault {
+		return "Standard mode — no modifications to system prompt or session settings"
+	}
+	if m.mode.SystemPromptExtra != "" {
+		// Show first line of the extra as description.
+		lines := strings.SplitN(m.mode.SystemPromptExtra, "\n", 3)
+		for _, line := range lines {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "##"))
+			line = strings.TrimSpace(line)
+			if line != "" {
+				return line
+			}
+		}
+	}
+	return ""
+}
+
 // registryItem implements list.Item for the MCP registry picker.
 type registryItem struct {
 	srv       registry.Server
@@ -536,6 +569,14 @@ type SessionOptions struct {
 	Autopilot bool
 	// AutopilotMaxCycles overrides the cycle cap (0 = use config/default).
 	AutopilotMaxCycles int
+	// ActiveMode is the resolved mode to apply at session start.
+	// The zero value (IsDefault=false, Name="") is treated as the default mode.
+	ActiveMode chat.ResolvedMode
+	// AllModes is the full list of modes available for the /mode picker.
+	AllModes []chat.ResolvedMode
+	// ConfiguredModes is the raw config-level list used to re-resolve modes
+	// when restoring a session.
+	ConfiguredModes []config.ModeConfig
 	// MemoryStore, if non-nil, enables cross-session project memory tools and
 	// injects the current memory into the system prompt at request time.
 	MemoryStore *memorystore.MemoryStore
@@ -748,6 +789,21 @@ func init() {
 					m.items = append(m.items, displayItem{kind: itemInfo, content: "💭 Reasoning display: off"})
 				}
 				m.rebuildContent()
+				return nil
+			},
+		},
+		{
+			name:        "mode",
+			description: "Switch the active mode preset (default, plan, document, or custom)",
+			available:   func(m *Model) bool { return len(m.allModes) > 0 },
+			action: func(m *Model) []tea.Cmd {
+				items := make([]list.Item, len(m.allModes))
+				for i, mode := range m.allModes {
+					items[i] = modeItem{mode: mode, active: mode.Name == m.activeMode.Name}
+				}
+				m.modePicker.SetItems(items)
+				m.modePicker.SetSize(m.width, m.height-fixedLines)
+				m.state = statePickingMode
 				return nil
 			},
 		},
@@ -1012,6 +1068,15 @@ type Model struct {
 	// showReasoning controls whether reasoning/thinking items are displayed.
 	// Toggled by /reasoning. Defaults to true.
 	showReasoning bool
+
+	// activeMode is the currently active mode preset.
+	activeMode chat.ResolvedMode
+	// allModes is the full list of available modes for the /mode picker.
+	allModes []chat.ResolvedMode
+	// configuredModes holds the raw config entries for re-resolving modes on session restore.
+	configuredModes []config.ModeConfig
+	// modePicker is the list used for /mode selection.
+	modePicker list.Model
 }
 
 func initialModel(
@@ -1065,6 +1130,14 @@ func initialModel(
 	skillPickerM.SetFilteringEnabled(true)
 	skillPickerM.DisableQuitKeybindings()
 
+	// Mode picker: single-select, like the model picker.
+	modeDel := list.NewDefaultDelegate()
+	modePickerM := list.New(nil, modeDel, 0, 0)
+	modePickerM.Title = "Select mode"
+	modePickerM.SetShowStatusBar(false)
+	modePickerM.SetFilteringEnabled(true)
+	modePickerM.DisableQuitKeybindings()
+
 	// Use modelManager when the client also implements ModelManager.
 	var mm ai.ModelManager
 	if m, ok := client.(ai.ModelManager); ok {
@@ -1094,6 +1167,7 @@ func initialModel(
 		sessionPicker:      sessPicker,
 		toolPicker:         toolPickerM,
 		skillPicker:        skillPickerM,
+		modePicker:         modePickerM,
 		disabledSkills:     make(map[string]bool),
 		input:              ti,
 		spinner:            sp,
@@ -1124,6 +1198,9 @@ func (m *Model) newConversation() []ai.Message {
 			hint += "- " + p + "\n"
 		}
 		extras = append(extras, strings.TrimRight(hint, "\n"))
+	}
+	if m.activeMode.SystemPromptExtra != "" {
+		extras = append(extras, m.activeMode.SystemPromptExtra)
 	}
 	msgs := chat.NewConversation(extras...)
 	msgs[0].Content = chat.EnrichSystemPrompt(msgs[0].Content, m.modelInfo)
@@ -1170,6 +1247,35 @@ func (m *Model) applySkillToggle() {
 		}
 	}
 	m.rebuildSystemPrompt()
+}
+
+// applyMode sets the active mode, rebuilds the system prompt, and applies any
+// mode-specific session settings (autopilot, auto-approve tools).
+func (m *Model) applyMode(mode chat.ResolvedMode) {
+	m.activeMode = mode
+	m.rebuildSystemPrompt()
+
+	// Apply autopilot setting from mode.
+	if mode.Autopilot != nil {
+		if *mode.Autopilot && !m.autopilot {
+			if mode.AutopilotMaxCycles > 0 {
+				m.autopilotMax = mode.AutopilotMaxCycles
+			}
+			m.autopilotEnable()
+		} else if !*mode.Autopilot && (m.autopilot || m.autopilotPaused) {
+			m.autopilotDisable()
+		}
+	}
+
+	// Apply additional auto-approve tools from mode.
+	for _, tool := range mode.AutoApproveTools {
+		m.session.ApproveForSession(tool)
+	}
+
+	if !mode.IsDefault && mode.Name != "" {
+		m.items = append(m.items, displayItem{kind: itemInfo, content: "Mode: " + mode.Name})
+		m.rebuildContent()
+	}
 }
 
 // and whose available predicate (if any) passes.
@@ -1803,6 +1909,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				var pickerCmd tea.Cmd
 				m.skillPicker, pickerCmd = m.skillPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			}
+
+		case statePickingMode:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.setIdle()
+				m.updateCompletion()
+			case tea.KeyEnter:
+				if sel := m.modePicker.SelectedItem(); sel != nil {
+					item := sel.(modeItem)
+					m.applyMode(item.mode)
+				}
+				m.setIdle()
+				m.updateCompletion()
+			default:
+				var pickerCmd tea.Cmd
+				m.modePicker, pickerCmd = m.modePicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
 			}
 
@@ -2496,6 +2620,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modelPicker.SetSize(m.width, m.height-fixedLines)
 		m.toolPicker.SetSize(m.width, m.height-fixedLines)
 		m.skillPicker.SetSize(m.width, m.height-fixedLines)
+		m.modePicker.SetSize(m.width, m.height-fixedLines)
 		if m.state == stateViewingToolDetail {
 			m.toolDetailVP.Width = m.width
 			m.toolDetailVP.Height = m.height - fixedLines
@@ -2965,6 +3090,9 @@ func (m Model) View() string {
 	if m.state == statePickingSkills {
 		return m.skillPicker.View()
 	}
+	if m.state == statePickingMode {
+		return m.modePicker.View()
+	}
 	if m.state == statePickingRegistry {
 		return m.registryView()
 	}
@@ -3175,7 +3303,11 @@ func (m Model) statusLines() (line1, line2 string) {
 				todoHint = "  " + todoIndicatorStyle.Render(fmt.Sprintf("✓%d ▶%d ○%d", d, a, p))
 			}
 		}
-		line1 := mouseHint + pickerHint + sessionHint + todoHint + allowAllIndicator
+		modeHint := ""
+		if !m.activeMode.IsDefault && m.activeMode.Name != "" {
+			modeHint = "  " + statusStyle.Render("["+m.activeMode.Name+"]")
+		}
+		line1 := mouseHint + pickerHint + sessionHint + todoHint + modeHint + allowAllIndicator
 		// Show rate limit info when the provider has reported it.
 		if m.lastRateLimits.IsKnown() {
 			parts := []string{}
@@ -4725,6 +4857,18 @@ func (m *Model) applySession(sess *sessionstore.Session) {
 	m.sessionCreatedAt = sess.CreatedAt
 	m.sessionCWD = sess.CWD
 	m.messages = sess.Messages
+
+	// Restore mode from session. If the saved mode can no longer be resolved
+	// (e.g. user deleted a custom mode), fall back to default silently.
+	if sess.ModeName != "" && sess.ModeName != "default" {
+		for _, mode := range m.allModes {
+			if mode.Name == sess.ModeName {
+				m.activeMode = mode
+				break
+			}
+		}
+	}
+
 	// Replace messages[0] with a freshly built system prompt so any stale
 	// MCP-server or memory injections from the saved session are removed.
 	// buildStreamMessages will re-add the current injections each turn.
@@ -4833,6 +4977,9 @@ func (m *Model) currentSessionSnapshot() sessionstore.Session {
 		CreatedAt: createdAt,
 		UpdatedAt: now,
 	}
+	if !m.activeMode.IsDefault && m.activeMode.Name != "" {
+		snap.ModeName = m.activeMode.Name
+	}
 	if m.todoStore != nil {
 		snap.Todos = m.todoStore.List()
 	}
@@ -4891,6 +5038,24 @@ func RunTUI(
 	m.skills = opts.Skills
 	if len(opts.Skills) > 0 {
 		m.messages = m.newConversation()
+	}
+
+	// Apply mode presets.
+	m.allModes = opts.AllModes
+	m.configuredModes = opts.ConfiguredModes
+	if opts.ActiveMode.Name != "" {
+		m.activeMode = opts.ActiveMode
+		// Apply autopilot/approve settings from the mode (not using applyMode
+		// to avoid the info item before any user message is shown).
+		if opts.ActiveMode.Autopilot != nil && *opts.ActiveMode.Autopilot {
+			if opts.ActiveMode.AutopilotMaxCycles > 0 {
+				m.autopilotMax = opts.ActiveMode.AutopilotMaxCycles
+			}
+			m.autopilot = true
+		}
+		for _, tool := range opts.ActiveMode.AutoApproveTools {
+			m.session.ApproveForSession(tool)
+		}
 	}
 
 	// Keep a reference to the MCP manager for the configured-servers system prompt injection.

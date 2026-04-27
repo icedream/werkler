@@ -33,6 +33,7 @@ var (
 	chatProvider        string
 	chatAutopilot       bool
 	chatAutopilotMaxCyc int
+	chatMode            string
 )
 
 var chatCmd = &cobra.Command{
@@ -54,6 +55,7 @@ func init() {
 	chatCmd.Flags().StringVar(&chatProvider, "provider", "", "Name of the AI provider to use (overrides ai.active in config)")
 	chatCmd.Flags().BoolVar(&chatAutopilot, "autopilot", false, "Enable autopilot mode: AI works autonomously until task_complete is called")
 	chatCmd.Flags().IntVar(&chatAutopilotMaxCyc, "autopilot-max-cycles", 0, "Maximum autopilot cycles before pausing (0 = use config default)")
+	chatCmd.Flags().StringVar(&chatMode, "mode", "", "Activate a named mode preset (e.g. default, plan, document)")
 	rootCmd.AddCommand(chatCmd)
 }
 
@@ -146,6 +148,15 @@ func runChat(_ *cobra.Command, _ []string) error {
 		return runPromptMode(ctx, multiClient, session, memStore)
 	}
 
+	allModes, err := chat.AllModes(cfg.Modes)
+	if err != nil {
+		return fmt.Errorf("loading modes: %w", err)
+	}
+	activeMode, modeErr := chat.ResolveMode(chatMode, cfg.Modes)
+	if modeErr != nil {
+		return fmt.Errorf("unknown mode %q: %w", chatMode, modeErr)
+	}
+
 	opts := ui.SessionOptions{
 		Store:     store,
 		Skills:    loadedSkills,
@@ -165,6 +176,9 @@ func runChat(_ *cobra.Command, _ []string) error {
 		Autopilot:          chatAutopilot,
 		AutopilotMaxCycles: resolveAutopilotMax(chatAutopilotMaxCyc, cfg.Autopilot.MaxCycles),
 		MemoryStore:        memStore,
+		ActiveMode:         activeMode,
+		AllModes:           allModes,
+		ConfiguredModes:    cfg.Modes,
 	}
 	if len(cfg.MCP.Servers) > 0 {
 		opts.MCPManager = manager
@@ -317,9 +331,15 @@ func buildReviewerClient(providers []config.ProviderConfig) (ai.Completer, strin
 }
 
 func runPromptMode(ctx context.Context, aiClient ai.Completer, session *chat.Session, memStore *memorystore.MemoryStore) error {
+	activeMode, modeErr := chat.ResolveMode(chatMode, cfg.Modes)
+	if modeErr != nil {
+		return fmt.Errorf("unknown mode %q: %w", chatMode, modeErr)
+	}
+
 	opts := chat.PromptOptions{
 		Autopilot:          chatAutopilot,
 		AutopilotMaxCycles: resolveAutopilotMax(chatAutopilotMaxCyc, cfg.Autopilot.MaxCycles),
+		SystemPromptExtra:  activeMode.SystemPromptExtra,
 	}
 	if memStore != nil {
 		opts.InitialMemory = memStore.BuildInjectionSection()

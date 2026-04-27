@@ -30,6 +30,9 @@ type Session struct {
 	ApprovedTools []string `json:"approved_tools,omitempty"`
 	// Todos persists the AI-managed todo list for this session.
 	Todos []todostore.Todo `json:"todos,omitempty"`
+	// ModeName is the name of the active mode preset when this session was saved.
+	// Empty means the default mode.
+	ModeName string `json:"mode_name,omitempty"`
 }
 
 // Store reads and writes sessions to a directory on disk.

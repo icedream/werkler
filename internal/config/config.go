@@ -118,12 +118,30 @@ type AutopilotConfig struct {
 	MaxCycles int `mapstructure:"max_cycles"`
 }
 
+// ModeConfig defines a named mode preset that bundles session options together.
+// Built-in modes are "default", "plan", and "document".
+// User-defined modes can extend a built-in via the Base field.
+type ModeConfig struct {
+	Name string `mapstructure:"name"`
+	// Base optionally names a built-in mode to inherit from.
+	Base string `mapstructure:"base"`
+	// SystemPromptExtra is appended to the system prompt when this mode is active.
+	SystemPromptExtra string `mapstructure:"system_prompt_extra"`
+	// Autopilot, when non-nil, overrides the default autopilot on/off setting.
+	Autopilot *bool `mapstructure:"autopilot"`
+	// AutopilotMaxCycles overrides the cycle cap (0 = inherit from base or config default).
+	AutopilotMaxCycles int `mapstructure:"autopilot_max_cycles"`
+	// AutoApproveTools lists additional tool-name globs to auto-approve in this mode.
+	AutoApproveTools []string `mapstructure:"auto_approve_tools"`
+}
+
 // Config is the root configuration structure.
 type Config struct {
 	AI        AIConfig        `mapstructure:"ai"`
 	MCP       MCPConfig       `mapstructure:"mcp"`
 	Skills    SkillsConfig    `mapstructure:"skills"`
 	Autopilot AutopilotConfig `mapstructure:"autopilot"`
+	Modes     []ModeConfig    `mapstructure:"modes"`
 }
 
 // DefaultConfigPath returns the default config file path.
