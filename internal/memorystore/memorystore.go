@@ -244,9 +244,16 @@ func (s *MemoryStore) Promote(name, targetRelPath string) error {
 		return err
 	}
 
-	// Resolve the target absolute path.
-	target := filepath.Join(s.abs, filepath.FromSlash(targetRelPath))
-	target, err := filepath.Abs(target)
+	// Resolve the target absolute path.  Absolute inputs are used as-is;
+	// relative inputs are resolved against the current project directory.
+	var target string
+	if filepath.IsAbs(targetRelPath) {
+		target = filepath.Clean(targetRelPath)
+	} else {
+		target = filepath.Join(s.abs, filepath.FromSlash(targetRelPath))
+	}
+	var err error
+	target, err = filepath.Abs(target)
 	if err != nil {
 		return fmt.Errorf("memorystore: resolving target path: %w", err)
 	}
@@ -254,7 +261,7 @@ func (s *MemoryStore) Promote(name, targetRelPath string) error {
 	// Reject attempts to promote to the current directory or below.
 	rel, err := filepath.Rel(s.abs, target)
 	if err != nil || rel == "." || !strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("memorystore: target_directory must be a parent directory of the current project (got %q)", targetRelPath)
+		return fmt.Errorf("memorystore: target_directory must be a parent of the current project directory (%s); got %q", s.abs, targetRelPath)
 	}
 
 	// Read the content from the current store.

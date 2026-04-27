@@ -1243,7 +1243,8 @@ Use only when the memory is fully obsolete. This cannot be undone without rewrit
 					Description: `Move a named memory file to a parent directory's store, making it available to all sub-projects.
 Use this when a note turns out to be relevant across the whole project or workspace (e.g. a monorepo root),
 not just the current directory. The memory is deleted from the current directory after being moved.
-Call memory_list first if you are unsure which memories exist, and use ".." or "../.." as target_directory.`,
+Call memory_list first if you are unsure which memories exist.
+target_directory accepts a relative path (e.g. ".." or "../..") or an absolute path; it must be a parent of the current project directory.`,
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
