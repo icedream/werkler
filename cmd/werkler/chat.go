@@ -212,7 +212,9 @@ func buildProviderClient(p config.ProviderConfig) (*ai.Client, error) {
 			)
 		}
 		transport := copilot.NewTransport(tok.AccessToken)
-		return ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport}), nil
+		return ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport},
+			ai.WithNoStreamUsage(),
+		), nil
 	default:
 		return nil, fmt.Errorf("unknown provider type %q for provider %q", p.Type, p.Name)
 	}

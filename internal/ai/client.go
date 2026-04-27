@@ -18,8 +18,9 @@ import (
 type Client struct {
 	inner              openai.Client
 	model              string
-	endpoint           string      // base URL, stored for provider-specific probing (e.g. Ollama /api/show)
-	disableStreamUsage atomic.Bool // set after a 400 caused by unsupported stream_options
+	endpoint           string       // base URL, stored for provider-specific probing (e.g. Ollama /api/show)
+	probeClient        *http.Client // HTTP client used for model-info probes; nil = use http.DefaultClient
+	disableStreamUsage atomic.Bool  // set after a 400 caused by unsupported stream_options
 }
 
 // New creates a Client using the given base URL, API key and model name.
@@ -119,18 +120,33 @@ func (c *Client) SetModel(item ModelItem) {
 	c.model = item.Model
 }
 
+// ClientOption configures a [Client] at construction time.
+type ClientOption func(*Client)
+
+// WithNoStreamUsage disables the stream_options.include_usage field in streaming
+// requests. Use this for providers (e.g. GitHub Copilot) that reject that field.
+func WithNoStreamUsage() ClientOption {
+	return func(c *Client) {
+		c.disableStreamUsage.Store(true)
+	}
+}
+
 // NewWithHTTPClient creates a Client using the given base URL, model and a
 // custom *http.Client (e.g. with a custom transport for token injection).
 // The API key is handled by the transport; an empty string is used here.
-func NewWithHTTPClient(baseURL, model string, httpClient *http.Client) *Client {
+func NewWithHTTPClient(baseURL, model string, httpClient *http.Client, opts ...ClientOption) *Client {
 	cfg := openai.DefaultConfig("")
 	cfg.BaseURL = baseURL
 	cfg.HTTPClient = httpClient
-	return &Client{
+	c := &Client{
 		inner:    *openai.NewClientWithConfig(cfg),
 		model:    model,
 		endpoint: baseURL,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // nonChatKeywords identifies model IDs that are clearly not chat-completion models.
