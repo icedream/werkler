@@ -496,7 +496,11 @@ func (m *Manager) makeBuiltins() []builtin {
 				Name: "process_start",
 				Description: `Start a subprocess. Returns a handle for subsequent interaction.
 Use pty=true for interactive programs (editors, REPLs, password prompts) — output will contain ANSI codes that are stripped before being returned to you.
-Use pty=false (default) for non-interactive commands (builds, scripts) — output is clean plain text.`,
+Use pty=false (default) for non-interactive commands (builds, scripts) — output is clean plain text.
+
+IMPORTANT: "command" is the executable only; "args" are the arguments WITHOUT the command name.
+Example — to run "git status --short": command="git", args=["status", "--short"].
+Do NOT put "git" (or any command name) in args.`,
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
