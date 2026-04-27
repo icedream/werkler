@@ -851,7 +851,19 @@ func init() {
 			action: func(m *Model) []tea.Cmd {
 				m.showReasoning = !m.showReasoning
 				if m.showReasoning {
-					m.items = append(m.items, displayItem{kind: itemInfo, content: "💭 Reasoning display: on"})
+					// Check whether any reasoning content has been received so far.
+					hasContent := false
+					for _, it := range m.items {
+						if it.kind == itemReasoning && it.content != "" {
+							hasContent = true
+							break
+						}
+					}
+					msg := "💭 Reasoning display: on"
+					if !hasContent {
+						msg += " (no thinking content received yet — the active model may not emit reasoning tokens)"
+					}
+					m.items = append(m.items, displayItem{kind: itemInfo, content: msg})
 				} else {
 					m.items = append(m.items, displayItem{kind: itemInfo, content: "💭 Reasoning display: off"})
 				}
