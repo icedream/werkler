@@ -691,18 +691,40 @@ To create a new file including its parent directories, set create_parents to tru
 		{
 			def: ai.ToolDefinition{
 				Name: "file_edit",
-				Description: `Replace exactly one occurrence of old_str with new_str in a file.
-The match must be exact (including whitespace). Returns an error if old_str appears
-zero times (not found) or more than once (ambiguous — include more context).
-On success, returns the line number where the replacement was made.`,
+				Description: `Replace one or more exact-string occurrences in a file.
+
+Single-hunk form (most common):
+  path, old_str, new_str — replace one occurrence of old_str with new_str.
+
+Multi-hunk form (use when making several changes to the same file in one call):
+  path, edits: [{old_str, new_str}, …] — apply each replacement in order.
+  All hunks are validated before any writes; the call fails atomically if any
+  old_str is not found or matches more than once.
+
+In both forms: the match must be exact (including whitespace). Returns an error
+if old_str appears zero times (not found) or more than once (ambiguous — include
+more surrounding context).
+On success, returns the line number(s) where replacements were made.`,
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"path":    map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
-						"old_str": map[string]any{"type": "string", "description": "Exact text to find and replace"},
-						"new_str": map[string]any{"type": "string", "description": "Replacement text"},
+						"old_str": map[string]any{"type": "string", "description": "Exact text to find and replace (single-hunk form)"},
+						"new_str": map[string]any{"type": "string", "description": "Replacement text (single-hunk form)"},
+						"edits": map[string]any{
+							"type":        "array",
+							"description": "List of {old_str, new_str} pairs applied in order (multi-hunk form). Mutually exclusive with top-level old_str/new_str.",
+							"items": map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"old_str": map[string]any{"type": "string"},
+									"new_str": map[string]any{"type": "string"},
+								},
+								"required": []string{"old_str", "new_str"},
+							},
+						},
 					},
-					"required": []string{"path", "old_str", "new_str"},
+					"required": []string{"path"},
 				},
 			},
 			handle: m.handleFileEdit,
@@ -1565,11 +1587,33 @@ func (m *Manager) handleFileEdit(ctx context.Context, args map[string]any) (stri
 		return "", fmt.Errorf("file_edit: path is required")
 	}
 	path := canonicalizePath(rawPath)
-	oldStr := stringArg(args, "old_str")
-	newStr := stringArg(args, "new_str")
 
-	if oldStr == "" {
-		return "", fmt.Errorf("file_edit: old_str must not be empty; use file_write to overwrite entire files")
+	// Build the list of {old_str, new_str} pairs.
+	type hunk struct{ old, new string }
+	var hunks []hunk
+
+	if rawEdits, ok := args["edits"].([]any); ok && len(rawEdits) > 0 {
+		// Multi-hunk form: edits: [{old_str, new_str}, …]
+		for i, item := range rawEdits {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return "", fmt.Errorf("file_edit: edits[%d] must be an object", i)
+			}
+			old, _ := m["old_str"].(string)
+			if old == "" {
+				return "", fmt.Errorf("file_edit: edits[%d].old_str must not be empty", i)
+			}
+			newVal, _ := m["new_str"].(string)
+			hunks = append(hunks, hunk{old, newVal})
+		}
+	} else {
+		// Single-hunk form: top-level old_str / new_str.
+		oldStr := stringArg(args, "old_str")
+		newStr := stringArg(args, "new_str")
+		if oldStr == "" {
+			return "", fmt.Errorf("file_edit: old_str must not be empty; use file_write to overwrite entire files")
+		}
+		hunks = []hunk{{oldStr, newStr}}
 	}
 
 	if err := m.checkSingleWrite(ctx, path); err != nil {
@@ -1580,39 +1624,65 @@ func (m *Manager) handleFileEdit(ctx context.Context, args map[string]any) (stri
 	if err != nil {
 		return "", fmt.Errorf("file_edit: %w", err)
 	}
-
 	if !utf8.Valid(data) {
 		return "", fmt.Errorf("file_edit: %s appears to be a binary file", path)
 	}
 
 	content := string(data)
-	count := strings.Count(content, oldStr)
-	switch {
-	case count == 0:
-		return "", fmt.Errorf("file_edit: old_str not found in %s — call file_read on the file first and use the exact text from the file as old_str (watch for whitespace and indentation)", path)
-	case count > 1:
-		// Give the AI enough context to narrow down the match.
-		lineNums := findMatchLines(content, oldStr)
-		return "", fmt.Errorf("file_edit: old_str matches %d times in %s (at lines %v); include more surrounding context to make it unique",
-			count, path, lineNums)
+
+	// Validate all hunks before writing anything (atomic failure).
+	for i, h := range hunks {
+		count := strings.Count(content, h.old)
+		switch {
+		case count == 0:
+			if len(hunks) == 1 {
+				return "", fmt.Errorf("file_edit: old_str not found in %s — call file_read on the file first and use the exact text from the file as old_str (watch for whitespace and indentation)", path)
+			}
+			return "", fmt.Errorf("file_edit: edits[%d] old_str not found in %s", i, path)
+		case count > 1:
+			lineNums := findMatchLines(content, h.old)
+			if len(hunks) == 1 {
+				return "", fmt.Errorf("file_edit: old_str matches %d times in %s (at lines %v); include more surrounding context to make it unique",
+					count, path, lineNums)
+			}
+			return "", fmt.Errorf("file_edit: edits[%d] old_str matches %d times in %s (at lines %v); include more surrounding context",
+				i, count, path, lineNums)
+		}
 	}
 
-	newContent := strings.Replace(content, oldStr, newStr, 1)
-	if err := os.WriteFile(path, []byte(newContent), 0o644); err != nil {
+	// Apply all hunks in order.
+	type result struct {
+		line    int
+		added   int
+		removed int
+	}
+	results := make([]result, len(hunks))
+	for i, h := range hunks {
+		idx := strings.Index(content, h.old)
+		line := strings.Count(content[:idx], "\n") + 1
+		removed := strings.Count(h.old, "\n") + 1
+		added := strings.Count(h.new, "\n") + 1
+		results[i] = result{line, added, removed}
+		content = strings.Replace(content, h.old, h.new, 1)
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("file_edit: writing %s: %w", path, err)
 	}
 
-	// Report the line where the replacement occurred and line-count delta.
-	idx := strings.Index(content, oldStr)
-	line := strings.Count(content[:idx], "\n") + 1
-	removed := strings.Count(oldStr, "\n") + 1
-	added := strings.Count(newStr, "\n") + 1
-	return jsonResult(map[string]any{
-		"path":    path,
-		"line":    line,
-		"added":   added,
-		"removed": removed,
-	}), nil
+	if len(hunks) == 1 {
+		return jsonResult(map[string]any{
+			"path":    path,
+			"line":    results[0].line,
+			"added":   results[0].added,
+			"removed": results[0].removed,
+		}), nil
+	}
+	editsOut := make([]map[string]any, len(results))
+	for i, r := range results {
+		editsOut[i] = map[string]any{"line": r.line, "added": r.added, "removed": r.removed}
+	}
+	return jsonResult(map[string]any{"path": path, "edits": editsOut}), nil
 }
 
 // findMatchLines returns the starting line numbers for all occurrences of substr in text.
