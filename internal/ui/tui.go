@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -174,7 +175,18 @@ type contextDoneMsg struct{}
 // during stateConnectingMCP or stateIdle+OAuth), so processQueueOrIdle must not add it again.
 type queuedPrompt struct {
 	text      string
+	parts     []ai.ImagePart // optional image attachments
 	displayed bool
+}
+
+// imageLoadedMsg carries a successfully loaded image part ready to attach.
+type imageLoadedMsg struct {
+	part ai.ImagePart
+}
+
+// imageLoadErrMsg carries an error from a failed image load attempt.
+type imageLoadErrMsg struct {
+	err error
 }
 
 // tokenCountMsg carries the result of an async token-count operation.
@@ -808,6 +820,18 @@ func init() {
 			},
 		},
 		{
+			name:          "image",
+			description:   "Attach an image to your next message — usage: /image <path-or-url>",
+			safeWhileBusy: true,
+			action: func(m *Model) []tea.Cmd {
+				// Fill the input with "/image " so the user can type the path/URL.
+				m.input.SetValue("/image ")
+				m.input.CursorEnd()
+				m.updateCompletion()
+				return nil
+			},
+		},
+		{
 			name:          "quit",
 			description:   "Quit werkler",
 			safeWhileBusy: true,
@@ -889,6 +913,10 @@ type Model struct {
 	// Processed FIFO after the current agent turn completes successfully.
 	// displayed=true means the itemUser bubble has already been added to m.items.
 	queuedPrompts []queuedPrompt
+
+	// pendingImages holds images staged via /image that will be attached to
+	// the next outbound user message.
+	pendingImages []ai.ImagePart
 
 	// inputHistory holds all user prompts sent in this session (oldest first).
 	// historyIdx is the current position when navigating (-1 = not navigating).
@@ -1663,8 +1691,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else {
 					text := strings.TrimSpace(m.input.Value())
-					// Resume paused autopilot on bare Enter (empty input).
-					if text == "" && m.autopilotPaused {
+					switch {
+					case text == "" && m.autopilotPaused:
+						// Resume paused autopilot on bare Enter (empty input).
 						m.autopilotPaused = false
 						m.autopilotCycle = 0
 						m.items = append(m.items, displayItem{kind: itemInfo, content: "⚡ Autopilot resumed."})
@@ -1677,16 +1706,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.buildStreamMessages(m.autopilotMessagesForStream()),
 							m.tools,
 						))
-					} else if text != "" {
+					case strings.HasPrefix(text, "/image "):
+						// /image <path-or-url> — load image and stage it as pending.
+						arg := strings.TrimSpace(strings.TrimPrefix(text, "/image "))
+						m.input.Reset()
+						m.updateCompletion()
+						if arg != "" {
+							cmds = append(cmds, doLoadImage(arg))
+						}
+					case text != "":
 						m.input.Reset()
 						m.appendInputHistory(text)
-						m.items = append(m.items, displayItem{kind: itemUser, content: text})
+						parts := m.pendingImages
+						m.pendingImages = nil
+						userContent := text
+						if len(parts) > 0 {
+							names := make([]string, len(parts))
+							for i, p := range parts {
+								names[i] = p.Name
+							}
+							userContent += " [📎 " + strings.Join(names, ", ") + "]"
+						}
+						m.items = append(m.items, displayItem{kind: itemUser, content: userContent})
 						needRebuild = true
 
 						if m.session.HasPendingOAuth() {
 							// Defer the user prompt until OAuth servers are connected.
 							// Item already shown above (displayed=true).
-							m.queuedPrompts = append([]queuedPrompt{{text: text, displayed: true}}, m.queuedPrompts...)
+							m.queuedPrompts = append([]queuedPrompt{{text: text, parts: parts, displayed: true}}, m.queuedPrompts...)
 							m.oauthInfoIdx = len(m.items)
 							names := strings.Join(m.session.PendingOAuthNames(), ", ")
 							m.items = append(m.items, displayItem{
@@ -1696,7 +1743,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.state = stateConnectingOAuth
 							cmds = append(cmds, doConnectOAuth(m.ctx, m.session, m.send))
 						} else {
-							m.messages = append(m.messages, ai.Message{Role: "user", Content: text})
+							m.messages = append(m.messages, ai.Message{Role: "user", Content: text, Parts: parts})
 							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.turnRoundtrips = 0
 							m.emptyResponseRetries = 0
@@ -2123,15 +2170,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				text := strings.TrimSpace(m.input.Value())
-				if text != "" {
+				if strings.HasPrefix(text, "/image ") {
+					arg := strings.TrimSpace(strings.TrimPrefix(text, "/image "))
+					m.input.Reset()
+					m.showCompletion = false
+					m.updateCompletion()
+					if arg != "" {
+						cmds = append(cmds, doLoadImage(arg))
+					}
+					needRebuild = true
+				} else if text != "" {
 					m.input.Reset()
 					m.showCompletion = false
 					m.appendInputHistory(text)
+					parts := m.pendingImages
+					m.pendingImages = nil
 					// Do NOT add to m.items here — the message should appear in the
 					// chat log at the moment it is actually sent to the AI, not while
 					// the AI is still processing a previous turn. The queue counter in
 					// the status bar provides feedback that the message was received.
-					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: false})
+					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, parts: parts, displayed: false})
 					needRebuild = true
 				}
 			case tea.KeyTab:
@@ -2648,6 +2706,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			item.truncatedLines += trimProcessOutputLines(&item.content, processOutputLineCap)
 			m.items = append(m.items, item)
 		}
+		needRebuild = true
+
+	case imageLoadedMsg:
+		m.pendingImages = append(m.pendingImages, msg.part)
+		m.items = append(m.items, displayItem{
+			kind:    itemInfo,
+			content: fmt.Sprintf("📎 Attached: %s (send your next message to include it)", msg.part.Name),
+		})
+		needRebuild = true
+
+	case imageLoadErrMsg:
+		m.items = append(m.items, displayItem{
+			kind:    itemError,
+			content: "Failed to load image: " + msg.err.Error(),
+		})
 		needRebuild = true
 
 	case tea.WindowSizeMsg:
@@ -3355,7 +3428,11 @@ func (m Model) statusLines() (line1, line2 string) {
 			modeStyle := lipgloss.NewStyle().Foreground(modeColor).Bold(true)
 			modeHint = "  " + modeStyle.Render("["+name+"]") + " " + statusStyle.Render("shift+tab")
 		}
-		line1 := mouseHint + pickerHint + sessionHint + todoHint + modeHint + allowAllIndicator
+		imageHint := ""
+		if n := len(m.pendingImages); n > 0 {
+			imageHint = "  " + keyHintStyle.Render(fmt.Sprintf("📎 %d image(s) staged", n))
+		}
+		line1 := mouseHint + pickerHint + sessionHint + todoHint + modeHint + imageHint + allowAllIndicator
 		// Show rate limit info when the provider has reported it.
 		if m.lastRateLimits.IsKnown() {
 			parts := []string{}
@@ -3915,11 +3992,19 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 	if len(m.queuedPrompts) > 0 {
 		p := m.queuedPrompts[0]
 		m.queuedPrompts = m.queuedPrompts[1:]
-		m.messages = append(m.messages, ai.Message{Role: "user", Content: p.text})
+		m.messages = append(m.messages, ai.Message{Role: "user", Content: p.text, Parts: p.parts})
 		// Only add the display item if it wasn't already shown when queued
 		// (e.g. typed during stateConnectingMCP or stateIdle+OAuth).
 		if !p.displayed {
-			m.items = append(m.items, displayItem{kind: itemUser, content: p.text})
+			userContent := p.text
+			if len(p.parts) > 0 {
+				names := make([]string, len(p.parts))
+				for i, pt := range p.parts {
+					names[i] = pt.Name
+				}
+				userContent += " [📎 " + strings.Join(names, ", ") + "]"
+			}
+			m.items = append(m.items, displayItem{kind: itemUser, content: userContent})
 		}
 		m.turnRoundtrips = 0
 		m.emptyResponseRetries = 0
@@ -4023,7 +4108,46 @@ func (m *Model) newOpCtx() context.Context {
 	return ctx
 }
 
-// doStartStream kicks off a streaming completion in a goroutine and returns
+// doLoadImage loads an image from a local path or URL and returns it as an
+// imageLoadedMsg (or imageLoadErrMsg on failure).
+func doLoadImage(src string) tea.Cmd {
+	return func() tea.Msg {
+		if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+			return imageLoadedMsg{part: ai.ImagePart{URL: src, Name: filepath.Base(src)}}
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return imageLoadErrMsg{err: fmt.Errorf("read image: %w", err)}
+		}
+		mime := http.DetectContentType(data)
+		// DetectContentType may return "application/octet-stream" for image types
+		// it can't detect; fall back to extension mapping.
+		if mime == "application/octet-stream" {
+			ext := strings.ToLower(filepath.Ext(src))
+			switch ext {
+			case ".png":
+				mime = "image/png"
+			case ".jpg", ".jpeg":
+				mime = "image/jpeg"
+			case ".gif":
+				mime = "image/gif"
+			case ".webp":
+				mime = "image/webp"
+			default:
+				return imageLoadErrMsg{err: fmt.Errorf("unsupported image type: %s", ext)}
+			}
+		}
+		if !strings.HasPrefix(mime, "image/") {
+			return imageLoadErrMsg{err: fmt.Errorf("not an image file (detected %s)", mime)}
+		}
+		return imageLoadedMsg{part: ai.ImagePart{
+			Data:     data,
+			MIMEType: mime,
+			Name:     filepath.Base(src),
+		}}
+	}
+}
+
 // the first chunk as a streamChunkMsg (carrying the channel for further reads).
 func doStartStream(ctx context.Context, client ai.StreamCompleter, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
 	snapshot := make([]ai.Message, len(messages))
