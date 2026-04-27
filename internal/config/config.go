@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	toml "github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 )
 
@@ -152,6 +153,11 @@ func Load(path string) (*Config, error) {
 	if err := v.ReadInConfig(); err != nil {
 		var notFound viper.ConfigFileNotFoundError
 		if !errors.As(err, &notFound) && !os.IsNotExist(err) {
+			var decodeErr *toml.DecodeError
+			if errors.As(err, &decodeErr) {
+				row, col := decodeErr.Position()
+				return nil, fmt.Errorf("config file %q:%d:%d: %w", path, row, col, err)
+			}
 			return nil, fmt.Errorf("reading config file %q: %w", path, err)
 		}
 		// Missing config file is fine — defaults + env vars + flags cover it.
