@@ -11,7 +11,8 @@ import (
 type ResolvedMode struct {
 	Name      string
 	IsDefault bool
-	// Color is a terminal 256-color index string for TUI border accents (e.g. "33").
+	// Color is passed directly to lipgloss.Color for TUI border accents.
+	// Accepts a #rrggbb hex string (e.g. "#5f87ff") or a 256-color index (e.g. "69").
 	// Empty string means use the default border color.
 	Color              string
 	SystemPromptExtra  string

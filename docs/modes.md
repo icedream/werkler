@@ -37,7 +37,7 @@ Define custom modes in your config file under `[[modes]]`:
 ```toml
 [[modes]]
 name               = "review"
-color              = "202"       # orange (terminal 256-color index)
+color              = "#ff5f00"   # orange — hex or 256-color index both work
 system_prompt_extra = """
 ## Mode: Code Review
 
@@ -72,7 +72,7 @@ with autopilot enabled and a 30-cycle cap.
 |-------|------|-------------|
 | `name` | string | Mode name. Shadows a built-in when matching `default`, `plan`, or `document`. |
 | `base` | string | Inherit all settings from this mode before applying overrides. |
-| `color` | string | Terminal 256-color index for the TUI border accent (e.g. `"33"`, `"202"`). |
+| `color` | string | TUI border accent color. Accepts a `#rrggbb` hex value (e.g. `"#5f87ff"`) or a [256-color terminal index](https://www.ditig.com/publications/256-colors-cheat-sheet) (e.g. `"69"`, `"202"`). Hex is recommended — most modern terminals support true color. |
 | `system_prompt_extra` | string | Text appended to the system prompt while the mode is active. |
 | `autopilot` | bool | Override the autopilot on/off setting for this mode. |
 | `autopilot_max_cycles` | int | Override the autopilot cycle cap (0 = inherit). |
