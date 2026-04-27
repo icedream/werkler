@@ -38,9 +38,10 @@ api_key  = "sk-..."
 model    = "gpt-4o"
 
 [[ai.providers]]
-name  = "copilot"
-type  = "copilot"
-model = "gpt-4o"   # default model; overridable in the TUI
+name           = "copilot"
+type           = "copilot"
+model          = "claude-sonnet-4.6"   # default model; overridable in the TUI
+context_window = 168000                # optional: override auto-detected context window (tokens)
 ```
 
 Provider types:
@@ -49,6 +50,11 @@ Provider types:
 | --------- | -------------------------------------------------------------- |
 | `openai`  | Any OpenAI-compatible API (OpenAI, Ollama, vLLM, KubeAI, etc.) |
 | `copilot` | GitHub Copilot (requires `werkler auth copilot` first)         |
+
+**`context_window`** — When set to a non-zero integer, overrides the context window size that
+werkler auto-detects via the provider API. Useful for providers (such as GitHub Copilot) that
+do not expose context window metadata, which prevents automatic context compaction from
+triggering. Example values: `168000` (Copilot claude-sonnet-4.6), `200000` (claude-opus-4.x).
 
 When multiple providers are configured you can switch between them live in the
 TUI model picker (`ctrl+p`): models from all providers appear in a flat list

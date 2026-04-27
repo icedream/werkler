@@ -200,6 +200,17 @@ func runChat(_ *cobra.Command, _ []string) error {
 		ConfiguredModes:    cfg.Modes,
 		ImplementationMode: cfg.ImplementationMode,
 	}
+	// Carry forward the active provider's context-window override (if any).
+	activeName := config.ActiveProviderName(&cfg.AI, providers)
+	if chatProvider != "" {
+		activeName = chatProvider
+	}
+	for _, p := range providers {
+		if p.Name == activeName && p.ContextWindow > 0 {
+			opts.ContextWindowOverride = p.ContextWindow
+			break
+		}
+	}
 	// Resolve --agent flag: fail fast if the name is unknown.
 	if chatAgent != "" {
 		var found *agents.Agent

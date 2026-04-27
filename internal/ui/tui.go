@@ -640,6 +640,9 @@ type SessionOptions struct {
 	// ImplementationMode is the name of the mode preset to apply when the AI
 	// calls confirm_plan and the user approves. Empty string uses the default mode.
 	ImplementationMode string
+	// ContextWindowOverride, if > 0, is used as the model's context window size
+	// when the provider does not report it (e.g. GitHub Copilot).
+	ContextWindowOverride int
 	// MemoryStore, if non-nil, enables cross-session project memory tools and
 	// injects the current memory into the system prompt at request time.
 	MemoryStore *memorystore.MemoryStore
@@ -1058,6 +1061,10 @@ type Model struct {
 	// press, waiting for a second Esc to actually cancel.
 	cancelOp      context.CancelFunc
 	cancelPending bool
+
+	// contextWindowOverride is set from SessionOptions when the config provides
+	// an explicit context window size to use when the provider doesn't report one.
+	contextWindowOverride int
 
 	// UI components.
 	viewport     viewport.Model
@@ -3020,11 +3027,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case modelInfoMsg:
-		if msg.err == nil && msg.info.HasContext() {
-			m.modelInfo = msg.info
+		info := msg.info
+		// Apply user override when the provider probe didn't return a context window,
+		// or when the override is explicitly set (always takes precedence).
+		if m.contextWindowOverride > 0 && (info.Context.MaxTokens == 0 || !info.HasContext()) {
+			info.Context.MaxTokens = m.contextWindowOverride
+		}
+		if msg.err == nil {
+			m.modelInfo = info
 			// Update the system prompt in a fresh (non-resumed) conversation.
-			// A conversation is considered fresh when it has only the system message
-			// and no user turns yet.
 			if len(m.messages) == 1 && m.messages[0].Role == "system" {
 				m.messages = m.newConversation()
 			}
@@ -5164,12 +5175,12 @@ func (m *Model) shouldAutoCompact() bool {
 	if !m.hasCompactableHistory() {
 		return false
 	}
-	const autoCompactThreshold = 0.75
+	const autoCompactThreshold = 0.70
 	// For approximate counts (unknown tokenizer) use a lower threshold to
 	// compensate for potential undercounting.
 	threshold := autoCompactThreshold
 	if m.contextUsage.Approx {
-		threshold = 0.65
+		threshold = 0.55
 	}
 	return float64(m.contextUsage.Total)/float64(maxTok) >= threshold
 }
@@ -6105,6 +6116,7 @@ func RunTUI(
 	m.allModes = opts.AllModes
 	m.configuredModes = opts.ConfiguredModes
 	m.implementationMode = opts.ImplementationMode
+	m.contextWindowOverride = opts.ContextWindowOverride
 	if opts.ActiveMode.Name != "" {
 		m.activeMode = opts.ActiveMode
 		// Apply autopilot/approve settings from the mode (not using applyMode
@@ -6131,6 +6143,11 @@ func RunTUI(
 	m.persistPathApproval = opts.PersistPathApproval
 	m.persistMCPServer = opts.PersistMCPServer
 	m.removeRegistryServer = opts.RemoveMCPServer
+	// Seed modelInfo from the override immediately so shouldAutoCompact works
+	// even before the async model-probe completes.
+	if m.contextWindowOverride > 0 && m.modelInfo.Context.MaxTokens == 0 {
+		m.modelInfo.Context.MaxTokens = m.contextWindowOverride
+	}
 	if opts.MCPServers != nil {
 		m.configuredMCPServers = make([]config.MCPServerConfig, len(opts.MCPServers))
 		copy(m.configuredMCPServers, opts.MCPServers)

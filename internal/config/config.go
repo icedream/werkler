@@ -68,6 +68,11 @@ type ProviderConfig struct {
 	Endpoint string       `mapstructure:"endpoint"` // OpenAI-compatible: base URL
 	APIKey   string       `mapstructure:"api_key"`  // OpenAI-compatible: API key
 	Model    string       `mapstructure:"model"`    // default model for this provider
+	// ContextWindow overrides the auto-detected context window size (tokens).
+	// Set this when the provider does not expose context window size via its API
+	// (e.g. GitHub Copilot) to enable automatic context compaction.
+	// 0 means auto-detect only.
+	ContextWindow int `mapstructure:"context_window"`
 }
 
 // RubberDuckConfig configures an optional secondary AI model used for critical
