@@ -226,3 +226,63 @@ func TestRemoveMCPServerBlock_EOFWithoutTrailingNewline(t *testing.T) {
 	result := removeMCPServerBlock(input, "a")
 	assert.NotContains(t, result, `name = "a"`)
 }
+
+func TestAppendMCPServer_PersistsOAuthAndHint(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.toml"
+
+	srv := MCPServerConfig{
+		Name:      "acme",
+		Transport: MCPTransportStreamable,
+		URL:       "https://mcp.acme.example.com/mcp",
+		OAuth:     true,
+		Hint:      "Manage Acme widgets and deployments",
+	}
+	require.NoError(t, AppendMCPServer(path, srv))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	text := string(data)
+
+	assert.Contains(t, text, "oauth = true")
+	assert.Contains(t, text, `hint = "Manage Acme widgets and deployments"`)
+	assert.Contains(t, text, `url = "https://mcp.acme.example.com/mcp"`)
+}
+
+func TestAppendMCPServer_NoOAuthFieldWhenFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.toml"
+
+	srv := MCPServerConfig{
+		Name:      "plain",
+		Transport: MCPTransportStreamable,
+		URL:       "https://mcp.plain.example.com/mcp",
+	}
+	require.NoError(t, AppendMCPServer(path, srv))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "oauth")
+	assert.NotContains(t, string(data), "hint")
+}
+
+func TestAppendMCPServer_OAuthClientIDPersisted(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.toml"
+
+	srv := MCPServerConfig{
+		Name:          "github",
+		Transport:     MCPTransportStreamable,
+		URL:           "https://api.github.com/mcp",
+		OAuth:         true,
+		OAuthClientID: "Iv1.abc123",
+	}
+	require.NoError(t, AppendMCPServer(path, srv))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	text := string(data)
+	assert.Contains(t, text, "oauth = true")
+	assert.Contains(t, text, `oauth_client_id = "Iv1.abc123"`)
+	assert.NotContains(t, text, "oauth_client_secret")
+}

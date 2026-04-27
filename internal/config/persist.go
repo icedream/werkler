@@ -47,9 +47,21 @@ func AppendMCPServer(configPath string, srv MCPServerConfig) error {
 	case MCPTransportStreamable, MCPTransportSSE:
 		fmt.Fprintf(&entry, "transport = %s\n", tomlString(string(srv.Transport)))
 		fmt.Fprintf(&entry, "url = %s\n", tomlString(srv.URL))
+		if srv.OAuth {
+			entry.WriteString("oauth = true\n")
+		}
+		if srv.OAuthClientID != "" {
+			fmt.Fprintf(&entry, "oauth_client_id = %s\n", tomlString(srv.OAuthClientID))
+		}
+		if srv.OAuthClientSecret != "" {
+			fmt.Fprintf(&entry, "oauth_client_secret = %s\n", tomlString(srv.OAuthClientSecret))
+		}
 	case MCPTransportStdio:
 		fmt.Fprintf(&entry, "transport = %s\n", tomlString(string(srv.Transport)))
 		fmt.Fprintf(&entry, "command = %s\n", tomlString(srv.Command))
+	}
+	if srv.Hint != "" {
+		fmt.Fprintf(&entry, "hint = %s\n", tomlString(srv.Hint))
 	}
 
 	if readErr != nil {
