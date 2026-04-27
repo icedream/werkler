@@ -735,6 +735,35 @@ Returns an error for binary files; use process_start to handle those.`,
 		},
 		{
 			def: ai.ToolDefinition{
+				Name: "file_read_multi",
+				Description: `Read multiple file regions in one call. Returns each region labeled with a header line.
+Each region may specify start_line and end_line (1-indexed, inclusive); omit both to read the full file.
+Partial failures are reported inline — other regions still return their content.
+Total output is capped at 2 MiB across all regions.`,
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"regions": map[string]any{
+							"type":        "array",
+							"description": "List of regions to read",
+							"items": map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"path":       map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
+									"start_line": map[string]any{"type": "number", "description": "First line to return (1-indexed, default 1)"},
+									"end_line":   map[string]any{"type": "number", "description": "Last line to return (1-indexed, default: end of file)"},
+								},
+								"required": []string{"path"},
+							},
+						},
+					},
+					"required": []string{"regions"},
+				},
+			},
+			handle: m.handleFileReadMulti,
+		},
+		{
+			def: ai.ToolDefinition{
 				Name:        "read_image",
 				Description: "Load a local image file so you can see its visual content. Supported formats: PNG, JPEG, GIF, WebP.",
 				InputSchema: map[string]any{
@@ -1572,6 +1601,146 @@ func (m *Manager) handleFileRead(ctx context.Context, args map[string]any) (stri
 		"end_line":    startLine + len(selected) - 1,
 		"truncated":   startLine+len(selected)-1 < totalLines && len(data) > maxFileReadBytes,
 	}), nil
+}
+
+// maxFileReadMultiBytes is the aggregate output cap for file_read_multi.
+const maxFileReadMultiBytes = 2 << 20 // 2 MiB
+
+func (m *Manager) handleFileReadMulti(ctx context.Context, args map[string]any) (string, error) {
+	rawRegions, _ := args["regions"].([]any)
+	if len(rawRegions) == 0 {
+		return "", fmt.Errorf("file_read_multi: regions must be a non-empty array")
+	}
+
+	type region struct {
+		rawPath   string
+		path      string
+		startLine int
+		endLine   int
+		hasStart  bool
+		hasEnd    bool
+	}
+
+	regions := make([]region, 0, len(rawRegions))
+	for i, r := range rawRegions {
+		rm, ok := r.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("file_read_multi: region[%d] is not an object", i)
+		}
+		rp := stringArg(rm, "path")
+		if rp == "" {
+			return "", fmt.Errorf("file_read_multi: region[%d]: path is required", i)
+		}
+		reg := region{rawPath: rp, path: canonicalizePath(rp)}
+		if v, ok := rm["start_line"]; ok {
+			if f, ok2 := toFloat64(v); ok2 {
+				reg.startLine = int(f)
+			}
+			reg.hasStart = true
+		}
+		if v, ok := rm["end_line"]; ok {
+			if f, ok2 := toFloat64(v); ok2 {
+				reg.endLine = int(f)
+			}
+			reg.hasEnd = true
+		}
+		regions = append(regions, reg)
+	}
+
+	// Batch path approval: collect all unique unapproved paths.
+	approver := m.activeApprover(ctx)
+	if approver != nil {
+		seen := make(map[string]bool)
+		var unapproved []chat.PathAccessRequest
+		for _, reg := range regions {
+			if !seen[reg.path] && !approver.IsPathReadApproved(reg.path) {
+				unapproved = append(unapproved, chat.PathAccessRequest{Path: reg.path, Write: false})
+				seen[reg.path] = true
+			}
+		}
+		if len(unapproved) > 0 {
+			return "", &UnapprovedPathsError{Requests: unapproved}
+		}
+	}
+
+	var out strings.Builder
+	totalBytes := 0
+
+	for i, reg := range regions {
+		if i > 0 {
+			out.WriteString("\n")
+		}
+
+		info, err := os.Stat(reg.path)
+		if err != nil {
+			fmt.Fprintf(&out, "=== %s [ERROR] ===\n%s\n", reg.rawPath, err.Error())
+			continue
+		}
+		if info.IsDir() {
+			fmt.Fprintf(&out, "=== %s [ERROR] ===\ndirectory; use file_list\n", reg.rawPath)
+			continue
+		}
+
+		data, err := os.ReadFile(reg.path)
+		if err != nil {
+			fmt.Fprintf(&out, "=== %s [ERROR] ===\n%s\n", reg.rawPath, err.Error())
+			continue
+		}
+		if !utf8.Valid(data) {
+			fmt.Fprintf(&out, "=== %s [ERROR] ===\nbinary file; use process_start\n", reg.rawPath)
+			continue
+		}
+
+		lines := strings.Split(string(data), "\n")
+		totalLines := len(lines)
+
+		startLine := 1
+		endLine := totalLines
+		if reg.hasStart {
+			startLine = reg.startLine
+		}
+		if reg.hasEnd {
+			endLine = reg.endLine
+		}
+		if startLine < 1 {
+			startLine = 1
+		}
+		if endLine > totalLines {
+			endLine = totalLines
+		}
+		if startLine > endLine {
+			fmt.Fprintf(&out, "=== %s [ERROR] ===\nstart_line (%d) > end_line (%d)\n", reg.rawPath, startLine, endLine)
+			continue
+		}
+
+		selected := lines[startLine-1 : endLine]
+
+		rangeLabel := fmt.Sprintf("L%d-L%d", startLine, startLine+len(selected)-1)
+		header := fmt.Sprintf("=== %s [%s of %d] ===\n", reg.rawPath, rangeLabel, totalLines)
+		out.WriteString(header)
+		totalBytes += len(header)
+
+		var sectionBuf strings.Builder
+		for i, l := range selected {
+			fmt.Fprintf(&sectionBuf, "%4d│%s\n", startLine+i, l)
+		}
+		section := sectionBuf.String()
+
+		remaining := maxFileReadMultiBytes - totalBytes
+		if remaining <= 0 {
+			out.WriteString("[output cap reached — omitted]\n")
+			break
+		}
+		if len(section) > remaining {
+			out.WriteString(section[:remaining])
+			out.WriteString("\n[output cap reached — truncated]\n")
+			break
+		}
+		out.WriteString(section)
+		totalBytes += len(section)
+	}
+
+	return out.String(), nil
 }
 
 func (m *Manager) handleReadImage(ctx context.Context, args map[string]any) (string, []ai.ImagePart, error) {
