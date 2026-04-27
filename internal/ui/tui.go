@@ -281,7 +281,7 @@ type processOutputMsg struct {
 type sessionHintMsg struct{ sess *sessionstore.Session }
 
 // sessionSavedMsg signals that a background save completed (errors are silent).
-type sessionSavedMsg struct{}
+type sessionSavedMsg struct{ seq int }
 
 // sessionsListMsg delivers the list of sessions for the picker.
 type sessionsListMsg struct {
@@ -1024,6 +1024,13 @@ type Model struct {
 	// resumeHint is the latest CWD-matching session found on startup.
 	// Shown in the status bar until the first message is sent.
 	resumeHint *sessionstore.Session
+
+	// saveSeq is incremented each time a session save is requested.
+	// Each doSaveSession call captures the seq at dispatch time; the
+	// sessionSavedMsg handler discards arrivals with a seq older than the
+	// highest confirmed seq, preventing stale goroutines from rolling back state.
+	saveSeq              int
+	lastConfirmedSaveSeq int
 
 	// persistToolApproval, if non-nil, saves a tool name to auto_approve_tools.
 	persistToolApproval func(toolName string) error
@@ -3050,10 +3057,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		needRebuild = true
 		if m.sessionStore != nil {
-			snap := m.currentSessionSnapshot()
-			m.sessionID = snap.ID
-			m.sessionCreatedAt = snap.CreatedAt
-			cmds = append(cmds, doSaveSession(m.sessionStore, snap))
+			cmds = append(cmds, m.saveSession())
 		}
 		cmds = append(cmds, m.processQueueOrIdle())
 
@@ -3250,7 +3254,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		needRebuild = true
 
 	case sessionSavedMsg:
-		// Auto-save completed; nothing to do (errors silently dropped).
+		// Update the high-water mark; discard if a newer save has already completed.
+		if msg.seq > m.lastConfirmedSaveSeq {
+			m.lastConfirmedSaveSeq = msg.seq
+		}
 
 	case sessionsListMsg:
 		if m.state == statePickingSession {
@@ -3576,10 +3583,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				needRebuild = true
 				if m.sessionStore != nil {
-					snap := m.currentSessionSnapshot()
-					m.sessionID = snap.ID
-					m.sessionCreatedAt = snap.CreatedAt
-					cmds = append(cmds, doSaveSession(m.sessionStore, snap))
+					cmds = append(cmds, m.saveSession())
 				}
 				if cmd := m.recountContext(); cmd != nil {
 					cmds = append(cmds, cmd)
@@ -3765,6 +3769,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			m.callingToolName = ""
 			m.executingCall = nil
+			// Save after every successful tool result so that session state is
+			// preserved even if the app is terminated mid-turn.
+			if m.sessionStore != nil {
+				cmds = append(cmds, m.saveSession())
+			}
 			// connect_server: refresh tool list before resuming so newly available
 			// tools are visible to the AI on the next stream.
 			// Also clear any OAuth display item that was shown during OAuth flow.
@@ -5956,12 +5965,24 @@ func rebuildItemsFromMessages(msgs []ai.Message) []displayItem {
 }
 
 // doSaveSession saves the current session state asynchronously.
-// Errors are ignored (returns sessionSavedMsg regardless).
-func doSaveSession(store *sessionstore.Store, sess sessionstore.Session) tea.Cmd {
+// seq is a monotonically increasing counter; the sessionSavedMsg handler
+// discards arrivals with a seq older than the most recent confirmed save.
+func doSaveSession(store *sessionstore.Store, sess sessionstore.Session, seq int) tea.Cmd {
 	return func() tea.Msg {
 		_ = store.Save(&sess)
-		return sessionSavedMsg{}
+		return sessionSavedMsg{seq: seq}
 	}
+}
+
+// saveSession snapshots the current session, increments the save sequence,
+// and returns a tea.Cmd that writes it to disk asynchronously.
+// Must only be called when m.sessionStore != nil.
+func (m *Model) saveSession() tea.Cmd {
+	snap := m.currentSessionSnapshot()
+	m.sessionID = snap.ID
+	m.sessionCreatedAt = snap.CreatedAt
+	m.saveSeq++
+	return doSaveSession(m.sessionStore, snap, m.saveSeq)
 }
 
 // doLoadSessionHint loads the most recent session for the given CWD asynchronously.
