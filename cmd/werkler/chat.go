@@ -156,6 +156,11 @@ func runChat(_ *cobra.Command, _ []string) error {
 	if modeErr != nil {
 		return fmt.Errorf("unknown mode %q: %w", chatMode, modeErr)
 	}
+	if cfg.ImplementationMode != "" {
+		if _, err := chat.ResolveMode(cfg.ImplementationMode, cfg.Modes); err != nil {
+			return fmt.Errorf("implementation_mode: %w", err)
+		}
+	}
 
 	opts := ui.SessionOptions{
 		Store:     store,
@@ -179,6 +184,7 @@ func runChat(_ *cobra.Command, _ []string) error {
 		ActiveMode:         activeMode,
 		AllModes:           allModes,
 		ConfiguredModes:    cfg.Modes,
+		ImplementationMode: cfg.ImplementationMode,
 	}
 	if len(cfg.MCP.Servers) > 0 {
 		opts.MCPManager = manager

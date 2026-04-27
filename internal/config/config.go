@@ -146,6 +146,9 @@ type Config struct {
 	Skills    SkillsConfig    `mapstructure:"skills"`
 	Autopilot AutopilotConfig `mapstructure:"autopilot"`
 	Modes     []ModeConfig    `mapstructure:"modes"`
+	// ImplementationMode is the name of the mode preset to switch to when the
+	// AI calls start_implementation. Empty means use the default mode.
+	ImplementationMode string `mapstructure:"implementation_mode"`
 }
 
 // DefaultConfigPath returns the default config file path.

@@ -295,6 +295,16 @@ type askUserMsg struct {
 	resultCh      chan<- askUserResult
 }
 
+// switchModeMsg is sent by the start_implementation tool goroutine to the TUI
+// so it can switch to the implementation mode (and optionally enable autopilot).
+// resultCh is buffered (capacity 1) and receives nil on success or a non-nil
+// error if the mode name is unknown.
+type switchModeMsg struct {
+	callID    string
+	autopilot bool
+	resultCh  chan<- error
+}
+
 // mcpServerStatusMsg is sent by a background MCP connect tea.Cmd when a single
 // server finishes connecting (or fails, or is deferred for OAuth).
 type mcpServerStatusMsg struct {
@@ -590,6 +600,9 @@ type SessionOptions struct {
 	// ConfiguredModes is the raw config-level list used to re-resolve modes
 	// when restoring a session.
 	ConfiguredModes []config.ModeConfig
+	// ImplementationMode is the name of the mode preset to apply when the AI
+	// calls start_implementation. Empty string uses the default mode.
+	ImplementationMode string
 	// MemoryStore, if non-nil, enables cross-session project memory tools and
 	// injects the current memory into the system prompt at request time.
 	MemoryStore *memorystore.MemoryStore
@@ -1104,6 +1117,9 @@ type Model struct {
 	allModes []chat.ResolvedMode
 	// configuredModes holds the raw config entries for re-resolving modes on session restore.
 	configuredModes []config.ModeConfig
+	// implementationMode is the name of the mode preset to apply when the AI calls
+	// start_implementation. Empty string means use the default mode.
+	implementationMode string
 	// modePicker is the list used for /mode selection.
 	modePicker list.Model
 }
@@ -2646,6 +2662,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case switchModeMsg:
+		// Guard against stale messages (context cancelled before Update processed it).
+		if m.executingCall == nil || m.executingCall.ID != msg.callID {
+			break
+		}
+		// Resolve the target mode: use implementationMode if set, else default.
+		targetModeName := m.implementationMode
+		targetMode, resolveErr := chat.ResolveMode(targetModeName, m.configuredModes)
+		if resolveErr != nil {
+			go func() { msg.resultCh <- resolveErr }()
+			break
+		}
+		m.applyMode(targetMode)
+		// Make autopilot authoritative: honour the user's explicit choice regardless
+		// of what the target mode specifies.
+		if msg.autopilot {
+			m.autopilotEnable()
+		} else if m.autopilot || m.autopilotPaused {
+			m.autopilotDisable()
+		}
+		go func() { msg.resultCh <- nil }()
+
 	case askUserMsg:
 		// Guard against stale messages that arrive after the call already finished
 		// (e.g. context was cancelled between send and receive).
@@ -4078,9 +4116,10 @@ func (m *Model) processNextCall() tea.Cmd {
 		return func() tea.Msg { return taskCompleteMsg{callID: call.ID, summary: summary} }
 	}
 
-	// ask_user, subagent tools, use_skill, task_start, todo_*, memory_*, and connect_server
+	// ask_user, start_implementation, subagent tools, use_skill, task_start, todo_*, memory_*, and connect_server
 	// are always dispatched immediately without an approval dialog.
-	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || m.session.IsSubagentTool(call.Name) ||
+	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "start_implementation" ||
+		m.session.IsSubagentTool(call.Name) ||
 		call.Name == "use_skill" || call.Name == "task_start" ||
 		call.Name == "todo_add" || call.Name == "todo_update" || call.Name == "todo_list" ||
 		call.Name == "memory_list" || call.Name == "memory_read" || call.Name == "memory_write" ||
@@ -5224,6 +5263,7 @@ func RunTUI(
 	// Apply mode presets.
 	m.allModes = opts.AllModes
 	m.configuredModes = opts.ConfiguredModes
+	m.implementationMode = opts.ImplementationMode
 	if opts.ActiveMode.Name != "" {
 		m.activeMode = opts.ActiveMode
 		// Apply autopilot/approve settings from the mode (not using applyMode
@@ -5329,6 +5369,23 @@ func RunTUI(
 		})
 		toolMgr.SetTaskTitleNotify(func(title string) {
 			sendFn(taskTitleMsg{title: title})
+		})
+		toolMgr.SetImplementationStarter(func(ctx context.Context, autopilot bool) error {
+			resultCh := make(chan error, 1)
+			callID := toolMgr.ActiveCallID()
+			if callID != "" {
+				sendFn(switchModeMsg{
+					callID:    callID,
+					autopilot: autopilot,
+					resultCh:  resultCh,
+				})
+			}
+			select {
+			case err := <-resultCh:
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		})
 	}
 

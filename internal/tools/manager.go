@@ -110,6 +110,12 @@ type mcpConnector interface {
 // goroutine and blocks until the user responds or ctx is cancelled.
 type UserAsker func(ctx context.Context, question string, choices []string, recommendedChoice string, allowFreeform bool) (string, error)
 
+// ImplementationStarter is implemented by interactive callers to switch to the
+// configured implementation mode (and optionally enable autopilot) when the AI
+// calls start_implementation. It is called from a tool execution goroutine and
+// blocks until the TUI has applied the mode change or ctx is cancelled.
+type ImplementationStarter func(ctx context.Context, autopilot bool) error
+
 // subagentDef describes a subagent that the AI can invoke as a tool.
 // Each registered subagent becomes one built-in tool in the manager.
 type subagentDef struct {
@@ -124,18 +130,19 @@ type subagentDef struct {
 
 // Manager wraps a chat.ToolManager and adds built-in tools.
 type Manager struct {
-	wrapped      chat.ToolManager
-	processes    *process.Manager
-	pathApprover PathApprover
-	builtins     []builtin
-	userAsker    UserAsker
-	subagents    []subagentDef
-	mcpMgr       mcpConnector
-	skills       []skills.Skill
-	todoStore    *todostore.Store
-	memoryStore  *memorystore.MemoryStore
-	taskTitle    func(string) // optional; called when the AI sets a task title via task_start
-	activeCallID atomic.Value // stores string; set/cleared by doCallTool goroutine
+	wrapped               chat.ToolManager
+	processes             *process.Manager
+	pathApprover          PathApprover
+	builtins              []builtin
+	userAsker             UserAsker
+	implementationStarter ImplementationStarter
+	subagents             []subagentDef
+	mcpMgr                mcpConnector
+	skills                []skills.Skill
+	todoStore             *todostore.Store
+	memoryStore           *memorystore.MemoryStore
+	taskTitle             func(string) // optional; called when the AI sets a task title via task_start
+	activeCallID          atomic.Value // stores string; set/cleared by doCallTool goroutine
 }
 
 type builtin struct {
@@ -212,6 +219,13 @@ func (m *Manager) SetPathApprover(pa PathApprover) {
 // user input interactively. When nil (the default), ask_user returns a static
 // "not available in non-interactive mode" message.
 func (m *Manager) SetUserAsker(fn UserAsker) { m.userAsker = fn }
+
+// SetImplementationStarter provides the callback used by the start_implementation
+// built-in to trigger a mode switch (and optional autopilot enable) in the TUI.
+// When nil (the default), start_implementation returns a static message.
+func (m *Manager) SetImplementationStarter(fn ImplementationStarter) {
+	m.implementationStarter = fn
+}
 
 // SetTaskTitleNotify registers a callback invoked whenever the AI calls
 // task_start to report what it is currently working on. Pass nil to disable.
@@ -1127,6 +1141,26 @@ Provide a concise summary of what was accomplished.`,
 		},
 		handle: m.handleTaskComplete,
 	})
+	builtins = append(builtins, builtin{
+		def: ai.ToolDefinition{
+			Name: "start_implementation",
+			Description: `Switch to the implementation mode and optionally enable autopilot to begin implementing the plan that was just discussed.
+Call this only AFTER the user has confirmed they want to proceed with implementation (via ask_user).
+- autopilot=false: switch to the implementation mode; you then proceed with implementation in the conversation.
+- autopilot=true: switch to the implementation mode and enable autopilot; the autonomous loop will continue the work.
+In both cases the current mode (e.g. plan mode) is replaced by the configured implementation mode.`,
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"autopilot": map[string]any{
+						"type":        "boolean",
+						"description": "If true, enable autopilot so the implementation runs autonomously without further user interaction",
+					},
+				},
+			},
+		},
+		handle: m.handleStartImplementation,
+	})
 
 	return builtins
 }
@@ -1928,6 +1962,23 @@ func (m *Manager) handleTaskComplete(_ context.Context, args map[string]any) (st
 		summary = "Task complete."
 	}
 	return summary, nil
+}
+
+func (m *Manager) handleStartImplementation(ctx context.Context, args map[string]any) (string, error) {
+	autopilot := false
+	if v, ok := args["autopilot"].(bool); ok {
+		autopilot = v
+	}
+	if m.implementationStarter == nil {
+		return "(start_implementation requires interactive mode — run werkler interactively)", nil
+	}
+	if err := m.implementationStarter(ctx, autopilot); err != nil {
+		return fmt.Sprintf("start_implementation failed: %v", err), nil
+	}
+	if autopilot {
+		return "Switched to implementation mode with autopilot enabled. Proceeding autonomously.", nil
+	}
+	return "Switched to implementation mode. Proceeding with implementation.", nil
 }
 
 func (m *Manager) handleGetTime(_ context.Context, args map[string]any) (string, error) {

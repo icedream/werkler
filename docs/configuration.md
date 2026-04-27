@@ -174,6 +174,19 @@ autopilot            = true
 autopilot_max_cycles = 30
 ```
 
+### Implementation mode
+
+`implementation_mode` names the mode preset that werkler switches to when the
+AI calls `start_implementation` (i.e., after the user approves a plan). Both
+the current mode (e.g. `plan`) and any autopilot state are replaced by the
+target mode.
+
+```toml
+implementation_mode = "code"   # switch to the "code" mode preset after planning
+```
+
+If unset (the default), werkler switches to the built-in `default` mode.
+
 ## Subagents (reviewer models)
 
 Werkler can optionally route tasks to a second AI model acting as a subagent.
