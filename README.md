@@ -13,6 +13,7 @@ writing and reviewing code, designing software, drafting tickets, and technical 
 - **Session persistence**: Save and resume chat sessions
 - **Tool approval system**: Control which AI actions require confirmation
 - **Skills system**: Load reusable instruction sets
+- **Custom agents**: Define named AI personas with optional tool restrictions
 - **Rubber duck reviewer**: Optional secondary AI model for critical feedback
 - **Autopilot mode**: Autonomous task execution with cycle limits
 
@@ -165,7 +166,10 @@ auto_approve_tools = [
 - [Configuration](docs/configuration.md) - Complete configuration reference
 - [TUI Reference](docs/tui.md) - Keyboard shortcuts, slash commands, and interactive features
 - [Skills](docs/skills.md) - Reusable instruction sets
+- [Agents](docs/agents.md) - Custom AI personas with tool restrictions
 - [Autopilot Mode](docs/autopilot.md) - Autonomous task execution
+- [Mode Presets](docs/modes.md) - Built-in and custom mode configuration
+- [Project Memory](docs/memory.md) - Persistent per-project AI memory
 
 ## 🤝 Contributing
 
