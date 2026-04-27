@@ -70,6 +70,9 @@ werkler sessions list
 # Delete a session
 werkler sessions delete <id>
 
+# Delete a session without a confirmation prompt
+werkler sessions delete <id> --force
+
 # Authenticate with GitHub Copilot
 werkler auth copilot
 
@@ -89,8 +92,23 @@ werkler --model gpt-4o chat
 # Switch AI provider
 werkler chat --provider=openai
 
+# Resume the session picker on startup
+werkler chat --resume
+
+# Resume a specific saved session by ID (or unique prefix)
+werkler chat --session abc123
+
+# Activate a named mode preset on startup
+werkler chat --mode plan
+
+# Activate a named agent on startup
+werkler chat --agent code-review-agent
+
 # Enable autopilot for autonomous work
 werkler chat --autopilot --prompt "Write tests for pkg/api"
+
+# Limit autopilot cycles
+werkler chat --autopilot --autopilot-max-cycles 20 --prompt "..."
 
 # Enable verbose output in prompt mode
 werkler chat --prompt "..." --verbose

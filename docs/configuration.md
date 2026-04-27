@@ -158,6 +158,12 @@ model = "claude-sonnet-4-5"
 ```
 werkler --model gpt-4o chat            # override active provider's model
 werkler chat --provider=copilot        # switch active provider
+werkler chat --mode plan               # activate a mode preset on startup
+werkler chat --agent code-review-agent # activate a named agent on startup
+werkler chat --resume                  # open session picker on startup
+werkler chat --session abc123          # resume a specific session by ID or prefix
+werkler chat -p "..."                  # short form of --prompt
+werkler chat -v                        # short form of --verbose
 ```
 
 The `--model` flag overrides the model for the active provider. Use `--provider`
