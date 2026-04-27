@@ -29,9 +29,6 @@ var (
 			Foreground(lipgloss.Color("212")).
 			Padding(0, 1)
 
-	separatorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("238"))
-
 	userPrefixStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("39"))
@@ -147,9 +144,6 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("220"))
 
-	sidebarSepStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("238"))
-
 	todoIndicatorStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("220")).
 				Bold(true)
@@ -164,10 +158,6 @@ var (
 	diffRemovedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("196")) // red
 )
-
-func separator(width int) string {
-	return separatorStyle.Render(strings.Repeat("─", width))
-}
 
 func newGlamourRenderer(width int, style string) *glamour.TermRenderer {
 	if width < 20 {

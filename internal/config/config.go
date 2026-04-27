@@ -125,6 +125,9 @@ type ModeConfig struct {
 	Name string `mapstructure:"name"`
 	// Base optionally names a built-in mode to inherit from.
 	Base string `mapstructure:"base"`
+	// Color is a terminal 256-color index (e.g. "33") used for the TUI border
+	// when this mode is active. Empty inherits from the base or uses the default.
+	Color string `mapstructure:"color"`
 	// SystemPromptExtra is appended to the system prompt when this mode is active.
 	SystemPromptExtra string `mapstructure:"system_prompt_extra"`
 	// Autopilot, when non-nil, overrides the default autopilot on/off setting.

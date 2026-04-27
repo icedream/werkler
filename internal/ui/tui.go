@@ -1278,6 +1278,25 @@ func (m *Model) applyMode(mode chat.ResolvedMode) {
 	}
 }
 
+// cycleMode advances to the next mode in m.allModes (wrapping around) and
+// applies it. It returns any tea.Cmds produced by the apply (e.g. viewport
+// rebuild).
+func (m *Model) cycleMode() []tea.Cmd {
+	if len(m.allModes) == 0 {
+		return nil
+	}
+	cur := 0
+	for i, mode := range m.allModes {
+		if mode.Name == m.activeMode.Name {
+			cur = i
+			break
+		}
+	}
+	next := (cur + 1) % len(m.allModes)
+	m.applyMode(m.allModes[next])
+	return nil
+}
+
 // and whose available predicate (if any) passes.
 func (m Model) filteredCmds() []slashCommand {
 	text := m.input.Value()
@@ -1332,6 +1351,20 @@ func (m *Model) recalcLayout() {
 	m.viewport.Width = mainW
 	m.input.Width = mainW - 5 // 5 = len("You> ")
 	m.syncViewportHeight()
+}
+
+// activeBorderColor returns the lipgloss color for the TUI separator lines,
+// derived from the active mode's color (or the default muted gray).
+func (m Model) activeBorderColor() lipgloss.Color {
+	if m.activeMode.Color != "" {
+		return lipgloss.Color(m.activeMode.Color)
+	}
+	return lipgloss.Color("238")
+}
+
+// modeSeparator returns a horizontal rule string styled with the active mode color.
+func (m Model) modeSeparator(width int) string {
+	return lipgloss.NewStyle().Foreground(m.activeBorderColor()).Render(strings.Repeat("─", width))
 }
 
 // isBusy reports whether the model is in an active AI processing state where
@@ -1704,6 +1737,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, inputCmd)
 				}
 
+			case tea.KeyShiftTab:
+				if len(m.allModes) > 0 {
+					cmds = append(cmds, m.cycleMode()...)
+				}
 			case tea.KeyUp:
 				switch {
 				case m.showCompletion:
@@ -2105,6 +2142,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.input.CursorEnd()
 						m.updateCompletion()
 					}
+				}
+			case tea.KeyShiftTab:
+				if len(m.allModes) > 0 {
+					cmds = append(cmds, m.cycleMode()...)
 				}
 			case tea.KeyUp:
 				if m.showCompletion {
@@ -3097,7 +3138,7 @@ func (m Model) View() string {
 		return m.registryView()
 	}
 
-	sep := separator(m.width)
+	sep := m.modeSeparator(m.width)
 	if m.session.AllowAll() {
 		sep = separatorAllowAllStyle.Render(strings.Repeat("─", m.width))
 	}
@@ -3112,7 +3153,8 @@ func (m Model) View() string {
 	// Main viewport, optionally with todo sidebar on the right.
 	showSidebar := m.sidebarOpen && m.todoStore != nil && m.width-sidebarWidth >= minMainWidth
 	if showSidebar {
-		sepCol := sidebarSepStyle.Render(strings.Repeat("│\n", m.viewport.Height))
+		sidebarSep := lipgloss.NewStyle().Foreground(m.activeBorderColor())
+		sepCol := sidebarSep.Render(strings.Repeat("│\n", m.viewport.Height))
 		// Trim the trailing newline from the sep column before joining.
 		sepCol = strings.TrimSuffix(sepCol, "\n")
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
@@ -3304,8 +3346,14 @@ func (m Model) statusLines() (line1, line2 string) {
 			}
 		}
 		modeHint := ""
-		if !m.activeMode.IsDefault && m.activeMode.Name != "" {
-			modeHint = "  " + statusStyle.Render("["+m.activeMode.Name+"]")
+		if len(m.allModes) > 0 {
+			name := m.activeMode.Name
+			if name == "" {
+				name = "default"
+			}
+			modeColor := m.activeBorderColor()
+			modeStyle := lipgloss.NewStyle().Foreground(modeColor).Bold(true)
+			modeHint = "  " + modeStyle.Render("["+name+"]") + " " + statusStyle.Render("shift+tab")
 		}
 		line1 := mouseHint + pickerHint + sessionHint + todoHint + modeHint + allowAllIndicator
 		// Show rate limit info when the provider has reported it.

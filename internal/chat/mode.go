@@ -9,8 +9,11 @@ import (
 
 // ResolvedMode is a fully-merged mode configuration, ready to apply to a session.
 type ResolvedMode struct {
-	Name               string
-	IsDefault          bool
+	Name      string
+	IsDefault bool
+	// Color is a terminal 256-color index string for TUI border accents (e.g. "33").
+	// Empty string means use the default border color.
+	Color              string
 	SystemPromptExtra  string
 	Autopilot          *bool // nil = don't override the session setting
 	AutopilotMaxCycles int   // 0 = don't override
@@ -25,10 +28,12 @@ var builtinModeList = []ResolvedMode{
 	},
 	{
 		Name:              "plan",
+		Color:             "69", // CornflowerBlue — structured/analytical
 		SystemPromptExtra: planModePrompt,
 	},
 	{
 		Name:              "document",
+		Color:             "71", // DarkSeaGreen — writing/prose
 		SystemPromptExtra: documentModePrompt,
 	},
 }
@@ -154,6 +159,9 @@ func resolveUserMode(um config.ModeConfig, allUserModes []config.ModeConfig) (Re
 
 	if um.SystemPromptExtra != "" {
 		base.SystemPromptExtra = um.SystemPromptExtra
+	}
+	if um.Color != "" {
+		base.Color = um.Color
 	}
 	if um.Autopilot != nil {
 		v := *um.Autopilot
