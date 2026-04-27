@@ -60,12 +60,24 @@ func DefaultDir() string {
 	return filepath.Join(cfgDir, "werkler", "sessions")
 }
 
+// WorkspaceDir returns the per-session workspace directory for the given session ID.
+// The workspace lives at <store-dir>/<id>/ alongside the session JSON file.
+// Use it to store session-scoped files such as plan.md, scratch notes, etc.
+// The directory is created lazily the first time Save is called for that session.
+func (s *Store) WorkspaceDir(id string) string {
+	return filepath.Join(s.dir, id)
+}
+
 // Save writes sess to disk, updating UpdatedAt. If the file already exists it
 // is overwritten atomically via a temp file + rename.
+// It also creates the per-session workspace directory if it does not exist yet.
 func (s *Store) Save(sess *Session) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("sessionstore: creating directory: %w", err)
 	}
+	// Create the per-session workspace directory (silently ignore errors — the
+	// workspace is best-effort and must not block a session save).
+	_ = os.MkdirAll(filepath.Join(s.dir, sess.ID), 0o700)
 	sess.UpdatedAt = time.Now()
 	data, err := json.MarshalIndent(sess, "", "  ")
 	if err != nil {
@@ -154,12 +166,15 @@ func (s *Store) List() ([]Session, error) {
 	return sessions, nil
 }
 
-// Delete removes the session with the given ID from disk.
+// Delete removes the session with the given ID from disk, including its
+// workspace directory if present.
 func (s *Store) Delete(id string) error {
 	path := filepath.Join(s.dir, id+".json")
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("sessionstore: deleting %s: %w", id, err)
 	}
+	// Best-effort: remove the workspace directory. Ignore errors (it may not exist).
+	_ = os.RemoveAll(filepath.Join(s.dir, id))
 	return nil
 }
 

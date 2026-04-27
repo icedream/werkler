@@ -1380,6 +1380,9 @@ func (m *Model) newConversation() []ai.Message {
 	if m.sessionCWD != "" {
 		msgs[0].Content = chat.EnrichSystemPromptCWD(msgs[0].Content, m.sessionCWD)
 	}
+	if wsDir := m.workspaceDir(); wsDir != "" {
+		msgs[0].Content = chat.EnrichSystemPromptWorkspace(msgs[0].Content, wsDir)
+	}
 	return msgs
 }
 
@@ -5883,6 +5886,10 @@ func (m *Model) applySession(sess *sessionstore.Session) {
 	m.sessionCreatedAt = sess.CreatedAt
 	m.sessionCWD = sess.CWD
 	m.messages = sess.Messages
+	// Grant AI access to the workspace dir for this restored session.
+	if m.session != nil && m.sessionStore != nil {
+		m.session.SetWorkspaceDir(m.workspaceDir())
+	}
 
 	// Restore mode from session. If the saved mode can no longer be resolved
 	// (e.g. user deleted a custom mode), fall back to default silently.
@@ -5985,13 +5992,31 @@ func doSaveSession(store *sessionstore.Store, sess sessionstore.Session, seq int
 	}
 }
 
+// workspaceDir returns the per-session workspace directory path, or "" if the
+// session store is nil or the session hasn't been saved yet (no ID).
+func (m *Model) workspaceDir() string {
+	if m.sessionStore == nil || m.sessionID == "" {
+		return ""
+	}
+	return m.sessionStore.WorkspaceDir(m.sessionID)
+}
+
 // saveSession snapshots the current session, increments the save sequence,
 // and returns a tea.Cmd that writes it to disk asynchronously.
 // Must only be called when m.sessionStore != nil.
 func (m *Model) saveSession() tea.Cmd {
+	prevID := m.sessionID
 	snap := m.currentSessionSnapshot()
 	m.sessionID = snap.ID
 	m.sessionCreatedAt = snap.CreatedAt
+	// If this is the first save (ID just became known), grant AI access to the
+	// workspace directory and rebuild the system prompt to include its path.
+	if prevID == "" && m.sessionID != "" {
+		if m.session != nil {
+			m.session.SetWorkspaceDir(m.workspaceDir())
+		}
+		m.rebuildSystemPrompt()
+	}
 	m.saveSeq++
 	return doSaveSession(m.sessionStore, snap, m.saveSeq)
 }

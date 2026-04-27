@@ -388,6 +388,15 @@ func (s *Session) IsToolEnabled(name string) bool {
 // with the resolved working directory when auto_approve_cwd_read is true.
 func (s *Session) SetCWDReadPrefix(prefix string) { s.cwdReadPrefix = prefix }
 
+// SetWorkspaceDir auto-approves reads and writes under the given directory
+// for this session. Intended to be called with the per-session workspace
+// directory so the AI can freely read and write plan files there.
+// Execute access is intentionally NOT granted.
+func (s *Session) SetWorkspaceDir(dir string) {
+	s.ApprovePathReadForSession(dir)
+	s.ApprovePathWriteForSession(dir)
+}
+
 // HasPendingOAuth reports whether there are OAuth MCP servers not yet connected.
 // Returns false when the underlying ToolManager does not support OAuth.
 func (s *Session) HasPendingOAuth() bool {
