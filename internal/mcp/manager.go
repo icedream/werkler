@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -87,10 +88,18 @@ type Manager struct {
 	oauthDisplay func(serverName, authURL string) // TUI callback: show auth URL to user; nil in non-interactive contexts
 }
 
+// werklerVersion returns the module version from build info, falling back to "dev".
+func werklerVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
+
 // NewManager creates an uninitialised Manager.
 func NewManager() *Manager {
 	return &Manager{
-		mcpImpl:    &mcp.Implementation{Name: "werkler", Version: "v0.1.0"},
+		mcpImpl:    &mcp.Implementation{Name: "werkler", Version: werklerVersion()},
 		toolMap:    make(map[string]toolEntry),
 		connecting: make(map[string]bool),
 	}
