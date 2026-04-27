@@ -3728,18 +3728,25 @@ func doAutoConnectServers(ctx context.Context, mgr *mcppkg.Manager, names []stri
 // detectMentionedServers scans text for occurrences of configured-but-not-yet-connected
 // MCP server names and returns those that are mentioned. Names are checked
 // longest-first to prevent a shorter name from matching as a substring of a longer one.
+//
+// Two passes are performed:
+//   - Pass 1: exact full-name substring match (e.g. "cloudflare-dns-analytics")
+//   - Pass 2: prefix word match for hyphenated names (e.g. "Cloudflare" matches all
+//     "cloudflare-*" servers that weren't already matched in pass 1)
 func (m *Model) detectMentionedServers(text string) []string {
 	if m.mcpManager == nil {
 		return nil
 	}
 	configured := m.mcpManager.ConfiguredServers()
-	// Sort longest name first to avoid "cloudflare" matching inside "cloudflare-dns-analytics".
+	// Sort longest name first so exact matches consume the text before prefix passes see it.
 	slices.SortFunc(configured, func(a, b config.MCPServerConfig) int {
 		return len(b.Name) - len(a.Name)
 	})
 	lower := strings.ToLower(text)
 	var found []string
 	seen := make(map[string]bool)
+
+	// Pass 1: exact full-name substring match.
 	for _, srv := range configured {
 		if seen[srv.Name] {
 			continue
@@ -3748,11 +3755,60 @@ func (m *Model) detectMentionedServers(text string) []string {
 		if strings.Contains(lower, srvLower) {
 			found = append(found, srv.Name)
 			seen[srv.Name] = true
-			// Blank out this name in the search string so no shorter prefix matches it.
+			// Blank out matched span so pass 2 doesn't also match the prefix.
 			lower = strings.ReplaceAll(lower, srvLower, strings.Repeat(" ", len(srvLower)))
 		}
 	}
+
+	// Pass 2: prefix word match. Group multi-component names by their first
+	// hyphen-separated component ("cloudflare" for "cloudflare-dns-analytics").
+	// If that prefix appears as a standalone word in the text (not followed by a
+	// hyphen, which would mean a more-specific name was already matched), add all
+	// servers in the group.
+	groups := make(map[string][]string) // lowercase prefix → server names
+	for _, srv := range configured {
+		if seen[srv.Name] {
+			continue
+		}
+		if idx := strings.IndexByte(srv.Name, '-'); idx > 0 {
+			prefix := strings.ToLower(srv.Name[:idx])
+			groups[prefix] = append(groups[prefix], srv.Name)
+		}
+	}
+	for prefix, names := range groups {
+		if len(prefix) < 3 { // ignore single-letter or trivially short prefixes
+			continue
+		}
+		idx := strings.Index(lower, prefix)
+		if idx < 0 {
+			continue
+		}
+		afterIdx := idx + len(prefix)
+		// Word boundary: char before must not be alphanumeric/hyphen; char after
+		// must not be alphanumeric or hyphen (hyphen would mean a longer name).
+		beforeOK := idx == 0 || !isNameChar(lower[idx-1])
+		afterOK := afterIdx >= len(lower) || (!isAlphaNumericByte(lower[afterIdx]) && lower[afterIdx] != '-')
+		if beforeOK && afterOK {
+			for _, name := range names {
+				if !seen[name] {
+					found = append(found, name)
+					seen[name] = true
+				}
+			}
+		}
+	}
 	return found
+}
+
+// isNameChar reports whether b is a character that can appear inside an MCP server name
+// (alphanumeric or hyphen).
+func isNameChar(b byte) bool {
+	return isAlphaNumericByte(b) || b == '-'
+}
+
+// isAlphaNumericByte reports whether b is an ASCII letter or digit.
+func isAlphaNumericByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
 func doGetModelInfo(ctx context.Context, getter ai.ModelInfoGetter) tea.Cmd {
