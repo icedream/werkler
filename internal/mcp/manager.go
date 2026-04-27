@@ -323,17 +323,25 @@ func (m *Manager) connectOAuthServer(ctx context.Context, srv config.MCPServerCo
 	if cbPort == 0 {
 		cbPort = 34217
 	}
-	cbSrv, err := oauthpkg.StartCallbackServer(cbPort)
-	if err != nil {
-		return fmt.Errorf("starting OAuth callback server for %q: %w", srv.Name, err)
-	}
+	// Pre-compute the redirect URI from the port without starting the server yet.
+	// The callback server is created on-demand inside localNotifier, so it is
+	// alive whenever Authorize is actually called — including after the initial
+	// connect when a token expires mid-session and re-auth is triggered by a
+	// subsequent tool call returning 401.
+	redirectURI := fmt.Sprintf("http://localhost:%d/callback", cbPort)
 
 	// localNotifier is called from inside handler.Authorize only when the
-	// cached token is absent or expired.
+	// cached token is absent or expired. Starting the callback server here
+	// (rather than once up-front) ensures it is always running when needed.
 	localNotifier := func(ctx context.Context, serverName, authURL string) (string, string, error) {
 		if displayFn == nil {
 			return "", "", fmt.Errorf("server %q requires OAuth browser authentication but no interactive display is available", serverName)
 		}
+		cbSrv, err := oauthpkg.StartCallbackServer(cbPort)
+		if err != nil {
+			return "", "", fmt.Errorf("starting OAuth callback server for %q: %w", serverName, err)
+		}
+		defer cbSrv.Close()
 		displayFn(serverName, authURL)
 		result, waitErr := cbSrv.Wait(ctx)
 		if waitErr != nil {
@@ -342,7 +350,7 @@ func (m *Manager) connectOAuthServer(ctx context.Context, srv config.MCPServerCo
 		return result.Code, result.State, nil
 	}
 
-	handler := oauthpkg.NewHandler(srv.Name, cbSrv.RedirectURI(), localNotifier, srv.OAuthClientID, srv.OAuthClientSecret)
+	handler := oauthpkg.NewHandler(srv.Name, redirectURI, localNotifier, srv.OAuthClientID, srv.OAuthClientSecret)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint:     srv.URL,
 		HTTPClient:   httpClientWithHeaders(srv.Headers),
@@ -350,7 +358,6 @@ func (m *Manager) connectOAuthServer(ctx context.Context, srv config.MCPServerCo
 	}
 	client := mcp.NewClient(m.mcpImpl, nil)
 	session, connErr := client.Connect(ctx, transport, nil)
-	cbSrv.Close()
 	if connErr != nil {
 		return fmt.Errorf("connecting to OAuth MCP server %q: %w", srv.Name, connErr)
 	}
