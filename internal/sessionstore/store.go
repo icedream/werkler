@@ -33,6 +33,9 @@ type Session struct {
 	// ModeName is the name of the active mode preset when this session was saved.
 	// Empty means the default mode.
 	ModeName string `json:"mode_name,omitempty"`
+	// AgentName is the name of the active custom agent when this session was saved.
+	// Empty means no agent was active.
+	AgentName string `json:"agent_name,omitempty"`
 }
 
 // Store reads and writes sessions to a directory on disk.

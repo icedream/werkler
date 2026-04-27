@@ -21,10 +21,12 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/icedream/werkler/internal/agents"
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/config"
@@ -140,10 +142,16 @@ type Manager struct {
 	subagents     []subagentDef
 	mcpMgr        mcpConnector
 	skills        []skills.Skill
+	agents        []agents.Agent
 	todoStore     *todostore.Store
 	memoryStore   *memorystore.MemoryStore
 	taskTitle     func(string) // optional; called when the AI sets a task title via task_start
+	agentActivate func(string) // optional; called when use_agent requests activation
 	activeCallID  atomic.Value // stores string; set/cleared by doCallTool goroutine
+	// allowedTools is the active agent's tool allowlist. nil = unrestricted;
+	// non-nil = only these tools (plus infra tools) are visible and callable.
+	allowedTools []string
+	filterMu     sync.RWMutex
 }
 
 type builtin struct {
@@ -179,6 +187,15 @@ func (m *Manager) SetOutputNotify(fn OutputNotification) {
 // Rebuilds the built-in tool list. Must be called at setup time only (not concurrency-safe).
 func (m *Manager) SetSkills(s []skills.Skill) {
 	m.skills = s
+	m.builtins = m.makeBuiltins()
+}
+
+// SetAgents provides the list of custom agents available via the use_agent
+// built-in. When non-empty, registers the use_agent tool and adds an agent
+// listing to the system prompt section. Must be called at setup time only
+// (not concurrency-safe).
+func (m *Manager) SetAgents(a []agents.Agent) {
+	m.agents = a
 	m.builtins = m.makeBuiltins()
 }
 
@@ -230,6 +247,10 @@ func (m *Manager) SetPlanConfirmer(fn PlanConfirmer) { m.planConfirmer = fn }
 // task_start to report what it is currently working on. Pass nil to disable.
 func (m *Manager) SetTaskTitleNotify(fn func(string)) { m.taskTitle = fn }
 
+// SetAgentActivateNotify sets an optional callback that is invoked when the AI
+// calls use_agent. The TUI uses this to trigger session-side agent activation.
+func (m *Manager) SetAgentActivateNotify(fn func(string)) { m.agentActivate = fn }
+
 // SetReviewer provides an optional secondary AI model used by subagents
 // (rubber_duck_review and doc_review). Registers both subagents when c is
 // non-nil; clears them when nil. Must be called before the manager is in
@@ -263,6 +284,66 @@ func (m *Manager) SetMCPManager(mgr mcpConnector) {
 	m.builtins = m.makeBuiltins()
 }
 
+// infraTools is the set of tool names that are always available regardless of
+// any active agent tool allowlist. These are control-flow and infrastructure
+// tools that must never be filtered out.
+var infraTools = map[string]bool{
+	"use_agent":      true,
+	"use_skill":      true,
+	"ask_user":       true,
+	"task_start":     true,
+	"task_complete":  true,
+	"connect_server": true,
+}
+
+// IsInfraToolName reports whether name is one of the infrastructure tools that
+// are always available regardless of any active agent tool allowlist.
+func IsInfraToolName(name string) bool {
+	return infraTools[name]
+}
+
+// SetToolFilter restricts the tools visible to the AI and callable in this
+// session to the provided allowlist. nil removes any active restriction
+// (all tools become available). An empty (non-nil) slice means no tools other
+// than the permanent infra tools. Infrastructure tools are always available
+// regardless of the filter.
+//
+// Tool names support a "server.*" wildcard to allow all tools from an MCP server.
+//
+// Safe to call concurrently with Tools() and CallTool().
+func (m *Manager) SetToolFilter(names []string) {
+	m.filterMu.Lock()
+	m.allowedTools = names
+	m.filterMu.Unlock()
+}
+
+// isAllowed reports whether the named tool should be visible / callable under
+// the current filter. Infrastructure tools always return true.
+func (m *Manager) isAllowed(name string) bool {
+	if infraTools[name] {
+		return true
+	}
+	m.filterMu.RLock()
+	allowed := m.allowedTools
+	m.filterMu.RUnlock()
+	if allowed == nil {
+		return true
+	}
+	for _, a := range allowed {
+		if a == name {
+			return true
+		}
+		// Wildcard: "server.*" matches any tool whose name starts with "server."
+		if strings.HasSuffix(a, ".*") {
+			prefix := strings.TrimSuffix(a, "*")
+			if strings.HasPrefix(name, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // HasPendingOAuth forwards to the wrapped manager if it supports OAuth.
 func (m *Manager) HasPendingOAuth() bool {
 	if o, ok := m.wrapped.(oauthManager); ok {
@@ -287,16 +368,23 @@ func (m *Manager) ConnectPendingOAuth(ctx context.Context, display func(serverNa
 	return nil
 }
 
-// Tools returns the union of MCP tools and built-in tool definitions.
+// Tools returns the union of MCP tools and built-in tool definitions,
+// filtered by the active agent tool allowlist (if any).
 func (m *Manager) Tools(ctx context.Context) ([]ai.ToolDefinition, error) {
 	mcpTools, err := m.wrapped.Tools(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defs := make([]ai.ToolDefinition, 0, len(mcpTools)+len(m.builtins))
-	defs = append(defs, mcpTools...)
+	for _, t := range mcpTools {
+		if m.isAllowed(t.Name) {
+			defs = append(defs, t)
+		}
+	}
 	for _, b := range m.builtins {
-		defs = append(defs, b.def)
+		if m.isAllowed(b.def.Name) {
+			defs = append(defs, b.def)
+		}
 	}
 	return defs, nil
 }
@@ -312,6 +400,9 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]any
 // CallToolWithParts is like CallTool but also returns any image parts the tool
 // produced (e.g. read_image). Parts is nil for all tools that don't produce images.
 func (m *Manager) CallToolWithParts(ctx context.Context, name string, args map[string]any) (string, []ai.ImagePart, error) {
+	if !m.isAllowed(name) {
+		return fmt.Sprintf("tool %q is not available for the active agent", name), nil, nil
+	}
 	for _, b := range m.builtins {
 		if b.def.Name == name {
 			if b.handleWithParts != nil {
@@ -833,6 +924,31 @@ Set recommended_choice to highlight a suggested option.`,
 				},
 			},
 			handle: m.handleUseSkill,
+		})
+	}
+
+	if len(m.agents) > 0 {
+		names := make([]any, len(m.agents))
+		for i, a := range m.agents {
+			names[i] = a.Name
+		}
+		builtins = append(builtins, builtin{
+			def: ai.ToolDefinition{
+				Name:        "use_agent",
+				Description: "Activate a named agent persona for the current session.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"name": map[string]any{
+							"type":        "string",
+							"enum":        names,
+							"description": "Agent name to activate",
+						},
+					},
+					"required": []string{"name"},
+				},
+			},
+			handle: m.handleUseAgent,
 		})
 	}
 
@@ -1905,6 +2021,19 @@ func (m *Manager) handleUseSkill(_ context.Context, args map[string]any) (string
 		}
 	}
 	return "skill not found: " + name, nil
+}
+
+func (m *Manager) handleUseAgent(_ context.Context, args map[string]any) (string, error) {
+	name := stringArg(args, "name")
+	for _, a := range m.agents {
+		if a.Name == name {
+			if m.agentActivate != nil {
+				m.agentActivate(name)
+			}
+			return fmt.Sprintf("Agent %q activated.", name), nil
+		}
+	}
+	return fmt.Sprintf("agent not found: %q", name), nil
 }
 
 func (m *Manager) handleTodoAdd(_ context.Context, args map[string]any) (string, error) {

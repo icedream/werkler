@@ -16,6 +16,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,6 +24,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 
+	"github.com/icedream/werkler/internal/agents"
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/config"
@@ -78,6 +80,14 @@ const (
 	statePickingRegistry      // MCP registry browser is open
 	statePickingSkills        // skill enable/disable picker is open
 	statePickingMode          // mode preset picker is open
+	// Agent wizard states.
+	stateAgentWizardMode     // choose AI-assisted or manual
+	stateAgentWizardDescribe // describe the agent (AI-assisted path)
+	stateAgentWizardGenerate // spinner while AI generates the profile
+	stateAgentWizardReview   // review generated profile
+	stateAgentWizardManual   // manual form (4 fields)
+	stateAgentWizardTools    // tool restriction picker
+	stateAgentWizardDone     // confirmation after save
 )
 
 // inputPlaceholder returns the appropriate placeholder text for the input
@@ -96,7 +106,9 @@ func inputPlaceholder(state tuiState) string {
 		return "Waiting for authorization in browser…"
 	case stateCompacting:
 		return "Compacting context… (queue a follow-up, press Enter)"
-	case statePickingModel, statePickingSession, statePickingTools, statePickingRegistry, statePickingSkills, statePickingMode:
+	case statePickingModel, statePickingSession, statePickingTools, statePickingRegistry, statePickingSkills, statePickingMode,
+		stateAgentWizardMode, stateAgentWizardDescribe, stateAgentWizardGenerate, stateAgentWizardReview,
+		stateAgentWizardManual, stateAgentWizardTools, stateAgentWizardDone:
 		return ""
 	case stateIdle:
 		return "Type a message, press Enter to send…"
@@ -338,6 +350,15 @@ type taskCompleteMsg struct {
 // taskTitleMsg is sent when the AI calls task_start to name its current work.
 type taskTitleMsg struct{ title string }
 
+// agentActivateMsg is sent when the AI calls use_agent.
+type agentActivateMsg struct{ name string }
+
+// agentGeneratedMsg carries the result of an AI-assisted agent profile generation.
+type agentGeneratedMsg struct {
+	agent agents.Agent
+	err   error
+}
+
 // modelItem implements list.Item for a model picker entry.
 type modelItem struct{ ai.ModelItem }
 
@@ -485,7 +506,7 @@ func (m modeItem) Title() string {
 }
 func (m modeItem) Description() string {
 	if m.mode.IsDefault {
-		return "Standard mode — no modifications to system prompt or session settings"
+		return "Standard mode -- no modifications to system prompt or session settings"
 	}
 	if m.mode.SystemPromptExtra != "" {
 		// Show first line of the extra as description.
@@ -497,6 +518,31 @@ func (m modeItem) Description() string {
 				return line
 			}
 		}
+	}
+	return ""
+}
+
+// agentToolItem implements list.Item for the wizard tool restriction picker.
+type agentToolItem struct {
+	name     string
+	enabled  bool
+	alwaysOn bool // infra tool: always enabled, cannot be toggled
+}
+
+func (a agentToolItem) FilterValue() string { return a.name }
+func (a agentToolItem) Title() string {
+	check := "[ ]"
+	if a.enabled {
+		check = "[✓]"
+	}
+	if a.alwaysOn {
+		return check + " " + a.name + "  (always on)"
+	}
+	return check + " " + a.name
+}
+func (a agentToolItem) Description() string {
+	if a.alwaysOn {
+		return "Infrastructure tool -- always available regardless of agent tool restrictions"
 	}
 	return ""
 }
@@ -597,6 +643,10 @@ type SessionOptions struct {
 	// MemoryStore, if non-nil, enables cross-session project memory tools and
 	// injects the current memory into the system prompt at request time.
 	MemoryStore *memorystore.MemoryStore
+	// Agents is the list of loaded custom agents.
+	Agents []agents.Agent
+	// InitialAgent, if non-nil, is activated at session start.
+	InitialAgent *agents.Agent
 }
 
 // --- Slash commands ---
@@ -845,6 +895,13 @@ func init() {
 			},
 		},
 		{
+			name:        "agent",
+			description: "Create, activate, or deactivate a custom agent  (usage: /agent new | /agent <name> | /agent off)",
+			action: func(m *Model) []tea.Cmd {
+				return m.initAgentWizard()
+			},
+		},
+		{
 			name:          "help",
 			description:   "Show available keyboard shortcuts and commands",
 			safeWhileBusy: true,
@@ -1041,6 +1098,24 @@ type Model struct {
 	skillPicker    list.Model      // skill enable/disable picker
 	toolMgr        *tools.Manager  // needed for mid-session skill updates
 
+	// agents holds loaded custom agents.
+	agents      []agents.Agent
+	activeAgent *agents.Agent // nil if no agent is active
+
+	// Agent wizard state.
+	agentWizardDescribeTA textarea.Model     // textarea for AI-assisted description
+	agentWizardManualTAs  [4]textinput.Model // name, description, when + instructions textarea
+	agentWizardManualTA   textarea.Model     // instructions textarea (4th field)
+	agentWizardManualIdx  int                // which field is focused (0-3)
+	agentWizardGenerated  agents.Agent       // agent built from generation or form
+	agentWizardGenErr     string             // non-empty if generation failed
+	agentWizardReviewText string             // rendered TOML for review viewport
+	agentWizardToolPicker list.Model         // tool picker for wizard
+	agentWizardAllTools   []string           // all tool names (populated before wizard tools step)
+	agentWizardExcluded   map[string]bool    // tools the user deselected
+	agentWizardOverwrite  bool               // pending overwrite confirmation
+	agentWizardSavedPath  string             // path of last saved agent file
+
 	// MCP background connection state.
 	// mcpManager is the manager used for ConnectOne calls during startup.
 	// mcpPending is decremented by each mcpServerStatusMsg; when it hits 0,
@@ -1175,6 +1250,14 @@ func initialModel(
 	modePickerM.SetFilteringEnabled(true)
 	modePickerM.DisableQuitKeybindings()
 
+	// Agent wizard tool picker.
+	agentToolDel := list.NewDefaultDelegate()
+	agentToolPickerM := list.New(nil, agentToolDel, 0, 0)
+	agentToolPickerM.Title = "Restrict agent tools  [space] toggle  [enter] confirm"
+	agentToolPickerM.SetShowStatusBar(false)
+	agentToolPickerM.SetFilteringEnabled(true)
+	agentToolPickerM.DisableQuitKeybindings()
+
 	// Use modelManager when the client also implements ModelManager.
 	var mm ai.ModelManager
 	if m, ok := client.(ai.ModelManager); ok {
@@ -1184,36 +1267,38 @@ func initialModel(
 	cwd, _ := os.Getwd()
 
 	return Model{
-		ctx:                ctx,
-		client:             client,
-		session:            session,
-		tools:              tools,
-		send:               send,
-		modelManager:       mm,
-		messages:           chat.NewConversation(),
-		state:              stateIdle,
-		streamingItemIdx:   -1,
-		reasoningItemIdx:   -1,
-		oauthInfoIdx:       -1,
-		askUserSelectedIdx: -1,
-		askUserItemIdx:     -1,
-		historyIdx:         -1,
-		toolCallIdx:        make(map[string]int),
-		viewport:           viewport.New(0, 0),
-		modelPicker:        picker,
-		sessionPicker:      sessPicker,
-		toolPicker:         toolPickerM,
-		skillPicker:        skillPickerM,
-		modePicker:         modePickerM,
-		disabledSkills:     make(map[string]bool),
-		input:              ti,
-		spinner:            sp,
-		modelName:          modelName,
-		serverNames:        serverNames,
-		glamourStyle:       glamourStyle,
-		mouseEnabled:       true,
-		sessionCWD:         cwd,
-		showReasoning:      true,
+		ctx:                   ctx,
+		client:                client,
+		session:               session,
+		tools:                 tools,
+		send:                  send,
+		modelManager:          mm,
+		messages:              chat.NewConversation(),
+		state:                 stateIdle,
+		streamingItemIdx:      -1,
+		reasoningItemIdx:      -1,
+		oauthInfoIdx:          -1,
+		askUserSelectedIdx:    -1,
+		askUserItemIdx:        -1,
+		historyIdx:            -1,
+		toolCallIdx:           make(map[string]int),
+		viewport:              viewport.New(0, 0),
+		modelPicker:           picker,
+		sessionPicker:         sessPicker,
+		toolPicker:            toolPickerM,
+		skillPicker:           skillPickerM,
+		modePicker:            modePickerM,
+		agentWizardToolPicker: agentToolPickerM,
+		agentWizardExcluded:   make(map[string]bool),
+		disabledSkills:        make(map[string]bool),
+		input:                 ti,
+		spinner:               sp,
+		modelName:             modelName,
+		serverNames:           serverNames,
+		glamourStyle:          glamourStyle,
+		mouseEnabled:          true,
+		sessionCWD:            cwd,
+		showReasoning:         true,
 	}
 }
 
@@ -1236,15 +1321,256 @@ func (m *Model) newConversation() []ai.Message {
 		}
 		extras = append(extras, strings.TrimRight(hint, "\n"))
 	}
+	if len(m.agents) > 0 {
+		hint := "## Available agents\nUse use_agent(name) to activate an agent persona when the context fits.\n"
+		limit := len(m.agents)
+		if limit > 20 {
+			limit = 20
+		}
+		for _, a := range m.agents[:limit] {
+			desc := a.Description
+			if len(desc) > 80 {
+				desc = desc[:77] + "..."
+			}
+			when := a.When
+			if len(when) > 80 {
+				when = when[:77] + "..."
+			}
+			hint += "- " + a.Name + ": " + desc + ". Use when: " + when + "\n"
+		}
+		if len(m.agents) > 20 {
+			hint += fmt.Sprintf("(... and %d more agents)\n", len(m.agents)-20)
+		}
+		extras = append(extras, strings.TrimRight(hint, "\n"))
+	}
 	if m.activeMode.SystemPromptExtra != "" {
 		extras = append(extras, m.activeMode.SystemPromptExtra)
+	}
+	if m.activeAgent != nil {
+		extras = append(extras, m.activeAgent.Instructions)
 	}
 	msgs := chat.NewConversation(extras...)
 	msgs[0].Content = chat.EnrichSystemPrompt(msgs[0].Content, m.modelInfo)
 	return msgs
 }
 
-// activeSkills returns the subset of loaded skills that are currently enabled.
+// activateAgent sets the given agent as active, applies its tool filter,
+// rebuilds the system prompt, and appends an info message.
+// Must be called only when the model is not busy.
+func (m *Model) activateAgent(a agents.Agent) {
+	prev := m.activeAgent
+	m.activeAgent = &a
+	if m.toolMgr != nil {
+		m.toolMgr.SetToolFilter(a.ToolList())
+	}
+	m.rebuildSystemPrompt()
+	label := "[Agent activated: " + a.Name + "]"
+	if prev != nil && prev.Name != a.Name {
+		label = "[Agent switched: " + prev.Name + " -> " + a.Name + "]"
+	}
+	// Warn when activating expands tool access relative to a previously active agent.
+	if prev != nil && prev.Tools != nil && a.Tools == nil {
+		m.items = append(m.items, displayItem{
+			kind:    itemInfo,
+			content: "Note: activating agent \"" + a.Name + "\" expands tool access (previously restricted).",
+		})
+	}
+	m.items = append(m.items, displayItem{kind: itemInfo, content: label})
+}
+
+// deactivateAgent removes the active agent, clears the tool filter, and
+// rebuilds the system prompt.
+// Must be called only when the model is not busy.
+func (m *Model) deactivateAgent() {
+	if m.activeAgent == nil {
+		return
+	}
+	name := m.activeAgent.Name
+	m.activeAgent = nil
+	if m.toolMgr != nil {
+		m.toolMgr.SetToolFilter(nil)
+	}
+	m.rebuildSystemPrompt()
+	m.items = append(m.items, displayItem{kind: itemInfo, content: "[Agent deactivated: " + name + "]"})
+}
+
+// initAgentWizard initialises and opens the agent creation wizard.
+// It opens the mode-selection screen (AI-assisted vs manual).
+func (m *Model) initAgentWizard() []tea.Cmd {
+	// Description textarea.
+	ta := textarea.New()
+	ta.Placeholder = "Describe the agent's expertise and when it should be used..."
+	ta.Focus()
+	ta.SetWidth(m.width - 4)
+	ta.SetHeight(8)
+	m.agentWizardDescribeTA = ta
+
+	// Manual form: 3 single-line inputs.
+	for i := 0; i < 3; i++ {
+		ti := textinput.New()
+		switch i {
+		case 0:
+			ti.Placeholder = "name (e.g. go-reviewer)"
+		case 1:
+			ti.Placeholder = "description (one sentence)"
+		case 2:
+			ti.Placeholder = "when to use this agent (one sentence)"
+		}
+		m.agentWizardManualTAs[i] = ti
+	}
+	// Instructions textarea.
+	instrTA := textarea.New()
+	instrTA.Placeholder = "Instructions: how should the agent behave? Include guidelines, constraints, default actions..."
+	instrTA.SetWidth(m.width - 4)
+	instrTA.SetHeight(8)
+	m.agentWizardManualTA = instrTA
+	m.agentWizardManualIdx = 0
+
+	m.agentWizardGenErr = ""
+	m.agentWizardGenerated = agents.Agent{}
+	m.agentWizardExcluded = make(map[string]bool)
+	m.agentWizardOverwrite = false
+	m.agentWizardSavedPath = ""
+
+	m.state = stateAgentWizardMode
+	return nil
+}
+
+// agentWizardToolListItems builds list items for the wizard tool picker.
+// Infrastructure tools appear checked but visually marked as always-on.
+func (m *Model) agentWizardToolListItems() []list.Item {
+	items := make([]list.Item, 0, len(m.agentWizardAllTools))
+	for _, name := range m.agentWizardAllTools {
+		alwaysOn := tools.IsInfraToolName(name)
+		enabled := alwaysOn || !m.agentWizardExcluded[name]
+		items = append(items, agentToolItem{name: name, enabled: enabled, alwaysOn: alwaysOn})
+	}
+	return items
+}
+
+// agentWizardBuildAgent builds an Agent from wizard state ready for saving.
+// Tools is nil when all are enabled; non-nil slice when any are excluded.
+func (m *Model) agentWizardBuildFinalAgent() agents.Agent {
+	a := m.agentWizardGenerated
+	if len(m.agentWizardExcluded) == 0 {
+		a.Tools = nil
+		return a
+	}
+	// Build allowlist from non-excluded, non-infra tools.
+	var allowed []string
+	for _, name := range m.agentWizardAllTools {
+		if tools.IsInfraToolName(name) {
+			continue
+		}
+		if !m.agentWizardExcluded[name] {
+			allowed = append(allowed, name)
+		}
+	}
+	a.Tools = &allowed
+	return a
+}
+
+// prefillManualFormFromGenerated fills the manual form fields from a previously
+// generated agent profile (used when the user chooses to edit a generated profile).
+func (m *Model) prefillManualFormFromGenerated() {
+	m.agentWizardManualTAs[0].SetValue(m.agentWizardGenerated.Name)
+	m.agentWizardManualTAs[1].SetValue(m.agentWizardGenerated.Description)
+	m.agentWizardManualTAs[2].SetValue(m.agentWizardGenerated.When)
+	m.agentWizardManualTA.SetValue(m.agentWizardGenerated.Instructions)
+	m.agentWizardManualIdx = 0
+	m.agentWizardManualTAs[0].Focus()
+}
+
+// submitManualForm validates the manual form and moves to the tool picker.
+func (m *Model) submitManualForm() []tea.Cmd {
+	name := strings.TrimSpace(m.agentWizardManualTAs[0].Value())
+	desc := strings.TrimSpace(m.agentWizardManualTAs[1].Value())
+	when := strings.TrimSpace(m.agentWizardManualTAs[2].Value())
+	instr := strings.TrimSpace(m.agentWizardManualTA.Value())
+
+	a := agents.Agent{
+		Name:         name,
+		Description:  desc,
+		When:         when,
+		Instructions: instr,
+	}
+	if err := agents.Validate(a); err != nil {
+		m.agentWizardGenErr = "Validation error: " + err.Error()
+		m.agentWizardGenerated = a
+		m.state = stateAgentWizardReview
+		m.agentWizardReviewText = formatAgentPreview(a)
+		return nil
+	}
+	m.agentWizardGenerated = a
+	m.agentWizardGenErr = ""
+	return m.startAgentWizardToolPicker()
+}
+
+// startAgentWizardToolPicker loads tool names and transitions to the tools state.
+func (m *Model) startAgentWizardToolPicker() []tea.Cmd {
+	// Gather all tool names from the current session (unfiltered).
+	m.agentWizardAllTools = nil
+	if m.session != nil {
+		ctx := m.ctx
+		allDefs, _ := m.session.AllTools(ctx)
+		for _, d := range allDefs {
+			m.agentWizardAllTools = append(m.agentWizardAllTools, d.Name)
+		}
+	}
+	items := m.agentWizardToolListItems()
+	m.agentWizardToolPicker.SetItems(items)
+	m.agentWizardToolPicker.SetSize(m.width, m.height-fixedLines)
+	m.state = stateAgentWizardTools
+	return nil
+}
+
+// saveAgentFromWizard builds the final agent and saves it to disk.
+func (m *Model) saveAgentFromWizard() []tea.Cmd {
+	a := m.agentWizardBuildFinalAgent()
+	dir := agents.DefaultDir()
+	// Check for existing file.
+	destPath := dir + "/" + a.Name + ".toml"
+	if _, err := os.Stat(destPath); err == nil && !m.agentWizardOverwrite {
+		m.agentWizardOverwrite = true
+		m.agentWizardGenErr = fmt.Sprintf("Agent file %q already exists. Press [enter] again to overwrite, or [esc] to cancel.", destPath)
+		return nil
+	}
+	m.agentWizardOverwrite = false
+	if err := agents.Save(dir, a); err != nil {
+		m.agentWizardGenErr = "Save failed: " + err.Error()
+		return nil
+	}
+	m.agentWizardSavedPath = destPath
+	// Reload agents in the session.
+	if newAgents, loadErr := agents.LoadDir(dir, os.Stderr); loadErr == nil {
+		m.agents = newAgents
+		if m.toolMgr != nil {
+			m.toolMgr.SetAgents(newAgents)
+		}
+	}
+	m.state = stateAgentWizardDone
+	return nil
+}
+
+// formatAgentPreview renders an Agent as a human-readable TOML-like string
+// for the review screen.
+func formatAgentPreview(a agents.Agent) string {
+	s := fmt.Sprintf("name        = %q\ndescription = %q\nwhen        = %q\n\ninstructions = \"\"\"\n%s\n\"\"\"", a.Name, a.Description, a.When, a.Instructions)
+	if a.Tools != nil {
+		tl := a.ToolList()
+		if len(tl) == 0 {
+			s += "\ntools = []  # no tools (conversation-only)"
+		} else {
+			s += "\ntools = ["
+			for _, t := range tl {
+				s += "\n  " + fmt.Sprintf("%q", t) + ","
+			}
+			s += "\n]"
+		}
+	}
+	return s
+}
+
 func (m *Model) activeSkills() []skills.Skill {
 	if len(m.disabledSkills) == 0 {
 		return m.skills
@@ -1402,6 +1728,17 @@ func (m Model) activeBorderColor() lipgloss.Color {
 // modeSeparator returns a horizontal rule string styled with the active mode color.
 func (m Model) modeSeparator(width int) string {
 	return lipgloss.NewStyle().Foreground(m.activeBorderColor()).Render(strings.Repeat("─", width))
+}
+
+// isAgentWizardState reports whether s is one of the agent-wizard sub-states,
+// meaning initAgentWizard has been called and the wizard textareas are initialised.
+func isAgentWizardState(s tuiState) bool {
+	switch s {
+	case stateAgentWizardMode, stateAgentWizardDescribe, stateAgentWizardGenerate,
+		stateAgentWizardReview, stateAgentWizardManual, stateAgentWizardTools, stateAgentWizardDone:
+		return true
+	}
+	return false
 }
 
 // isBusy reports whether the model is in an active AI processing state where
@@ -1723,6 +2060,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if arg != "" {
 							cmds = append(cmds, doLoadImage(arg))
 						}
+					case text == "/agent" || text == "/agent off":
+						// /agent off (or bare /agent) -- deactivate current agent.
+						m.input.Reset()
+						m.updateCompletion()
+						if m.activeAgent != nil {
+							m.deactivateAgent()
+							needRebuild = true
+						} else if text == "/agent" {
+							m.items = append(m.items, displayItem{kind: itemInfo, content: "No agent is currently active."})
+							needRebuild = true
+						}
+					case strings.HasPrefix(text, "/agent "):
+						// /agent <name> -- activate a named agent, or open wizard for "new".
+						arg := strings.TrimSpace(strings.TrimPrefix(text, "/agent "))
+						m.input.Reset()
+						m.updateCompletion()
+						switch arg {
+						case "new":
+							cmds = append(cmds, m.initAgentWizard()...)
+						case "off":
+							if m.activeAgent != nil {
+								m.deactivateAgent()
+								needRebuild = true
+							}
+						default:
+							found := false
+							for _, a := range m.agents {
+								if a.Name == arg {
+									m.activateAgent(a)
+									needRebuild = true
+									found = true
+									break
+								}
+							}
+							if !found {
+								m.items = append(m.items, displayItem{
+									kind:    itemError,
+									content: fmt.Sprintf("Agent %q not found. Use /agent new to create one.", arg),
+								})
+								needRebuild = true
+							}
+						}
 					case text != "":
 						m.input.Reset()
 						m.appendInputHistory(text)
@@ -2022,6 +2401,175 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.modePicker, pickerCmd = m.modePicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
 			}
+
+		// --- Agent wizard states ---
+
+		case stateAgentWizardMode:
+			// Choose AI-assisted (a) or manual (m), or Esc to cancel.
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.setIdle()
+				m.updateCompletion()
+			case tea.KeyRunes:
+				switch msg.String() {
+				case "a", "A":
+					m.state = stateAgentWizardDescribe
+					cmds = append(cmds, m.agentWizardDescribeTA.Focus())
+				case "m", "M":
+					m.state = stateAgentWizardManual
+					m.agentWizardManualTAs[0].Focus()
+				}
+			}
+			needRebuild = true
+
+		case stateAgentWizardDescribe:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.setIdle()
+				m.updateCompletion()
+			case tea.KeyCtrlS:
+				// Ctrl+S submits the description.
+				desc := strings.TrimSpace(m.agentWizardDescribeTA.Value())
+				if desc != "" {
+					m.state = stateAgentWizardGenerate
+					c, ok := m.client.(ai.Completer)
+					if !ok {
+						m.agentWizardGenErr = "The active AI provider does not support non-streaming completions required for profile generation. Please use the manual form (restart wizard and press 'm')."
+						m.state = stateAgentWizardReview
+					} else {
+						cmds = append(cmds, doGenerateAgent(m.ctx, c, desc))
+					}
+				}
+			default:
+				var taCmd tea.Cmd
+				m.agentWizardDescribeTA, taCmd = m.agentWizardDescribeTA.Update(msg)
+				cmds = append(cmds, taCmd)
+			}
+			needRebuild = true
+
+		case stateAgentWizardGenerate:
+			// Spinner; awaiting agentGeneratedMsg.
+			var spCmd tea.Cmd
+			m.spinner, spCmd = m.spinner.Update(msg)
+			cmds = append(cmds, spCmd)
+			if msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlC {
+				m.setIdle()
+				m.updateCompletion()
+			}
+			needRebuild = true
+
+		case stateAgentWizardReview:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.setIdle()
+				m.updateCompletion()
+			case tea.KeyRunes:
+				switch msg.String() {
+				case "c", "C":
+					// Continue to tool picker.
+					cmds = append(cmds, m.startAgentWizardToolPicker()...)
+				case "e", "E":
+					// Edit in manual form pre-filled with generated values.
+					m.prefillManualFormFromGenerated()
+					m.state = stateAgentWizardManual
+				case "r", "R":
+					// Retry generation.
+					m.agentWizardGenErr = ""
+					desc := strings.TrimSpace(m.agentWizardDescribeTA.Value())
+					if desc != "" {
+						m.state = stateAgentWizardGenerate
+						c, ok := m.client.(ai.Completer)
+						if !ok {
+							m.agentWizardGenErr = "Provider does not support non-streaming completions."
+							m.state = stateAgentWizardReview
+						} else {
+							cmds = append(cmds, doGenerateAgent(m.ctx, c, desc))
+						}
+					} else {
+						m.state = stateAgentWizardDescribe
+					}
+				}
+			}
+			needRebuild = true
+
+		case stateAgentWizardManual:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.setIdle()
+				m.updateCompletion()
+			case tea.KeyTab, tea.KeyEnter:
+				switch {
+				case m.agentWizardManualIdx < 2:
+					// Advance through the single-line fields.
+					m.agentWizardManualTAs[m.agentWizardManualIdx].Blur()
+					m.agentWizardManualIdx++
+					m.agentWizardManualTAs[m.agentWizardManualIdx].Focus()
+				case m.agentWizardManualIdx == 2 && msg.Type == tea.KeyTab:
+					// Tab from 3rd single-line field -> instructions textarea.
+					m.agentWizardManualTAs[2].Blur()
+					m.agentWizardManualIdx = 3
+					cmds = append(cmds, m.agentWizardManualTA.Focus())
+				case m.agentWizardManualIdx == 3 && msg.Type == tea.KeyTab:
+					// Tab from instructions -> submit (validate & proceed).
+					cmds = append(cmds, m.submitManualForm()...)
+				}
+			case tea.KeyShiftTab:
+				if m.agentWizardManualIdx == 3 {
+					m.agentWizardManualTA.Blur()
+					m.agentWizardManualIdx = 2
+					m.agentWizardManualTAs[2].Focus()
+				} else if m.agentWizardManualIdx > 0 {
+					m.agentWizardManualTAs[m.agentWizardManualIdx].Blur()
+					m.agentWizardManualIdx--
+					m.agentWizardManualTAs[m.agentWizardManualIdx].Focus()
+				}
+			default:
+				if m.agentWizardManualIdx < 3 {
+					var tiCmd tea.Cmd
+					m.agentWizardManualTAs[m.agentWizardManualIdx], tiCmd = m.agentWizardManualTAs[m.agentWizardManualIdx].Update(msg)
+					cmds = append(cmds, tiCmd)
+				} else {
+					var taCmd tea.Cmd
+					m.agentWizardManualTA, taCmd = m.agentWizardManualTA.Update(msg)
+					cmds = append(cmds, taCmd)
+				}
+			}
+			needRebuild = true
+
+		case stateAgentWizardTools:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.setIdle()
+				m.updateCompletion()
+			case tea.KeyEnter:
+				// Confirm tool selection and save.
+				cmds = append(cmds, m.saveAgentFromWizard()...)
+			case tea.KeyRunes:
+				if msg.String() == " " {
+					if sel := m.agentWizardToolPicker.SelectedItem(); sel != nil {
+						item := sel.(agentToolItem)
+						if !item.alwaysOn {
+							item.enabled = !item.enabled
+							m.agentWizardExcluded[item.name] = !item.enabled
+							m.agentWizardToolPicker.SetItem(m.agentWizardToolPicker.Index(), item)
+						}
+					}
+					break
+				}
+				var pickerCmd tea.Cmd
+				m.agentWizardToolPicker, pickerCmd = m.agentWizardToolPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			default:
+				var pickerCmd tea.Cmd
+				m.agentWizardToolPicker, pickerCmd = m.agentWizardToolPicker.Update(msg)
+				cmds = append(cmds, pickerCmd)
+			}
+
+		case stateAgentWizardDone:
+			// Any key returns to idle.
+			m.setIdle()
+			m.updateCompletion()
+			needRebuild = true
 
 		case statePickingRegistry:
 			switch msg.Type {
@@ -2498,6 +3046,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentTaskTitle = msg.title
 		needRebuild = true
 
+	case agentActivateMsg:
+		// Ignore if busy -- the use_agent tool call is completing but we
+		// cannot safely mutate agent state mid-stream. The tool already
+		// returned "Agent X activated." to the model; the actual activation
+		// happens when the AI turn finishes via processQueueOrIdle.
+		if !m.isBusy() {
+			for _, a := range m.agents {
+				if a.Name == msg.name {
+					m.activateAgent(a)
+					needRebuild = true
+					break
+				}
+			}
+		}
+
+	case agentGeneratedMsg:
+		if msg.err != nil {
+			m.agentWizardGenErr = msg.err.Error()
+		} else {
+			m.agentWizardGenerated = msg.agent
+			m.agentWizardGenErr = ""
+			// Build review text as TOML-like preview.
+			m.agentWizardReviewText = formatAgentPreview(msg.agent)
+		}
+		m.state = stateAgentWizardReview
+		needRebuild = true
+
 	case compactDoneMsg:
 		if msg.err != nil {
 			// Compaction failed: keep history intact, show error, go idle.
@@ -2795,6 +3370,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toolPicker.SetSize(m.width, m.height-fixedLines)
 		m.skillPicker.SetSize(m.width, m.height-fixedLines)
 		m.modePicker.SetSize(m.width, m.height-fixedLines)
+		m.agentWizardToolPicker.SetSize(m.width, m.height-fixedLines)
+		// Only resize wizard textareas once they've been initialised by initAgentWizard.
+		if isAgentWizardState(m.state) {
+			m.agentWizardDescribeTA.SetWidth(m.width - 4)
+			m.agentWizardManualTA.SetWidth(m.width - 4)
+		}
+		for i := range m.agentWizardManualTAs {
+			m.agentWizardManualTAs[i].Width = m.width - 6
+		}
 		if m.state == stateViewingToolDetail {
 			m.toolDetailVP.Width = m.width
 			m.toolDetailVP.Height = m.height - fixedLines
@@ -3271,6 +3855,15 @@ func (m Model) View() string {
 	if m.state == statePickingRegistry {
 		return m.registryView()
 	}
+	if m.state == stateAgentWizardMode ||
+		m.state == stateAgentWizardDescribe ||
+		m.state == stateAgentWizardGenerate ||
+		m.state == stateAgentWizardReview ||
+		m.state == stateAgentWizardManual ||
+		m.state == stateAgentWizardTools ||
+		m.state == stateAgentWizardDone {
+		return m.agentWizardView()
+	}
 
 	sep := m.modeSeparator(m.width)
 	if m.session.AllowAll() {
@@ -3496,11 +4089,19 @@ func (m Model) statusLines() (line1, line2 string) {
 			modeStyle := lipgloss.NewStyle().Foreground(modeColor).Bold(true)
 			modeHint = "  " + modeStyle.Render("["+name+"]") + " " + statusStyle.Render("shift+tab")
 		}
+		agentHint := ""
+		if m.activeAgent != nil {
+			name := m.activeAgent.Name
+			if len(name) > 16 {
+				name = name[:13] + "..."
+			}
+			agentHint = "  " + keyHintStyle.Render("[agent: "+name+"]")
+		}
 		imageHint := ""
 		if n := len(m.pendingImages); n > 0 {
 			imageHint = "  " + keyHintStyle.Render(fmt.Sprintf("📎 %d image(s) staged", n))
 		}
-		line1 := mouseHint + pickerHint + sessionHint + todoHint + modeHint + imageHint + allowAllIndicator
+		line1 := mouseHint + pickerHint + sessionHint + todoHint + modeHint + agentHint + imageHint + allowAllIndicator
 		// Show rate limit info when the provider has reported it.
 		if m.lastRateLimits.IsKnown() {
 			parts := []string{}
@@ -4143,12 +4744,13 @@ func (m *Model) processNextCall() tea.Cmd {
 		return func() tea.Msg { return taskCompleteMsg{callID: call.ID, summary: summary} }
 	}
 
-	// ask_user, confirm_plan, subagent tools, use_skill, task_start, todo_*, memory_*, and connect_server
+	// ask_user, confirm_plan, subagent tools, use_skill, use_agent, task_start, todo_*, memory_*, and connect_server
 	// are always dispatched immediately without an approval dialog.
 	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "confirm_plan" ||
 		m.session.IsSubagentTool(call.Name) ||
-		call.Name == "use_skill" || call.Name == "task_start" ||
+		call.Name == "use_skill" || call.Name == "use_agent" || call.Name == "task_start" ||
 		call.Name == "todo_add" || call.Name == "todo_update" || call.Name == "todo_list" ||
+		call.Name == "todo_add_many" ||
 		call.Name == "memory_list" || call.Name == "memory_read" || call.Name == "memory_write" ||
 		call.Name == "connect_server" ||
 		call.Name == "get_time" || call.Name == "calculate" || call.Name == "sleep" {
@@ -4297,6 +4899,61 @@ func doListAllTools(ctx context.Context, session *chat.Session) tea.Cmd {
 			return allToolsErrMsg{err: err}
 		}
 		return allToolsMsg{tools: tools}
+	}
+}
+
+// doGenerateAgent fires a one-shot AI call to generate an agent profile from a
+// free-text description. The AI is asked to return a JSON object with keys
+// name, description, when, and instructions.
+func doGenerateAgent(ctx context.Context, client ai.Completer, description string) tea.Cmd {
+	return func() tea.Msg {
+		const systemPrompt = `You are a profile generator for AI agent configurations.
+The user will describe an agent's expertise and intended use.
+Respond with a single JSON object (no markdown fences) containing exactly these keys:
+  "name"         - a lowercase kebab-case slug (letters, digits, hyphens only)
+  "description"  - a one-sentence summary of what the agent does
+  "when"         - a one-sentence description of when to activate this agent
+  "instructions" - detailed system-prompt instructions for the agent's behaviour,
+                   including guidelines, constraints, and default actions
+
+Respond ONLY with the JSON object. No explanation, no markdown, no extra text.`
+
+		msgs := []ai.Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: description},
+		}
+		ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		result, err := client.Complete(ctx2, msgs, nil)
+		if err != nil {
+			return agentGeneratedMsg{err: err}
+		}
+		// Strip optional markdown code fences.
+		text := strings.TrimSpace(result.Content)
+		text = strings.TrimPrefix(text, "```json")
+		text = strings.TrimPrefix(text, "```")
+		text = strings.TrimSuffix(text, "```")
+		text = strings.TrimSpace(text)
+
+		var raw struct {
+			Name         string `json:"name"`
+			Description  string `json:"description"`
+			When         string `json:"when"`
+			Instructions string `json:"instructions"`
+		}
+		if err := json.Unmarshal([]byte(text), &raw); err != nil {
+			return agentGeneratedMsg{err: fmt.Errorf("could not parse AI response as JSON: %w\n\nRaw response:\n%s", err, text)}
+		}
+		a := agents.Agent{
+			Name:         raw.Name,
+			Description:  raw.Description,
+			When:         raw.When,
+			Instructions: raw.Instructions,
+		}
+		if err := agents.Validate(a); err != nil {
+			return agentGeneratedMsg{err: fmt.Errorf("generated profile failed validation: %w", err)}
+		}
+		return agentGeneratedMsg{agent: a}
 	}
 }
 
@@ -4716,6 +5373,85 @@ func (m Model) registryView() string {
 	return m.registrySearchInput.View() + "\n" + m.registryPicker.View()
 }
 
+// agentWizardView renders the full-screen agent creation wizard.
+func (m Model) agentWizardView() string {
+	var b strings.Builder
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	hintStyle := statusStyle
+	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+
+	switch m.state {
+	case stateAgentWizardMode:
+		b.WriteString(titleStyle.Render("Create new agent") + "\n\n")
+		b.WriteString("How would you like to define this agent?\n\n")
+		b.WriteString("  [a]  AI-assisted  -- describe the agent in plain language and let the AI generate the profile\n")
+		b.WriteString("  [m]  Manual       -- fill in name, description, when-to-use, and instructions manually\n\n")
+		b.WriteString(hintStyle.Render("Press [a] or [m].  [esc] cancel"))
+
+	case stateAgentWizardDescribe:
+		b.WriteString(titleStyle.Render("AI-assisted agent creation") + "\n\n")
+		b.WriteString("Describe the agent's expertise and when it should be used.\n")
+		b.WriteString("Example: \"A Go expert who reviews code for idiomatic style, performance, and correctness. Use when reviewing Go pull requests.\"\n\n")
+		b.WriteString(m.agentWizardDescribeTA.View())
+		b.WriteString("\n\n")
+		b.WriteString(hintStyle.Render("[ctrl+s] generate  [esc] cancel"))
+
+	case stateAgentWizardGenerate:
+		b.WriteString(titleStyle.Render("Generating agent profile...") + "\n\n")
+		b.WriteString(m.spinner.View() + "  Asking the AI to create the agent profile. Please wait...\n\n")
+		b.WriteString(hintStyle.Render("[esc] cancel"))
+
+	case stateAgentWizardReview:
+		b.WriteString(titleStyle.Render("Review generated profile") + "\n\n")
+		if m.agentWizardGenErr != "" {
+			b.WriteString(errStyle.Render("Error: "+m.agentWizardGenErr) + "\n\n")
+			if m.agentWizardGenerated.Name == "" {
+				b.WriteString(hintStyle.Render("[r] retry  [esc] cancel"))
+				break
+			}
+		}
+		b.WriteString(m.agentWizardReviewText + "\n\n")
+		if m.agentWizardOverwrite {
+			b.WriteString(errStyle.Render("File already exists.") + "\n\n")
+		}
+		b.WriteString(hintStyle.Render("[c] continue to tools  [e] edit  [r] retry  [esc] cancel"))
+
+	case stateAgentWizardManual:
+		b.WriteString(titleStyle.Render("Manual agent definition") + "\n\n")
+		labels := []string{"Name:", "Description:", "When to use:"}
+		for i := 0; i < 3; i++ {
+			active := m.agentWizardManualIdx == i
+			prefix := "  "
+			if active {
+				prefix = "> "
+			}
+			b.WriteString(prefix + labels[i] + "\n")
+			b.WriteString("  " + m.agentWizardManualTAs[i].View() + "\n\n")
+		}
+		instrActive := m.agentWizardManualIdx == 3
+		instrPrefix := "  "
+		if instrActive {
+			instrPrefix = "> "
+		}
+		b.WriteString(instrPrefix + "Instructions:\n")
+		b.WriteString("  " + m.agentWizardManualTA.View() + "\n\n")
+		if m.agentWizardGenErr != "" {
+			b.WriteString(errStyle.Render(m.agentWizardGenErr) + "\n")
+		}
+		b.WriteString(hintStyle.Render("[tab] next field  [shift+tab] previous  [tab] from instructions = submit  [esc] cancel"))
+
+	case stateAgentWizardTools:
+		return m.agentWizardToolPicker.View()
+
+	case stateAgentWizardDone:
+		b.WriteString(titleStyle.Render("Agent saved!") + "\n\n")
+		fmt.Fprintf(&b, "Agent %q has been saved to:\n  %s\n\n", m.agentWizardGenerated.Name, m.agentWizardSavedPath)
+		b.WriteString(hintStyle.Render("Press any key to continue"))
+	}
+
+	return b.String()
+}
+
 // toolDetailView renders the full-screen detail view for a single tool.
 func (m Model) toolDetailView() string {
 	title := headerStyle.Render(toolFriendlyName(m.toolDetailItem.name))
@@ -5116,6 +5852,28 @@ func (m *Model) applySession(sess *sessionstore.Session) {
 		}
 	}
 
+	// Restore agent from session. If the saved agent no longer exists, warn
+	// but continue without it.
+	if sess.AgentName != "" {
+		found := false
+		for _, a := range m.agents {
+			if a.Name == sess.AgentName {
+				m.activeAgent = &a
+				if m.toolMgr != nil {
+					m.toolMgr.SetToolFilter(a.ToolList())
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.items = append(m.items, displayItem{
+				kind:    itemInfo,
+				content: fmt.Sprintf("Warning: agent %q from saved session not found -- continuing without it.", sess.AgentName),
+			})
+		}
+	}
+
 	// Replace messages[0] with a freshly built system prompt so any stale
 	// MCP-server or memory injections from the saved session are removed.
 	// buildStreamMessages will re-add the current injections each turn.
@@ -5227,6 +5985,9 @@ func (m *Model) currentSessionSnapshot() sessionstore.Session {
 	if !m.activeMode.IsDefault && m.activeMode.Name != "" {
 		snap.ModeName = m.activeMode.Name
 	}
+	if m.activeAgent != nil {
+		snap.AgentName = m.activeAgent.Name
+	}
 	if m.todoStore != nil {
 		snap.Todos = m.todoStore.List()
 	}
@@ -5285,6 +6046,15 @@ func RunTUI(
 	m.skills = opts.Skills
 	if len(opts.Skills) > 0 {
 		m.messages = m.newConversation()
+	}
+
+	// Apply custom agents.
+	m.agents = opts.Agents
+	if len(opts.Agents) > 0 && toolMgr != nil {
+		toolMgr.SetAgents(opts.Agents)
+	}
+	if opts.InitialAgent != nil {
+		m.activateAgent(*opts.InitialAgent)
 	}
 
 	// Apply mode presets.
@@ -5414,6 +6184,9 @@ func RunTUI(
 			case <-ctx.Done():
 				return "", ctx.Err()
 			}
+		})
+		toolMgr.SetAgentActivateNotify(func(name string) {
+			sendFn(agentActivateMsg{name: name})
 		})
 	}
 

@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/spf13/cobra"
 
+	"github.com/icedream/werkler/internal/agents"
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/config"
@@ -34,6 +35,7 @@ var (
 	chatAutopilot       bool
 	chatAutopilotMaxCyc int
 	chatMode            string
+	chatAgent           string
 )
 
 var chatCmd = &cobra.Command{
@@ -56,6 +58,7 @@ func init() {
 	chatCmd.Flags().BoolVar(&chatAutopilot, "autopilot", false, "Enable autopilot mode: AI works autonomously until task_complete is called")
 	chatCmd.Flags().IntVar(&chatAutopilotMaxCyc, "autopilot-max-cycles", 0, "Maximum autopilot cycles before pausing (0 = use config default)")
 	chatCmd.Flags().StringVar(&chatMode, "mode", "", "Activate a named mode preset (e.g. default, plan, document)")
+	chatCmd.Flags().StringVar(&chatAgent, "agent", "", "Activate a named custom agent on startup")
 	rootCmd.AddCommand(chatCmd)
 }
 
@@ -124,6 +127,16 @@ func runChat(_ *cobra.Command, _ []string) error {
 		toolMgr.SetSkills(loadedSkills)
 	}
 
+	// Load custom agents from the configured directory (~/.config/werkler/agents).
+	agentsDir := agents.DefaultDir()
+	loadedAgents, err := agents.LoadDir(agentsDir, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: agents load error: %v\n", err)
+	}
+	if len(loadedAgents) > 0 {
+		fmt.Fprintf(os.Stderr, "Loaded %d agent(s).\n", len(loadedAgents))
+	}
+
 	todoStore := todostore.New()
 	toolMgr.SetTodoStore(todoStore)
 
@@ -165,6 +178,7 @@ func runChat(_ *cobra.Command, _ []string) error {
 	opts := ui.SessionOptions{
 		Store:     store,
 		Skills:    loadedSkills,
+		Agents:    loadedAgents,
 		TodoStore: todoStore,
 		PersistToolApproval: func(toolName string) error {
 			return config.AppendAutoApproveTool(flagConfigPath, toolName)
@@ -185,6 +199,20 @@ func runChat(_ *cobra.Command, _ []string) error {
 		AllModes:           allModes,
 		ConfiguredModes:    cfg.Modes,
 		ImplementationMode: cfg.ImplementationMode,
+	}
+	// Resolve --agent flag: fail fast if the name is unknown.
+	if chatAgent != "" {
+		var found *agents.Agent
+		for i := range loadedAgents {
+			if loadedAgents[i].Name == chatAgent {
+				found = &loadedAgents[i]
+				break
+			}
+		}
+		if found == nil {
+			return fmt.Errorf("agent %q not found in %s", chatAgent, agentsDir)
+		}
+		opts.InitialAgent = found
 	}
 	if len(cfg.MCP.Servers) > 0 {
 		opts.MCPManager = manager
