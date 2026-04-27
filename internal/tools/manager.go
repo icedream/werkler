@@ -110,21 +110,32 @@ type mcpConnector interface {
 // goroutine and blocks until the user responds or ctx is cancelled.
 type UserAsker func(ctx context.Context, question string, choices []string, recommendedChoice string, allowFreeform bool) (string, error)
 
+// subagentDef describes a subagent that the AI can invoke as a tool.
+// Each registered subagent becomes one built-in tool in the manager.
+type subagentDef struct {
+	name         string          // tool name (e.g. "rubber_duck_review")
+	description  string          // shown to the AI in the tool list
+	systemPrompt string          // system prompt for the subagent's own agentic loop
+	allowedTools map[string]bool // built-in tool names the subagent may call
+	maxSteps     int             // max iterations before giving up
+	completer    ai.Completer    // AI client for this subagent
+	label        string          // display label used in descriptions (e.g. "openai/gpt-4o")
+}
+
 // Manager wraps a chat.ToolManager and adds built-in tools.
 type Manager struct {
-	wrapped       chat.ToolManager
-	processes     *process.Manager
-	pathApprover  PathApprover
-	builtins      []builtin
-	userAsker     UserAsker
-	reviewer      ai.Completer
-	reviewerLabel string
-	mcpMgr        mcpConnector
-	skills        []skills.Skill
-	todoStore     *todostore.Store
-	memoryStore   *memorystore.MemoryStore
-	taskTitle     func(string) // optional; called when the AI sets a task title via task_start
-	activeCallID  atomic.Value // stores string; set/cleared by doCallTool goroutine
+	wrapped      chat.ToolManager
+	processes    *process.Manager
+	pathApprover PathApprover
+	builtins     []builtin
+	userAsker    UserAsker
+	subagents    []subagentDef
+	mcpMgr       mcpConnector
+	skills       []skills.Skill
+	todoStore    *todostore.Store
+	memoryStore  *memorystore.MemoryStore
+	taskTitle    func(string) // optional; called when the AI sets a task title via task_start
+	activeCallID atomic.Value // stores string; set/cleared by doCallTool goroutine
 }
 
 type builtin struct {
@@ -206,14 +217,30 @@ func (m *Manager) SetUserAsker(fn UserAsker) { m.userAsker = fn }
 // task_start to report what it is currently working on. Pass nil to disable.
 func (m *Manager) SetTaskTitleNotify(fn func(string)) { m.taskTitle = fn }
 
-// SetReviewer provides an optional secondary AI model for rubber duck reviews.
-// Calling this rebuilds the built-in tool list to include rubber_duck_review
-// when c is non-nil, or remove it when nil. Must be called before the tool
-// manager is in use (setup time only — not concurrency-safe).
+// SetReviewer provides an optional secondary AI model used by subagents
+// (rubber_duck_review and doc_review). Registers both subagents when c is
+// non-nil; clears them when nil. Must be called before the manager is in
+// use (setup time only — not concurrency-safe).
 func (m *Manager) SetReviewer(c ai.Completer, label string) {
-	m.reviewer = c
-	m.reviewerLabel = label
+	if c == nil {
+		m.subagents = nil
+	} else {
+		m.subagents = []subagentDef{
+			makeRubberDuckSubagent(c, label),
+			makeDocReviewSubagent(c, label),
+		}
+	}
 	m.builtins = m.makeBuiltins()
+}
+
+// IsSubagentTool reports whether name is a tool registered as a subagent.
+func (m *Manager) IsSubagentTool(name string) bool {
+	for _, sa := range m.subagents {
+		if sa.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // SetMCPManager wires in the MCP manager so the connect_server builtin is
@@ -722,35 +749,30 @@ Set recommended_choice to highlight a suggested option.`,
 		},
 	}
 
-	if m.reviewer != nil {
-		reviewerDesc := fmt.Sprintf(
-			"Submit your own pre-drafted plan or implementation to a separate reviewer AI for critical feedback.\n"+
-				"Reviewer: %s\n"+
-				"You MUST have a concrete plan of your own before calling this tool — do NOT use it to brainstorm or ask the reviewer to generate a plan.\n"+
-				"Use it to catch bugs, logic errors, design flaws, or missing edge cases before implementing.\n"+
-				"Provide complete context so the reviewer can give useful feedback.",
-			m.reviewerLabel,
-		)
+	for i := range m.subagents {
+		sa := &m.subagents[i]
 		builtins = append(builtins, builtin{
 			def: ai.ToolDefinition{
-				Name:        "rubber_duck_review",
-				Description: reviewerDesc,
+				Name:        sa.name,
+				Description: sa.description,
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"context": map[string]any{
 							"type":        "string",
-							"description": "The plan, code, or reasoning to review",
+							"description": "The content to submit for review",
 						},
 						"focus": map[string]any{
 							"type":        "string",
-							"description": `Optional: specific aspects to focus on (e.g. "concurrency safety", "error handling")`,
+							"description": `Optional: specific aspects to focus on (e.g. "clarity", "accuracy")`,
 						},
 					},
 					"required": []string{"context"},
 				},
 			},
-			handle: m.handleRubberDuck,
+			handle: func(ctx context.Context, args map[string]any) (string, error) {
+				return m.runSubagent(ctx, sa, args)
+			},
 		})
 	}
 
@@ -1635,89 +1657,68 @@ func (m *Manager) handleAskUser(ctx context.Context, args map[string]any) (strin
 	return m.userAsker(ctx, question, choices, recommended, allowFreeform)
 }
 
-// --- Rubber duck handler ---
+// --- Subagent framework ---
 
-// rubberDuckSystemPrompt instructs the reviewer AI to give concise, high-signal feedback.
-const rubberDuckSystemPrompt = `You are a technical reviewer. Critically evaluate the plan, code, or reasoning you are given.
-Identify: correctness issues, bugs, logic errors, edge cases, security concerns, design flaws.
-Be concise. Only surface issues that genuinely matter.
-If you find no significant issues, say so briefly.
-Do NOT comment on style, formatting, naming conventions, or other minor matters.
-You have access to file reading and process execution tools. Use them to look up referenced files,
-search the codebase with rg or grep (via process_start), or inspect directory structure when relevant.`
-
-// rubberDuckMaxSteps caps the tool-call iterations the reviewer can make.
-const rubberDuckMaxSteps = 10
-
-// reviewerAllowedTools is the set of built-in tool names the rubber duck reviewer
-// may call. These are read-only or process-query tools; write tools are excluded.
-var reviewerAllowedTools = map[string]bool{
-	"file_read":     true,
-	"file_list":     true,
-	"read_image":    true,
-	"process_start": true,
-	"process_read":  true,
-	"process_stop":  true,
-}
-
-// reviewerTools returns the tool definitions the rubber duck reviewer may call.
-func (m *Manager) reviewerTools() []ai.ToolDefinition {
+// subagentTools returns the built-in tool definitions a subagent is allowed to call.
+func (m *Manager) subagentTools(sa *subagentDef) []ai.ToolDefinition {
 	var out []ai.ToolDefinition
 	for _, b := range m.builtins {
-		if reviewerAllowedTools[b.def.Name] {
+		if sa.allowedTools[b.def.Name] && b.handle != nil {
 			out = append(out, b.def)
 		}
 	}
 	return out
 }
 
-// callBuiltinAsReviewer dispatches a built-in tool call on behalf of the rubber
-// duck reviewer. It uses withReviewMode so path checks use the permissive
-// reviewerApprover instead of the normal session approver.
-func (m *Manager) callBuiltinAsReviewer(ctx context.Context, name string, args map[string]any) (string, error) {
-	reviewCtx := withReviewMode(ctx)
+// callBuiltinAsSubagent dispatches a built-in tool call on behalf of a subagent.
+// Uses withReviewMode so path checks use the permissive reviewerApprover.
+func (m *Manager) callBuiltinAsSubagent(ctx context.Context, sa *subagentDef, name string, args map[string]any) (string, error) {
+	if !sa.allowedTools[name] {
+		return "", fmt.Errorf("tool %q is not available to subagent %q", name, sa.name)
+	}
+	subCtx := withReviewMode(ctx)
 	for _, b := range m.builtins {
-		if b.def.Name == name {
-			return b.handle(reviewCtx, args)
+		if b.def.Name == name && b.handle != nil {
+			return b.handle(subCtx, args)
 		}
 	}
-	return "", fmt.Errorf("tool %q is not available to the reviewer", name)
+	return "", fmt.Errorf("tool %q is not available to subagent %q", name, sa.name)
 }
 
-func (m *Manager) handleRubberDuck(ctx context.Context, args map[string]any) (string, error) {
-	plan := stringArg(args, "context")
-	if plan == "" {
-		return "error: rubber_duck_review requires a non-empty context", nil
+// runSubagent runs the agentic loop for sa, feeding userContent as the first
+// user message. Returns the subagent's final text response.
+func (m *Manager) runSubagent(ctx context.Context, sa *subagentDef, args map[string]any) (string, error) {
+	content := stringArg(args, "context")
+	if content == "" {
+		return "error: subagent " + sa.name + " requires a non-empty context", nil
 	}
-	userContent := plan
+	userContent := content
 	if focus := stringArg(args, "focus"); focus != "" {
 		userContent += "\n\nFocus particularly on: " + focus
 	}
 
 	messages := []ai.Message{
-		{Role: "system", Content: rubberDuckSystemPrompt},
+		{Role: "system", Content: sa.systemPrompt},
 		{Role: "user", Content: userContent},
 	}
-	tools := m.reviewerTools()
+	tools := m.subagentTools(sa)
 
-	for range rubberDuckMaxSteps {
-		msg, err := m.reviewer.Complete(ctx, messages, tools)
+	for range sa.maxSteps {
+		msg, err := sa.completer.Complete(ctx, messages, tools)
 		if err != nil {
-			return "", fmt.Errorf("rubber duck review failed: %w", err)
+			return "", fmt.Errorf("subagent %s failed: %w", sa.name, err)
 		}
 		messages = append(messages, msg)
 
-		// No tool calls → reviewer is done; return its text response.
 		if len(msg.ToolCalls) == 0 {
 			if msg.Content == "" {
-				return "", fmt.Errorf("rubber duck review produced no response")
+				return "", fmt.Errorf("subagent %s produced no response", sa.name)
 			}
 			return msg.Content, nil
 		}
 
-		// Execute each tool call through the reviewer permission set.
 		for _, tc := range msg.ToolCalls {
-			result, callErr := m.callBuiltinAsReviewer(ctx, tc.Name, tc.Arguments)
+			result, callErr := m.callBuiltinAsSubagent(ctx, sa, tc.Name, tc.Arguments)
 			if callErr != nil {
 				result = "error: " + callErr.Error()
 			}
@@ -1728,7 +1729,65 @@ func (m *Manager) handleRubberDuck(ctx context.Context, args map[string]any) (st
 			})
 		}
 	}
-	return "", fmt.Errorf("rubber duck review exceeded %d steps without producing a response", rubberDuckMaxSteps)
+	return "", fmt.Errorf("subagent %s exceeded %d steps without producing a response", sa.name, sa.maxSteps)
+}
+
+// makeRubberDuckSubagent returns the built-in code-reviewer subagent definition.
+func makeRubberDuckSubagent(c ai.Completer, label string) subagentDef {
+	return subagentDef{
+		name: "rubber_duck_review",
+		description: fmt.Sprintf(
+			"Submit your own pre-drafted plan or implementation to a separate reviewer AI for critical feedback.\n"+
+				"Reviewer: %s\n"+
+				"You MUST have a concrete plan of your own before calling this tool — do NOT use it to brainstorm or ask the reviewer to generate a plan.\n"+
+				"Use it to catch bugs, logic errors, design flaws, or missing edge cases before implementing.\n"+
+				"Provide complete context so the reviewer can give useful feedback.",
+			label,
+		),
+		systemPrompt: `You are a technical reviewer. Critically evaluate the plan, code, or reasoning you are given.
+Identify: correctness issues, bugs, logic errors, edge cases, security concerns, design flaws.
+Be concise. Only surface issues that genuinely matter.
+If you find no significant issues, say so briefly.
+Do NOT comment on style, formatting, naming conventions, or other minor matters.
+You have access to file reading and process execution tools. Use them to look up referenced files,
+search the codebase with rg or grep (via process_start), or inspect directory structure when relevant.`,
+		allowedTools: map[string]bool{
+			"file_read":     true,
+			"file_list":     true,
+			"process_start": true,
+			"process_read":  true,
+			"process_stop":  true,
+		},
+		maxSteps:  10,
+		completer: c,
+		label:     label,
+	}
+}
+
+// makeDocReviewSubagent returns the built-in documentation clarity reviewer subagent.
+func makeDocReviewSubagent(c ai.Completer, label string) subagentDef {
+	return subagentDef{
+		name: "doc_review",
+		description: fmt.Sprintf(
+			"Submit documentation to a non-technical end-user proxy for plain-language and clarity review.\n"+
+				"Reviewer: %s\n"+
+				"Use this to check that docs are easy to understand for someone unfamiliar with the codebase.\n"+
+				"The reviewer will flag jargon, confusing phrasing, missing context, and unclear instructions.",
+			label,
+		),
+		systemPrompt: `You are a non-technical end user reviewing documentation.
+Evaluate whether the content is clear, easy to understand, and free of unnecessary jargon.
+Flag: confusing phrasing, unexplained technical terms, missing context, unclear steps, or anything a new user would find hard to follow.
+Be concise. Only surface issues that genuinely affect clarity or usability.
+Do NOT comment on technical correctness, code style, or implementation details.`,
+		allowedTools: map[string]bool{
+			"file_read": true,
+			"file_list": true,
+		},
+		maxSteps:  10,
+		completer: c,
+		label:     label,
+	}
 }
 
 func (m *Manager) handleUseSkill(_ context.Context, args map[string]any) (string, error) {

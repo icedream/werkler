@@ -174,21 +174,22 @@ autopilot            = true
 autopilot_max_cycles = 30
 ```
 
-## Rubber duck reviewer
+## Subagents (reviewer models)
 
-Werkler can optionally route planning and code-review requests to a second AI
-model — a "rubber duck" — before the main model implements anything. When this
-is configured, the main AI receives a `rubber_duck_review` tool it can invoke to
-get independent critical feedback on a plan, piece of code, or reasoning.
+Werkler can optionally route tasks to a second AI model acting as a subagent.
+When configured, the main AI gets two extra tools it can invoke automatically:
 
-The reviewer is entirely separate from the main chat model and can be a
-different model from the same or a different provider. The AI decides when to
-use it; the tool is auto-approved (no confirmation prompt) since you explicitly
-configured the destination.
+| Tool                 | Purpose                                                                                       |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| `rubber_duck_review` | Critical code/plan reviewer — flags bugs, logic errors, design flaws, and edge cases.         |
+| `doc_review`         | Plain-language doc reviewer — flags jargon, unclear steps, and missing context for end users. |
+
+Both tools are auto-approved (no confirmation prompt) and share the same
+configured subagent model. The AI decides when to call them.
 
 ### Reference an existing provider
 
-Point the rubber duck at a provider already listed in `[[ai.providers]]`, with
+Point the subagent at a provider already listed in `[[ai.providers]]`, with
 an optional model override:
 
 ```toml
@@ -199,8 +200,8 @@ model    = "claude-opus-4-5"  # optional: override the provider's default model
 
 ### Standalone provider
 
-Configure a separate AI provider just for reviews without adding it to the main
-`[[ai.providers]]` list:
+Configure a separate AI provider just for subagents without adding it to the
+main `[[ai.providers]]` list:
 
 ```toml
 [ai.rubber_duck]

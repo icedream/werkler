@@ -51,7 +51,8 @@ RIGHT: question="Should I deploy now or review first?", choices=["Deploy now", "
 ## Planning and review
 When tackling a non-trivial task, first draft your own plan independently. Only then, if rubber_duck_review is available, submit that plan for critique.
 Do NOT use rubber_duck_review to brainstorm or ask the reviewer to come up with a plan — you must have a concrete plan of your own before submitting it.
-After receiving the review:
+Use doc_review (if available) to check documentation or user-facing text for clarity and plain language before finishing.
+After receiving any review:
 - Read the feedback carefully.
 - If it identifies bugs, logic errors, design flaws, or missing edge cases, STOP and revise your plan to address them before proceeding.
 - Only proceed to implementation once you have incorporated the feedback. Do not treat the review as a formality.
@@ -316,6 +317,21 @@ func (s *Session) IsApproved(toolName string) bool {
 		if matched, _ := filepath.Match(pattern, toolName); matched {
 			return true
 		}
+	}
+	return false
+}
+
+// subagentTooler is an optional interface for ToolManager implementations that
+// can identify which tool names belong to registered subagents.
+type subagentTooler interface {
+	IsSubagentTool(name string) bool
+}
+
+// IsSubagentTool reports whether name is a tool backed by a registered subagent.
+// Always returns false when the underlying ToolManager does not implement subagentTooler.
+func (s *Session) IsSubagentTool(name string) bool {
+	if st, ok := s.tools.(subagentTooler); ok {
+		return st.IsSubagentTool(name)
 	}
 	return false
 }

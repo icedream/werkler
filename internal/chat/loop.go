@@ -112,7 +112,7 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 				return summary, nil
 			}
 
-			if !session.IsApproved(tc.Name) && tc.Name != "ask_user" && tc.Name != "rubber_duck_review" &&
+			if !session.IsApproved(tc.Name) && tc.Name != "ask_user" && !session.IsSubagentTool(tc.Name) &&
 				tc.Name != "todo_add" && tc.Name != "todo_update" && tc.Name != "todo_list" &&
 				tc.Name != "memory_list" && tc.Name != "memory_read" && tc.Name != "memory_write" &&
 				tc.Name != "get_time" && tc.Name != "calculate" && tc.Name != "sleep" {
