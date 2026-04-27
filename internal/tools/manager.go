@@ -506,13 +506,13 @@ Do NOT put "git" (or any command name) in args.`,
 					"properties": map[string]any{
 						"command":         map[string]any{"type": "string", "description": "Absolute path or PATH-resolvable command name"},
 						"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command arguments only — do NOT include the command name as the first element (unlike argv[0])"},
-						"title":           map[string]any{"type": "string", "description": "Short one-line description of what this command does and why, shown to the user"},
+						"title":           map[string]any{"type": "string", "description": "REQUIRED. Short human-readable phrase describing the purpose of this command (e.g. \"Build project\", \"Run tests\", \"Search for TODO comments\"). Shown to the user in the approval dialog and chat log."},
 						"cwd":             map[string]any{"type": "string", "description": "Working directory; empty = inherit werkler's cwd"},
 						"pty":             map[string]any{"type": "boolean", "description": "Allocate a PTY (pseudo-terminal); required for interactive programs"},
 						"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Extra environment variables merged on top of the current environment"},
 						"timeout_seconds": map[string]any{"type": "number", "description": "Seconds to wait for initial output before returning (0 = don't wait, default 5)"},
 					},
-					"required": []string{"command"},
+					"required": []string{"command", "title"},
 				},
 			},
 			handle: m.handleProcessStart,
@@ -1186,6 +1186,18 @@ func (m *Manager) handleProcessStart(ctx context.Context, args map[string]any) (
 		return "", fmt.Errorf("process_start: command is required")
 	}
 	cmdArgs := stringSliceArg(args, "args")
+	title := stringArg(args, "title")
+	if title == "" {
+		// Fallback: derive a title from the command name + first arg so the TUI
+		// always shows something meaningful even if the model skipped the field.
+		base := filepath.Base(command)
+		if len(cmdArgs) > 0 {
+			title = base + " " + cmdArgs[0]
+		} else {
+			title = base
+		}
+		args["title"] = title
+	}
 	cwd := stringArg(args, "cwd")
 	usePTY := boolArg(args, "pty")
 	env := stringMapArg(args, "env")
