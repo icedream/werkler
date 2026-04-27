@@ -1561,6 +1561,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.turnRoundtrips = 0
 							m.emptyResponseRetries = 0
+							// Synchronously count the outbound payload before deciding
+							// whether to compact, so the decision is current rather
+							// than one turn stale.
+							outbound := m.buildStreamMessages(m.messages)
+							if count, cerr := ai.CountTokens(m.modelName, outbound); cerr == nil {
+								m.contextUsage = count
+							}
 							if cmd := m.recountContext(); cmd != nil {
 								cmds = append(cmds, cmd)
 							}
@@ -1959,10 +1966,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.Reset()
 					m.showCompletion = false
 					m.appendInputHistory(text)
-					// Show the message immediately so the user can see it was received.
-					// processQueueOrIdle will skip re-adding it (displayed=true).
-					m.items = append(m.items, displayItem{kind: itemUser, content: text})
-					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: true})
+					// Do NOT add to m.items here — the message should appear in the
+					// chat log at the moment it is actually sent to the AI, not while
+					// the AI is still processing a previous turn. The queue counter in
+					// the status bar provides feedback that the message was received.
+					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: false})
 					needRebuild = true
 				}
 			case tea.KeyTab:
@@ -4049,12 +4057,14 @@ func doCountTokens(modelName string, messages []ai.Message) tea.Cmd {
 	}
 }
 
-// recountContext schedules an async token count for the current message history.
+// recountContext schedules an async token count for the outbound message slice
+// (including ephemeral system-prompt injections) so the display and compaction
+// logic reflect the actual payload size, not just the raw history.
 func (m *Model) recountContext() tea.Cmd {
 	if len(m.messages) == 0 {
 		return nil
 	}
-	return doCountTokens(m.modelName, m.messages)
+	return doCountTokens(m.modelName, m.buildStreamMessages(m.messages))
 }
 
 // hasCompactableHistory returns true when the conversation has enough real turns
@@ -4070,8 +4080,8 @@ func (m *Model) hasCompactableHistory() bool {
 }
 
 // shouldAutoCompact returns true when the context is approaching the model's
-// limit and compaction hasn't already been triggered. Requires a known context
-// limit and a non-approximate token count.
+// limit and compaction hasn't already been triggered.
+// Works with both exact and approximate token counts as long as MaxTokens is known.
 func (m *Model) shouldAutoCompact() bool {
 	if m.autoCompactPending {
 		return false // already in progress
@@ -4080,12 +4090,20 @@ func (m *Model) shouldAutoCompact() bool {
 	if maxTok <= 0 {
 		return false // limit unknown
 	}
-	// Use the last known async count; if not yet computed, skip.
-	if m.contextUsage.Total == 0 || m.contextUsage.Approx {
+	if m.contextUsage.Total == 0 {
+		return false
+	}
+	if !m.hasCompactableHistory() {
 		return false
 	}
 	const autoCompactThreshold = 0.75
-	return m.contextUsage.UsageFraction(maxTok) >= autoCompactThreshold && m.hasCompactableHistory()
+	// For approximate counts (unknown tokenizer) use a lower threshold to
+	// compensate for potential undercounting.
+	threshold := autoCompactThreshold
+	if m.contextUsage.Approx {
+		threshold = 0.65
+	}
+	return float64(m.contextUsage.Total)/float64(maxTok) >= threshold
 }
 
 // doCompact sends the current message history to the AI as a summarization
