@@ -2448,8 +2448,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autopilotDisable()
 		m.currentTaskTitle = "" // clear task title on completion
 		m.items = append(m.items, displayItem{
-			kind:    itemInfo,
-			content: "✓ Task complete: " + msg.summary,
+			kind:    itemMarkdown,
+			content: "✓ **Task complete**\n\n" + msg.summary,
 		})
 		needRebuild = true
 		if m.sessionStore != nil {

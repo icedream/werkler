@@ -328,22 +328,21 @@ func ExtractPaths(command string, args []string, cwd string) []string {
 		add(command) // unresolvable — include as-is so user can still approve
 	}
 
-	// 2. cwd itself.
-	if cwd != "" {
-		add(cwd)
-	}
+	// Note: cwd is intentionally NOT added to the approval list.
+	// It is the process's starting directory, not a path being read/written.
+	// It is still used below to resolve relative argument paths.
 
 	// 3 & 4. Each arg: resolve if relative, scan for embedded paths.
 	for _, arg := range args {
 		// Resolve relative paths against cwd.
-		if isPathLike(arg) {
+		if isPathLike(arg) && !containsShellVar(arg) {
 			add(resolvePath(arg, cwd))
 		}
 		// Heuristic scan for embedded paths (covers cases like "-I/usr/include").
 		for _, m := range pathHeuristic.FindAllStringSubmatch(arg, -1) {
 			if len(m) >= 2 {
 				p := strings.Trim(m[1], `"'`)
-				if !containsEllipsis(p) {
+				if !containsEllipsis(p) && !containsShellVar(p) {
 					add(resolvePath(p, cwd))
 				}
 			}
@@ -359,7 +358,7 @@ func ExtractPaths(command string, args []string, cwd string) []string {
 				for _, m := range pathHeuristic.FindAllStringSubmatch(script, -1) {
 					if len(m) >= 2 {
 						p := strings.Trim(m[1], `"'`)
-						if !containsEllipsis(p) {
+						if !containsEllipsis(p) && !containsShellVar(p) {
 							add(resolvePath(p, cwd))
 						}
 					}
@@ -382,6 +381,12 @@ func isPathLike(s string) bool {
 		strings.HasPrefix(s, "./") ||
 		strings.HasPrefix(s, "../") ||
 		strings.HasPrefix(s, "~/")
+}
+
+// containsShellVar reports whether s contains shell variable syntax ($, {, }).
+// Such strings are unexpanded variable references, not literal filesystem paths.
+func containsShellVar(s string) bool {
+	return strings.ContainsAny(s, "${}\\")
 }
 
 // containsEllipsis reports whether any path segment of s is "..." (Go wildcard).
@@ -435,7 +440,7 @@ func canonicalizePath(p string) string {
 
 // checkWritePaths returns unapproved paths from ExtractPaths.
 // The command binary (first path) requires execute-level approval; all other
-// paths (cwd, file arguments) require write-level approval.
+// paths (file arguments) require write-level approval.
 // The active approver is resolved from ctx (reviewer vs. normal).
 func (m *Manager) checkWritePaths(ctx context.Context, command string, args []string, cwd string) []chat.PathAccessRequest {
 	approver := m.activeApprover(ctx)
