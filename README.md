@@ -32,7 +32,8 @@ sudo mv werkler /usr/local/bin/
 
 Werkler uses a TOML configuration file located at:
 
-- **Linux/macOS**: `~/.config/werkler/config.toml`
+- **Linux / BSD**: `$XDG_CONFIG_HOME/werkler/config.toml` (usually `~/.config/werkler/config.toml`)
+- **macOS**: `~/Library/Application Support/werkler/config.toml`
 - **Windows**: `%AppData%\werkler\config.toml`
 
 ```sh
