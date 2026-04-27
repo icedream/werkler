@@ -747,9 +747,10 @@ Set recommended_choice to highlight a suggested option.`,
 			builtin{
 				def: ai.ToolDefinition{
 					Name: "todo_add",
-					Description: `Add a todo item to the session task list.
+					Description: `Add a single todo item to the session task list.
 Always supply a short kebab-case id (e.g. "write-readme", "fix-login-bug") so you can
 reference the todo later. Use proactively at the start of multi-step tasks.
+To add several todos at once, use todo_add_many instead.
 IMPORTANT: Duplicate titles are not allowed. If a todo with the same title already exists
 you will receive the existing item back — do NOT call todo_add again with the same title.
 IMPORTANT: Duplicate IDs are not allowed. Choose a unique id; if the id already exists
@@ -766,6 +767,34 @@ Only rephrase/re-id if this is genuinely a distinct task.`,
 					},
 				},
 				handle: m.handleTodoAdd,
+			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name: "todo_add_many",
+					Description: `Add multiple todo items to the session task list in a single call.
+Prefer this over repeated todo_add calls whenever you know the full list of tasks upfront.
+Duplicate titles or IDs are skipped with a note in the result — do not retry them.`,
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"items": map[string]any{
+								"type":        "array",
+								"description": "List of todo items to add",
+								"items": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"id":          map[string]any{"type": "string", "description": "Short kebab-case identifier. Must be unique in this session."},
+										"title":       map[string]any{"type": "string", "description": "Short one-line title"},
+										"description": map[string]any{"type": "string", "description": "Optional detail or acceptance criteria"},
+									},
+									"required": []string{"title"},
+								},
+							},
+						},
+						"required": []string{"items"},
+					},
+				},
+				handle: m.handleTodoAddMany,
 			},
 			builtin{
 				def: ai.ToolDefinition{
@@ -1635,6 +1664,49 @@ func (m *Manager) handleTodoAdd(_ context.Context, args map[string]any) (string,
 	}
 	id := m.todoStore.Add(requestedID, title, stringArg(args, "description"))
 	return fmt.Sprintf("added: id=%s status=pending title=%q", id, title), nil
+}
+
+func (m *Manager) handleTodoAddMany(_ context.Context, args map[string]any) (string, error) {
+	rawItems, _ := args["items"].([]any)
+	if len(rawItems) == 0 {
+		return "error: items array is required and must not be empty", nil
+	}
+	var sb strings.Builder
+	existing := m.todoStore.List()
+	for i, raw := range rawItems {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			fmt.Fprintf(&sb, "item %d: skipped (invalid format)\n", i+1)
+			continue
+		}
+		title := stringArg(item, "title")
+		if title == "" {
+			fmt.Fprintf(&sb, "item %d: skipped (title is required)\n", i+1)
+			continue
+		}
+		requestedID := stringArg(item, "id")
+		skipped := false
+		for _, t := range existing {
+			if t.Title == title {
+				fmt.Fprintf(&sb, "duplicate: %q already exists id=%s status=%s\n", title, t.ID, t.Status)
+				skipped = true
+				break
+			}
+			if requestedID != "" && t.ID == requestedID {
+				fmt.Fprintf(&sb, "duplicate id %q (title=%q status=%s) — choose a different id\n", requestedID, t.Title, t.Status)
+				skipped = true
+				break
+			}
+		}
+		if skipped {
+			continue
+		}
+		id := m.todoStore.Add(requestedID, title, stringArg(item, "description"))
+		// Keep existing list in sync so later items in the same batch are checked correctly.
+		existing = m.todoStore.List()
+		fmt.Fprintf(&sb, "added: id=%s title=%q\n", id, title)
+	}
+	return strings.TrimSpace(sb.String()), nil
 }
 
 func (m *Manager) handleTodoUpdate(_ context.Context, args map[string]any) (string, error) {

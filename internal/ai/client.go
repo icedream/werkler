@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,13 +59,27 @@ type ToolDefinition struct {
 	InputSchema any
 }
 
+// ImagePart holds an image to include in a user message. Either URL (for
+// http/https images) or Data+MIMEType (for locally-loaded files) must be set.
+type ImagePart struct {
+	// URL is an http/https URL for remote images.
+	URL string `json:"url,omitempty"`
+	// Data holds the raw image bytes for local files (encoded as base64 in the API).
+	Data []byte `json:"data,omitempty"`
+	// MIMEType is required when Data is set (e.g. "image/png", "image/jpeg").
+	MIMEType string `json:"mime_type,omitempty"`
+	// Name is the display name shown in the TUI (e.g. the file basename).
+	Name string `json:"name,omitempty"`
+}
+
 // Message represents a single entry in the conversation history.
 type Message struct {
 	Role       string
 	Content    string
-	Reasoning  string     // reasoning/thinking content emitted by reasoning models (not sent back to the API)
-	ToolCallID string     // set for tool result messages
-	ToolCalls  []ToolCall // set for assistant messages that invoke tools
+	Parts      []ImagePart // optional images attached to a user message
+	Reasoning  string      // reasoning/thinking content emitted by reasoning models (not sent back to the API)
+	ToolCallID string      // set for tool result messages
+	ToolCalls  []ToolCall  // set for assistant messages that invoke tools
 }
 
 // ToolCall is a tool invocation requested by the assistant.
@@ -439,6 +454,31 @@ func toOpenAIMessages(msgs []Message) []openai.ChatCompletionMessage {
 			Role:       m.Role,
 			Content:    m.Content,
 			ToolCallID: m.ToolCallID,
+		}
+		// If the message carries image parts, switch to MultiContent.
+		if len(m.Parts) > 0 {
+			parts := make([]openai.ChatMessagePart, 0, 1+len(m.Parts))
+			if m.Content != "" {
+				parts = append(parts, openai.ChatMessagePart{
+					Type: openai.ChatMessagePartTypeText,
+					Text: m.Content,
+				})
+			}
+			for _, p := range m.Parts {
+				var imageURL openai.ChatMessageImageURL
+				if p.URL != "" {
+					imageURL.URL = p.URL
+				} else {
+					imageURL.URL = "data:" + p.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(p.Data)
+				}
+				imageURL.Detail = openai.ImageURLDetailAuto
+				parts = append(parts, openai.ChatMessagePart{
+					Type:     openai.ChatMessagePartTypeImageURL,
+					ImageURL: &imageURL,
+				})
+			}
+			msg.Content = ""
+			msg.MultiContent = parts
 		}
 		for _, tc := range m.ToolCalls {
 			raw, _ := json.Marshal(tc.Arguments)
