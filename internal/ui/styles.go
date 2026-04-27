@@ -44,6 +44,9 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("220"))
 
+	toolDimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")) // grayed-out raw tool name suffix
+
 	toolApprovedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("42"))
 

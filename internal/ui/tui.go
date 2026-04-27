@@ -2902,7 +2902,7 @@ func (m Model) statusLines() (line1, line2 string) {
 		}
 		return statusStyle.Render(m.spinner.View()+" Streaming…") + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
 	case stateCallingTool:
-		name := toolNameStyle.Render(m.callingToolName)
+		name := renderToolName(m.callingToolName)
 		cancelHint := ""
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
@@ -2945,7 +2945,7 @@ func (m Model) statusLines() (line1, line2 string) {
 			return "", ""
 		}
 		args := formatArgsCompact(m.currentCall.Arguments)
-		l1 := "  ▶ " + toolNameStyle.Render(m.currentCall.Name)
+		l1 := "  ▶ " + renderToolName(m.currentCall.Name)
 		if args != "" {
 			l1 += "  " + args
 		}
@@ -3194,7 +3194,7 @@ func (m Model) renderItem(item displayItem) string {
 		case toolStatusDenied:
 			badge = toolDeniedStyle.Render("✗")
 		}
-		name := toolNameStyle.Render(item.toolName)
+		name := renderToolName(item.toolName)
 		badgeAndName := "  " + badge + " " + name
 		prefixW := lipgloss.Width(badgeAndName)
 		line := badgeAndName
@@ -4100,9 +4100,74 @@ func formatArgsCompact(args map[string]any) string {
 	return s
 }
 
+// toolFriendlyName returns a human-readable label for a tool name.
+// Built-in tools have explicit labels; MCP tools are auto-formatted from
+// their base name (the part after "__") by converting snake_case to Title Case.
+func toolFriendlyName(name string) string {
+	switch name {
+	case "file_read":
+		return "Read file"
+	case "file_write":
+		return "Write file"
+	case "file_edit":
+		return "Edit file"
+	case "file_list":
+		return "List files"
+	case "file_glob":
+		return "Find files"
+	case "file_delete":
+		return "Delete file"
+	case "process_start":
+		return "Run command"
+	case "process_send":
+		return "Send input"
+	case "process_send_key":
+		return "Send key"
+	case "process_read":
+		return "Read output"
+	case "process_stop":
+		return "Stop process"
+	case "connect_server":
+		return "Connect server"
+	case "task_complete":
+		return "Complete task"
+	case "ask_user":
+		return "Ask user"
+	case "todo_add":
+		return "Add todo"
+	case "todo_update":
+		return "Update todo"
+	case "todo_list":
+		return "List todos"
+	case "memory_read":
+		return "Read memory"
+	case "memory_write":
+		return "Write memory"
+	}
+	// MCP tool: auto-format the base name.
+	return snakeCaseToTitle(toolBaseName(name))
+}
+
+// snakeCaseToTitle converts a snake_case string to Title Case words
+// (e.g. "get_file_contents" → "Get File Contents").
+func snakeCaseToTitle(s string) string {
+	words := strings.Split(s, "_")
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// renderToolName renders a tool name as "Friendly Name [raw_name]" where the
+// raw name is grayed out. Use this wherever tool names are shown to the user.
+func renderToolName(name string) string {
+	friendly := toolFriendlyName(name)
+	return toolNameStyle.Render(friendly) + " " + toolDimStyle.Render("["+name+"]")
+}
+
 // toolCallDisplayArgs returns a compact display string for tool call arguments.
-// For file tools it shows just the path; for process_start it shows "$ cmd args…";
-// for other tools it falls back to compact JSON.
 func toolCallDisplayArgs(toolName string, args map[string]any) string {
 	switch toolName {
 	case "file_edit", "file_write", "file_delete", "file_read":
