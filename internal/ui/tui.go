@@ -2369,28 +2369,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !isEmpty {
 				m.messages = append(m.messages, chunk.Msg)
 			} else if chunk.Usage.CompletionTokens > 0 {
-				const maxEmptyRetries = 2
+				const maxEmptyRetries = 1
 				if m.emptyResponseRetries < maxEmptyRetries {
-					// Retry with a nudge: build an ephemeral message slice (copy to
-					// avoid mutating m.messages through append's backing array) and
-					// append a one-off user nudge that is NOT persisted to history.
+					// The model produced tokens but returned nothing actionable. Rather
+					// than commanding it to comply (which doesn't help when it genuinely
+					// doesn't know what to do), ask it to explain its intent. The reply
+					// will appear as a normal assistant message so the user can guide it.
 					m.emptyResponseRetries++
 					m.turnRoundtrips++
 					base := m.buildStreamMessages(m.messages)
 					nudgeMsgs := make([]ai.Message, len(base)+1)
 					copy(nudgeMsgs, base)
 					nudgeMsgs[len(base)] = ai.Message{
-						Role:    "user",
-						Content: "Your last response was empty. You must either call a tool or respond with text. Do not produce an empty response.",
+						Role: "user",
+						Content: "Your last response was empty — you produced no text and called no tools. " +
+							"In plain text, explain what you were attempting to do and what information " +
+							"or capabilities you would need to complete it.",
 					}
-					debugLog("streamChunk: empty response (tokens=%d), retry %d/%d with nudge",
+					m.items = append(m.items, displayItem{
+						kind:    itemInfo,
+						content: "Empty response detected — asking model to explain its intent…",
+					})
+					debugLog("streamChunk: empty response (tokens=%d), asking for intent (retry %d/%d)",
 						chunk.Usage.CompletionTokens, m.emptyResponseRetries, maxEmptyRetries)
 					m.state = stateThinking
 					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, nudgeMsgs, m.tools))
 					needRebuild = true
 					break
 				}
-				// All retries exhausted — surface the error to the user.
+				// Intent question also got an empty response — surface the error.
 				m.items = append(m.items, displayItem{
 					kind:    itemError,
 					content: fmt.Sprintf("Provider returned %d completion tokens but no content or tool calls — the model output may have been silently dropped by the backend. Try rephrasing your prompt or switching models.", chunk.Usage.CompletionTokens),
