@@ -135,14 +135,19 @@ You are operating in autopilot mode. The user is not currently present.
 Work autonomously toward the given goal. Use todo_add, todo_update, and todo_list to track progress.
 Call task_complete(summary) when all work is done. Call ask_user only if you are completely blocked and cannot proceed without human input.`
 
+// processOutputLineCap is the maximum number of lines kept in a process output
+// display item.  Lines beyond this are counted but not displayed.
+const processOutputLineCap = 50
+
 type displayItem struct {
-	kind       string
-	content    string
-	toolName   string
-	toolArgs   string // compact JSON args
-	toolStatus int
-	handle     string // process handle (itemProcessOutput only)
-	toolNote   string // secondary annotation: intent title (process_start) or diff summary (file_edit)
+	kind           string
+	content        string
+	toolName       string
+	toolArgs       string // compact JSON args
+	toolStatus     int
+	handle         string // process handle (itemProcessOutput only)
+	toolNote       string // secondary annotation: intent title (process_start) or diff summary (file_edit)
+	truncatedLines int    // lines dropped from the top of process output to stay within cap
 }
 
 // --- Tea messages ---
@@ -2453,15 +2458,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			last := &m.items[n-1]
 			if last.kind == itemProcessOutput && last.handle == msg.handle {
 				last.content += msg.raw
+				last.truncatedLines += trimProcessOutputLines(&last.content, processOutputLineCap)
 				found = true
 			}
 		}
 		if !found {
-			m.items = append(m.items, displayItem{
+			item := displayItem{
 				kind:    itemProcessOutput,
 				handle:  msg.handle,
 				content: msg.raw,
-			})
+			}
+			item.truncatedLines += trimProcessOutputLines(&item.content, processOutputLineCap)
+			m.items = append(m.items, item)
 		}
 		needRebuild = true
 
@@ -3424,8 +3432,16 @@ func (m Model) renderItem(item displayItem) string {
 
 	case itemProcessOutput:
 		prefix := processHandleStyle.Render("[process:" + item.handle + "]")
+		var sb strings.Builder
+		sb.WriteString(prefix)
+		if item.truncatedLines > 0 {
+			sb.WriteString("\n")
+			sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  … %d lines above …", item.truncatedLines)))
+		}
 		// Raw output may contain ANSI codes, display as-is.
-		return prefix + "\n" + item.content
+		sb.WriteString("\n")
+		sb.WriteString(item.content)
+		return sb.String()
 
 	case itemAskUser:
 		var sb strings.Builder
@@ -4513,6 +4529,19 @@ func toolCallIntent(toolName string, args map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// trimProcessOutputLines ensures content has at most cap lines.  Lines beyond
+// the cap are removed from the top and the count of dropped lines is returned.
+// The caller adds this count to displayItem.truncatedLines.
+func trimProcessOutputLines(content *string, cap int) int {
+	lines := strings.Split(*content, "\n")
+	if len(lines) <= cap {
+		return 0
+	}
+	dropped := len(lines) - cap
+	*content = strings.Join(lines[dropped:], "\n")
+	return dropped
 }
 
 // parseFileEditNote extracts a human-readable annotation from a successful
