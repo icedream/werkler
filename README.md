@@ -23,9 +23,9 @@ writing and reviewing code, designing software, drafting tickets, and technical 
 ```sh
 git clone https://github.com/icedream/werkler.git
 cd werkler
- go build -o werkler ./cmd/werkler
- chmod +x werkler
- sudo mv werkler /usr/local/bin/
+go build -o werkler ./cmd/werkler
+chmod +x werkler
+sudo mv werkler /usr/local/bin/
 ```
 
 ## 🛠️ Configuration
