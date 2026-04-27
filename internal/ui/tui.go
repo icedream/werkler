@@ -4191,15 +4191,22 @@ func extractLastTurns(messages []ai.Message, n int) []ai.Message {
 func (m *Model) applyCompaction(summary string) []tea.Cmd {
 	oldMessages := m.messages
 
-	// Build the new history: original system + summary system + last 2 turns.
+	// Build the new history: single system message (original + summary appended)
+	// plus the last 2 complete user turns. Merging into one system message ensures
+	// compatibility with providers (e.g. GitHub Copilot) that reject multiple
+	// role:"system" messages in a single request.
 	newMessages := make([]ai.Message, 0, 8)
+	summaryBlock := "\n\n## Summary of previous conversation\n\n" + summary
 	if len(oldMessages) > 0 && oldMessages[0].Role == "system" {
-		newMessages = append(newMessages, oldMessages[0]) // original system prompt
+		systemMsg := oldMessages[0]
+		systemMsg.Content += summaryBlock
+		newMessages = append(newMessages, systemMsg)
+	} else {
+		newMessages = append(newMessages, ai.Message{
+			Role:    "system",
+			Content: "## Summary of previous conversation\n\n" + summary,
+		})
 	}
-	newMessages = append(newMessages, ai.Message{
-		Role:    "system",
-		Content: "## Summary of previous conversation\n\n" + summary,
-	})
 	newMessages = append(newMessages, extractLastTurns(oldMessages, 2)...)
 	m.messages = newMessages
 
