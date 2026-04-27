@@ -122,6 +122,7 @@ type Manager struct {
 	skills        []skills.Skill
 	todoStore     *todostore.Store
 	memoryStore   *memorystore.MemoryStore
+	taskTitle     func(string) // optional; called when the AI sets a task title via task_start
 	activeCallID  atomic.Value // stores string; set/cleared by doCallTool goroutine
 }
 
@@ -198,6 +199,10 @@ func (m *Manager) SetPathApprover(pa PathApprover) {
 // user input interactively. When nil (the default), ask_user returns a static
 // "not available in non-interactive mode" message.
 func (m *Manager) SetUserAsker(fn UserAsker) { m.userAsker = fn }
+
+// SetTaskTitleNotify registers a callback invoked whenever the AI calls
+// task_start to report what it is currently working on. Pass nil to disable.
+func (m *Manager) SetTaskTitleNotify(fn func(string)) { m.taskTitle = fn }
 
 // SetReviewer provides an optional secondary AI model for rubber duck reviews.
 // Calling this rebuilds the built-in tool list to include rubber_duck_review
@@ -859,6 +864,29 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 		}
 	}
 
+	// task_start and task_complete are always registered.
+	builtins = append(builtins, builtin{
+		def: ai.ToolDefinition{
+			Name: "task_start",
+			Description: `Set the title of the task you are currently working on.
+Call this whenever you begin a new sub-task or phase of work so the user can see
+what you are doing in the status bar. You can call it multiple times to update
+the title as work progresses. The title should be a short, human-readable phrase
+such as "Implementing OAuth callback" or "Writing tests for parser".
+Do NOT call this for every small step — only when starting a meaningful new phase.`,
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"title": map[string]any{
+						"type":        "string",
+						"description": "Short description of the current task or phase",
+					},
+				},
+				"required": []string{"title"},
+			},
+		},
+		handle: m.handleTaskStart,
+	})
 	// task_complete is always registered — autopilot and manual use both benefit.
 	builtins = append(builtins, builtin{
 		def: ai.ToolDefinition{
@@ -1527,6 +1555,14 @@ func (m *Manager) handleTodoList(_ context.Context, _ map[string]any) (string, e
 		}
 	}
 	return strings.TrimRight(sb.String(), "\n"), nil
+}
+
+func (m *Manager) handleTaskStart(_ context.Context, args map[string]any) (string, error) {
+	title := stringArg(args, "title")
+	if m.taskTitle != nil {
+		m.taskTitle(title)
+	}
+	return "ok", nil
 }
 
 func (m *Manager) handleTaskComplete(_ context.Context, args map[string]any) (string, error) {

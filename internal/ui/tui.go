@@ -303,6 +303,9 @@ type taskCompleteMsg struct {
 	summary string
 }
 
+// taskTitleMsg is sent when the AI calls task_start to name its current work.
+type taskTitleMsg struct{ title string }
+
 // modelItem implements list.Item for a model picker entry.
 type modelItem struct{ ai.ModelItem }
 
@@ -980,6 +983,11 @@ type Model struct {
 	autopilotCycle  int  // cycles completed since autopilot started
 	autopilotMax    int  // configured cap (0 → autopilotDefaultMax)
 
+	// currentTaskTitle is set by the AI via task_start and shown in the status
+	// bar in place of the generic "Thinking…"/"Streaming…" text.
+	// Cleared when the AI returns to idle or calls task_complete.
+	currentTaskTitle string
+
 	// showReasoning controls whether reasoning/thinking items are displayed.
 	// Toggled by /reasoning. Defaults to true.
 	showReasoning bool
@@ -1360,7 +1368,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if m.pendingCallAfterPaths != nil {
 							call := *m.pendingCallAfterPaths
 							m.pendingCallAfterPaths = nil
-							if idx, ok := m.toolCallIdx[call.ID]; ok {
+							if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 								m.items[idx].toolStatus = toolStatusDenied
 							}
 							m.messages = append(m.messages, ai.Message{
@@ -1410,7 +1418,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch m.pendingApprovalChoice {
 					case "y":
 						call := *m.currentCall
-						if idx, ok := m.toolCallIdx[call.ID]; ok {
+						if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 							m.items[idx].toolStatus = toolStatusRunning
 						}
 						m.callingToolName = call.Name
@@ -1422,7 +1430,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case "a":
 						call := *m.currentCall
 						m.session.ApproveForSession(call.Name)
-						if idx, ok := m.toolCallIdx[call.ID]; ok {
+						if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 							m.items[idx].toolStatus = toolStatusRunning
 						}
 						m.callingToolName = call.Name
@@ -1440,7 +1448,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								content: "Failed to save approval: " + err.Error(),
 							})
 						}
-						if idx, ok := m.toolCallIdx[call.ID]; ok {
+						if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 							m.items[idx].toolStatus = toolStatusRunning
 						}
 						m.callingToolName = call.Name
@@ -1451,7 +1459,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, doCallTool(m.newOpCtx(), m.toolMgr, m.session, call))
 					case "n":
 						call := *m.currentCall
-						if idx, ok := m.toolCallIdx[call.ID]; ok {
+						if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 							m.items[idx].toolStatus = toolStatusDenied
 						}
 						m.messages = append(m.messages, ai.Message{
@@ -2177,6 +2185,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Content:    "Task complete: " + msg.summary,
 		})
 		m.autopilotDisable()
+		m.currentTaskTitle = "" // clear task title on completion
 		m.items = append(m.items, displayItem{
 			kind:    itemInfo,
 			content: "✓ Task complete: " + msg.summary,
@@ -2189,6 +2198,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, doSaveSession(m.sessionStore, snap))
 		}
 		cmds = append(cmds, m.processQueueOrIdle())
+
+	case taskTitleMsg:
+		m.currentTaskTitle = msg.title
+		needRebuild = true
 
 	case compactDoneMsg:
 		if msg.err != nil {
@@ -2636,14 +2649,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				for _, tc := range chunk.Msg.ToolCalls {
 					debugLog("streamChunk: tool call id=%q name=%q", tc.ID, tc.Name)
-					m.toolCallIdx[tc.ID] = len(m.items)
-					m.items = append(m.items, displayItem{
-						kind:       itemToolCall,
-						toolName:   tc.Name,
-						toolArgs:   toolCallDisplayArgs(tc.Name, tc.Arguments),
-						toolNote:   toolCallIntent(tc.Name, tc.Arguments),
-						toolStatus: toolStatusPending,
-					})
+					// task_start is silent — no badge in the conversation view.
+					if tc.Name == "task_start" {
+						m.toolCallIdx[tc.ID] = -1
+					} else {
+						m.toolCallIdx[tc.ID] = len(m.items)
+						m.items = append(m.items, displayItem{
+							kind:       itemToolCall,
+							toolName:   tc.Name,
+							toolArgs:   toolCallDisplayArgs(tc.Name, tc.Arguments),
+							toolNote:   toolCallIntent(tc.Name, tc.Arguments),
+							toolStatus: toolStatusPending,
+						})
+					}
 				}
 				m.pendingCalls = append(m.pendingCalls, chunk.Msg.ToolCalls...)
 				nextCmd := m.processNextCall()
@@ -2702,7 +2720,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// User-initiated cancellation: add synthetic results so the
 				// assistant tool_calls message has matching tool results, then
 				// go idle without triggering a new stream.
-				if idx, ok := m.toolCallIdx[msg.callID]; ok {
+				if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
 					m.items[idx].toolStatus = toolStatusDenied
 				}
 				m.messages = append(m.messages, ai.Message{
@@ -2711,7 +2729,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Content:    "(cancelled by user)",
 				})
 				for _, pc := range m.pendingCalls {
-					if idx, ok := m.toolCallIdx[pc.ID]; ok {
+					if idx, ok := m.toolCallIdx[pc.ID]; ok && idx >= 0 {
 						m.items[idx].toolStatus = toolStatusDenied
 					}
 					m.messages = append(m.messages, ai.Message{
@@ -2733,7 +2751,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Tool execution error: add the error as a tool result so the AI
 				// can see it and decide how to recover. Mark remaining calls as
 				// not-executed and let the AI respond via a new stream.
-				if idx, ok := m.toolCallIdx[msg.callID]; ok {
+				if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
 					m.items[idx].toolStatus = toolStatusFailed
 					if msg.toolName == "file_edit" {
 						m.items[idx].toolNote = fileEditErrorNote(msg.err)
@@ -2750,7 +2768,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						ToolCallID: pc.ID,
 						Content:    "(not executed — previous call failed)",
 					})
-					if idx, ok := m.toolCallIdx[pc.ID]; ok {
+					if idx, ok := m.toolCallIdx[pc.ID]; ok && idx >= 0 {
 						m.items[idx].toolStatus = toolStatusFailed
 					}
 				}
@@ -2763,7 +2781,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			debugLog("toolResult: ok tool=%q result=%q", msg.toolName, msg.result[:min(len(msg.result), 80)])
-			if idx, ok := m.toolCallIdx[msg.callID]; ok {
+			if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
 				m.items[idx].toolStatus = toolStatusDone
 				switch msg.toolName {
 				case "file_edit":
@@ -2981,7 +2999,11 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
 		}
-		return statusStyle.Render(m.spinner.View()+" Thinking…") + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
+		label := "Thinking…"
+		if m.currentTaskTitle != "" {
+			label = m.currentTaskTitle
+		}
+		return statusStyle.Render(m.spinner.View()+" "+label) + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
 	case stateConnectingMCP:
 		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + autopilotIndicator + allowAllIndicator, ""
 	case stateConnectingOAuth:
@@ -2993,7 +3015,11 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
 		}
-		return statusStyle.Render(m.spinner.View()+" Streaming…") + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
+		label := "Streaming…"
+		if m.currentTaskTitle != "" {
+			label = m.currentTaskTitle
+		}
+		return statusStyle.Render(m.spinner.View()+" "+label) + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
 	case stateCallingTool:
 		name := renderToolName(m.callingToolName)
 		cancelHint := ""
@@ -3431,7 +3457,7 @@ func (m *Model) processNextPath() tea.Cmd {
 	if m.pendingCallAfterPaths != nil {
 		call := *m.pendingCallAfterPaths
 		m.pendingCallAfterPaths = nil
-		if idx, ok := m.toolCallIdx[call.ID]; ok {
+		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
 		m.callingToolName = call.Name
@@ -3630,6 +3656,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 	m.state = stateIdle
 	m.cancelOp = nil
 	m.cancelPending = false
+	m.currentTaskTitle = "" // clear when the AI is done with its turn
 	return m.input.Focus()
 }
 
@@ -3662,7 +3689,7 @@ func (m *Model) processNextCall() tea.Cmd {
 			summary = s
 		}
 		// Mark the tool call display item as done.
-		if idx, ok := m.toolCallIdx[call.ID]; ok {
+		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusDone
 		}
 		// Synthesise terminal tool results for any remaining sibling calls so
@@ -3679,12 +3706,13 @@ func (m *Model) processNextCall() tea.Cmd {
 		return func() tea.Msg { return taskCompleteMsg{callID: call.ID, summary: summary} }
 	}
 
-	// ask_user, rubber_duck_review, use_skill, todo_*, memory_*, and connect_server
+	// ask_user, rubber_duck_review, use_skill, task_start, todo_*, memory_*, and connect_server
 	// are always dispatched immediately without an approval dialog.
 	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "rubber_duck_review" ||
-		call.Name == "use_skill" || call.Name == "todo_add" || call.Name == "todo_update" || call.Name == "todo_list" ||
+		call.Name == "use_skill" || call.Name == "task_start" ||
+		call.Name == "todo_add" || call.Name == "todo_update" || call.Name == "todo_list" ||
 		call.Name == "memory_read" || call.Name == "memory_write" || call.Name == "connect_server" {
-		if idx, ok := m.toolCallIdx[call.ID]; ok {
+		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
 		m.callingToolName = call.Name
@@ -4770,6 +4798,9 @@ func RunTUI(
 			case <-ctx.Done():
 				return "", ctx.Err()
 			}
+		})
+		toolMgr.SetTaskTitleNotify(func(title string) {
+			sendFn(taskTitleMsg{title: title})
 		})
 	}
 
