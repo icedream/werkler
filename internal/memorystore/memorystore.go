@@ -18,11 +18,12 @@
 package memorystore
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -133,7 +134,7 @@ func (s *MemoryStore) List() []NamedMemory {
 	for name, content := range s.cached {
 		result = append(result, NamedMemory{Name: name, Size: len(content)})
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	slices.SortFunc(result, func(a, b NamedMemory) int { return cmp.Compare(a.Name, b.Name) })
 	return result
 }
 
@@ -146,7 +147,7 @@ func (s *MemoryStore) CachedAll() []NamedContent {
 	for name, content := range s.cached {
 		result = append(result, NamedContent{Name: name, Content: content})
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	slices.SortFunc(result, func(a, b NamedContent) int { return cmp.Compare(a.Name, b.Name) })
 	return result
 }
 
@@ -532,7 +533,7 @@ func readDirMemories(dir string) ([]NamedContent, error) {
 		}
 		result = append(result, NamedContent{Name: name, Content: strings.TrimSpace(string(data))})
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	slices.SortFunc(result, func(a, b NamedContent) int { return cmp.Compare(a.Name, b.Name) })
 	return result, nil
 }
 

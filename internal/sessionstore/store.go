@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -160,8 +160,14 @@ func (s *Store) List() ([]Session, error) {
 		}
 		sessions = append(sessions, *sess)
 	}
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	slices.SortFunc(sessions, func(a, b Session) int {
+		if a.UpdatedAt.After(b.UpdatedAt) {
+			return -1
+		}
+		if b.UpdatedAt.After(a.UpdatedAt) {
+			return 1
+		}
+		return 0
 	})
 	return sessions, nil
 }

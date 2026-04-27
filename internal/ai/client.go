@@ -2,6 +2,7 @@ package ai
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,7 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -247,7 +248,7 @@ func (c *Client) ListModels(ctx context.Context) ([]ModelItem, error) {
 			items = append(items, ModelItem{Model: m.ID})
 		}
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Model < items[j].Model })
+	slices.SortFunc(items, func(a, b ModelItem) int { return cmp.Compare(a.Model, b.Model) })
 	return items, nil
 }
 
@@ -274,7 +275,7 @@ func buildFinalMessage(content, reasoning string, toolAccum map[int]*accumTool) 
 	for idx := range toolAccum {
 		indexes = append(indexes, idx)
 	}
-	sort.Ints(indexes)
+	slices.Sort(indexes)
 
 	for _, idx := range indexes {
 		acc := toolAccum[idx]
