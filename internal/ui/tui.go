@@ -1363,6 +1363,9 @@ func (m *Model) newConversation() []ai.Message {
 	}
 	msgs := chat.NewConversation(extras...)
 	msgs[0].Content = chat.EnrichSystemPrompt(msgs[0].Content, m.modelInfo)
+	if m.sessionCWD != "" {
+		msgs[0].Content = chat.EnrichSystemPromptCWD(msgs[0].Content, m.sessionCWD)
+	}
 	return msgs
 }
 
