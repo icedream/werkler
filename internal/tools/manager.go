@@ -799,36 +799,73 @@ Only rephrase/re-id if this is genuinely a distinct task.`,
 		builtins = append(builtins,
 			builtin{
 				def: ai.ToolDefinition{
-					Name: "memory_read",
-					Description: `Read the project memory for the current directory.
-Returns notes saved by memory_write in previous sessions about this project.
-The current memory is also automatically injected into your system prompt at session start,
-so you rarely need to call this — only if you want to re-read it mid-session.`,
+					Name:        "memory_list",
+					Description: `List all named project memory files for the current directory, with their sizes.`,
 					InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+				},
+				handle: m.handleMemoryList,
+			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name: "memory_read",
+					Description: `Read a named project memory file.
+All memories are injected into your system prompt at session start; call this
+only to re-read a specific memory mid-session (e.g. one that was too large to inject).`,
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"name": map[string]any{
+								"type":        "string",
+								"description": `Memory name (slug: lowercase letters, digits, hyphens; e.g. "general", "api-notes")`,
+							},
+						},
+						"required": []string{"name"},
+					},
 				},
 				handle: m.handleMemoryRead,
 			},
 			builtin{
 				def: ai.ToolDefinition{
 					Name: "memory_write",
-					Description: `Write (replace) the project memory for the current directory.
-IMPORTANT: This tool REPLACES the entire memory file. You must include the existing notes
-plus any new additions — partial writes will erase earlier content.
+					Description: `Write (replace) a named project memory file.
+Use named files to keep different concerns separate (e.g. "general", "conventions", "architecture").
+Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytesPerFile) + ` bytes per file; up to ` + fmt.Sprintf("%d", memorystore.MaxFiles) + ` files per project.
 Use this to persist project knowledge across sessions: conventions, architecture decisions,
-known issues, preferred patterns, important file locations.
-Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` bytes total.`,
+known issues, preferred patterns, important file locations.`,
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
+							"name": map[string]any{
+								"type":        "string",
+								"description": `Memory name (slug: lowercase letters, digits, hyphens; e.g. "general", "api-notes")`,
+							},
 							"content": map[string]any{
 								"type":        "string",
-								"description": "Full markdown content to store as the project memory (replaces previous content)",
+								"description": "Markdown content to store (replaces the named file's previous content)",
 							},
 						},
-						"required": []string{"content"},
+						"required": []string{"name", "content"},
 					},
 				},
 				handle: m.handleMemoryWrite,
+			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name: "memory_delete",
+					Description: `Delete a named project memory file.
+Use only when the memory is fully obsolete. This cannot be undone without rewriting from scratch.`,
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"name": map[string]any{
+								"type":        "string",
+								"description": "Name of the memory file to delete",
+							},
+						},
+						"required": []string{"name"},
+					},
+				},
+				handle: m.handleMemoryDelete,
 			},
 		)
 	}
@@ -1624,21 +1661,52 @@ func formatTimeResult(now time.Time, loc *time.Location) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-func (m *Manager) handleMemoryRead(_ context.Context, _ map[string]any) (string, error) {
-	content, err := m.memoryStore.Read()
+func (m *Manager) handleMemoryList(_ context.Context, _ map[string]any) (string, error) {
+	entries := m.memoryStore.List()
+	if len(entries) == 0 {
+		return "(no project memories stored yet)", nil
+	}
+	var sb strings.Builder
+	for _, e := range entries {
+		sb.WriteString(fmt.Sprintf("- %s (%d bytes)\n", e.Name, e.Size))
+	}
+	return strings.TrimSpace(sb.String()), nil
+}
+
+func (m *Manager) handleMemoryRead(_ context.Context, args map[string]any) (string, error) {
+	name := stringArg(args, "name")
+	if name == "" {
+		return "error: name is required", nil
+	}
+	content, err := m.memoryStore.ReadNamed(name)
 	if err != nil {
 		return "error reading project memory: " + err.Error(), nil
 	}
 	if content == "" {
-		return "(no project memory stored yet)", nil
+		return fmt.Sprintf("(no memory named %q exists)", name), nil
 	}
 	return content, nil
 }
 
 func (m *Manager) handleMemoryWrite(_ context.Context, args map[string]any) (string, error) {
+	name := stringArg(args, "name")
 	content := stringArg(args, "content")
-	if err := m.memoryStore.Write(content); err != nil {
+	if name == "" {
+		return "error: name is required", nil
+	}
+	if err := m.memoryStore.WriteNamed(name, content); err != nil {
 		return "error writing project memory: " + err.Error(), nil
 	}
-	return fmt.Sprintf("project memory saved (%d bytes)", len(content)), nil
+	return fmt.Sprintf("memory %q saved (%d bytes)", name, len(strings.TrimSpace(content))), nil
+}
+
+func (m *Manager) handleMemoryDelete(_ context.Context, args map[string]any) (string, error) {
+	name := stringArg(args, "name")
+	if name == "" {
+		return "error: name is required", nil
+	}
+	if err := m.memoryStore.DeleteNamed(name); err != nil {
+		return "error deleting project memory: " + err.Error(), nil
+	}
+	return fmt.Sprintf("memory %q deleted", name), nil
 }

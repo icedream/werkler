@@ -108,7 +108,7 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 
 			if !session.IsApproved(tc.Name) && tc.Name != "ask_user" && tc.Name != "rubber_duck_review" &&
 				tc.Name != "todo_add" && tc.Name != "todo_update" && tc.Name != "todo_list" &&
-				tc.Name != "memory_read" && tc.Name != "memory_write" &&
+				tc.Name != "memory_list" && tc.Name != "memory_read" && tc.Name != "memory_write" &&
 				tc.Name != "get_time" && tc.Name != "calculate" && tc.Name != "sleep" {
 				if opts.Progress != nil {
 					_, _ = fmt.Fprintf(opts.Progress, "[tool denied (not pre-approved in non-interactive mode): %s]\n", tc.Name)

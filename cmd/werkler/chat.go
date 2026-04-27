@@ -315,7 +315,7 @@ func runPromptMode(ctx context.Context, aiClient ai.Completer, session *chat.Ses
 		AutopilotMaxCycles: resolveAutopilotMax(chatAutopilotMaxCyc, cfg.Autopilot.MaxCycles),
 	}
 	if memStore != nil {
-		opts.InitialMemory, _ = memStore.Read()
+		opts.InitialMemory = memStore.BuildInjectionSection()
 	}
 	if chatVerbose {
 		opts.Progress = os.Stderr
