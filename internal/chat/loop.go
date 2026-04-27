@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/icedream/werkler/internal/ai"
 )
@@ -32,6 +33,8 @@ type PromptOptions struct {
 // unapproved tool calls receive a "not approved" result so the AI can adapt.
 func RunPrompt(ctx context.Context, client ai.Completer, session *Session, prompt string, opts PromptOptions) (string, error) {
 	var extraSections []string
+	extraSections = append(extraSections,
+		"Current date/time: "+time.Now().Format("2006-01-02 15:04:05 MST (Monday)"))
 	if opts.InitialMemory != "" {
 		extraSections = append(extraSections,
 			"## Project memory\n> These are reference notes from previous sessions. "+
@@ -105,7 +108,8 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 
 			if !session.IsApproved(tc.Name) && tc.Name != "ask_user" && tc.Name != "rubber_duck_review" &&
 				tc.Name != "todo_add" && tc.Name != "todo_update" && tc.Name != "todo_list" &&
-				tc.Name != "memory_read" && tc.Name != "memory_write" {
+				tc.Name != "memory_read" && tc.Name != "memory_write" &&
+				tc.Name != "get_time" && tc.Name != "calculate" && tc.Name != "sleep" {
 				if opts.Progress != nil {
 					_, _ = fmt.Fprintf(opts.Progress, "[tool denied (not pre-approved in non-interactive mode): %s]\n", tc.Name)
 				}

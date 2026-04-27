@@ -3567,18 +3567,17 @@ func sanitizeInlineText(s string) string {
 }
 
 func (m *Model) buildStreamMessages(base []ai.Message) []ai.Message {
+	if len(base) == 0 {
+		return base
+	}
 	var configuredServers []config.MCPServerConfig
 	if m.mcpManager != nil {
 		configuredServers = m.mcpManager.ConfiguredServers()
 	}
-	needsCopy := m.autopilot ||
-		(m.memoryStore != nil && m.memoryStore.Cached() != "") ||
-		len(configuredServers) > 0
-	if !needsCopy || len(base) == 0 {
-		return base
-	}
+	// Always copy: current time is injected on every request so it stays fresh.
 	msgs := make([]ai.Message, len(base))
 	copy(msgs, base)
+	msgs[0].Content += "\n\nCurrent date/time: " + time.Now().Format("2006-01-02 15:04:05 MST (Monday)")
 	if m.memoryStore != nil {
 		if mem := m.memoryStore.Cached(); mem != "" {
 			msgs[0].Content = msgs[0].Content + "\n\n## Project memory\n" +
@@ -3758,7 +3757,8 @@ func (m *Model) processNextCall() tea.Cmd {
 	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "rubber_duck_review" ||
 		call.Name == "use_skill" || call.Name == "task_start" ||
 		call.Name == "todo_add" || call.Name == "todo_update" || call.Name == "todo_list" ||
-		call.Name == "memory_read" || call.Name == "memory_write" || call.Name == "connect_server" {
+		call.Name == "memory_read" || call.Name == "memory_write" || call.Name == "connect_server" ||
+		call.Name == "get_time" || call.Name == "calculate" || call.Name == "sleep" {
 		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
@@ -4446,6 +4446,12 @@ func toolFriendlyName(name string) string {
 		return "Read memory"
 	case "memory_write":
 		return "Write memory"
+	case "get_time":
+		return "Get time"
+	case "calculate":
+		return "Calculate"
+	case "sleep":
+		return "Sleep"
 	}
 	// MCP tool: auto-format the base name.
 	return snakeCaseToTitle(toolBaseName(name))

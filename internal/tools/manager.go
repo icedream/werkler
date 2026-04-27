@@ -864,6 +864,28 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 		}
 	}
 
+	// get_time, calculate, and sleep are always registered.
+	builtins = append(builtins,
+		builtin{
+			def: ai.ToolDefinition{
+				Name: "get_time",
+				Description: `Return the current date and time. Use this whenever you need to know the current time,
+calculate time differences, or reason about schedules and deadlines.
+An optional IANA timezone name (e.g. "America/New_York", "Europe/Berlin", "UTC") can be supplied;
+when omitted the system local time is returned alongside UTC.`,
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"timezone": map[string]any{
+							"type":        "string",
+							"description": "IANA timezone name (e.g. \"America/New_York\"). Omit for local + UTC.",
+						},
+					},
+				},
+			},
+			handle: m.handleGetTime,
+		},
+	)
 	// task_start and task_complete are always registered.
 	builtins = append(builtins, builtin{
 		def: ai.ToolDefinition{
@@ -1571,6 +1593,35 @@ func (m *Manager) handleTaskComplete(_ context.Context, args map[string]any) (st
 		summary = "Task complete."
 	}
 	return summary, nil
+}
+
+func (m *Manager) handleGetTime(_ context.Context, args map[string]any) (string, error) {
+	now := time.Now()
+	loc := time.Local
+
+	if tz := stringArg(args, "timezone"); tz != "" {
+		var err error
+		loc, err = time.LoadLocation(tz)
+		if err != nil {
+			return fmt.Sprintf("Unknown timezone %q. Returning local time.\n\n%s",
+				tz, formatTimeResult(now, time.Local)), nil
+		}
+	}
+
+	return formatTimeResult(now, loc), nil
+}
+
+// formatTimeResult returns a multi-line time report for the given instant and location.
+func formatTimeResult(now time.Time, loc *time.Location) string {
+	local := now.In(loc)
+	utc := now.UTC()
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Local (%s): %s\n", local.Location(), local.Format("2006-01-02 15:04:05 MST (Monday)"))
+	if loc != time.UTC {
+		fmt.Fprintf(&sb, "UTC:           %s\n", utc.Format("2006-01-02 15:04:05"))
+	}
+	fmt.Fprintf(&sb, "Unix:          %d\n", now.Unix())
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 func (m *Manager) handleMemoryRead(_ context.Context, _ map[string]any) (string, error) {
