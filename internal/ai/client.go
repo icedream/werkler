@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -27,6 +28,20 @@ type Client struct {
 func New(endpoint, apiKey, model string) *Client {
 	cfg := openai.DefaultConfig(apiKey)
 	cfg.BaseURL = endpoint
+	return &Client{
+		inner:    *openai.NewClientWithConfig(cfg),
+		model:    model,
+		endpoint: endpoint,
+	}
+}
+
+// NewWithTransport creates a Client that sends requests through the given
+// transport. If transport is nil, http.DefaultTransport is used. The API key
+// is included in the Authorization header as usual.
+func NewWithTransport(endpoint, apiKey, model string, transport http.RoundTripper) *Client {
+	cfg := openai.DefaultConfig(apiKey)
+	cfg.BaseURL = endpoint
+	cfg.HTTPClient = &http.Client{Transport: transport}
 	return &Client{
 		inner:    *openai.NewClientWithConfig(cfg),
 		model:    model,
@@ -281,6 +296,12 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 				c.disableStreamUsage.Store(true)
 				req.StreamOptions = nil
 				stream, err = c.inner.CreateChatCompletionStream(ctx, req)
+			}
+			if err != nil && isHTTPStatusError(err, http.StatusBadRequest) {
+				// Dump the request body to stderr so the user can diagnose the rejection.
+				if raw, merr := json.Marshal(req); merr == nil {
+					_, _ = fmt.Fprintf(os.Stderr, "\n[werkler debug] 400 Bad Request — request body:\n%s\n", raw)
+				}
 			}
 		}
 		if err != nil {

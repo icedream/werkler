@@ -199,7 +199,12 @@ func resolveAutopilotMax(flagVal, cfgVal int) int {
 func buildProviderClient(p config.ProviderConfig) (*ai.Client, error) {
 	switch p.Type {
 	case config.ProviderTypeOpenAI, "": // empty type defaults to openai
-		return ai.New(p.Endpoint, p.APIKey, p.Model), nil
+		// Apply the reasoning alias transport so that Ollama-hosted thinking
+		// models (which emit delta.reasoning rather than delta.reasoning_content)
+		// are displayed correctly. The transform is a no-op for providers that
+		// already use reasoning_content or don't emit thinking tokens at all.
+		return ai.NewWithTransport(p.Endpoint, p.APIKey, p.Model,
+			ai.NewReasoningAliasTransport(nil)), nil
 	case config.ProviderTypeCopilot:
 		tok, loadErr := copilot.LoadGitHubToken()
 		if loadErr != nil {
