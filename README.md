@@ -8,7 +8,7 @@ writing and reviewing code, designing software, drafting tickets, and technical 
 ## 🚀 Features
 
 - **Multi-provider AI support**: Use OpenAI, GitHub Copilot, and other OpenAI-compatible APIs simultaneously
-- **Model Context Protocol (MCP) integration**: Connect to external tools and APIs
+- **Model Context Protocol (MCP) integration**: Connect to external tools and APIs with proper OAuth + DCR support
 - **Interactive TUI**: Full-featured terminal UI with model switching, session management, and more
 - **Session persistence**: Save and resume chat sessions
 - **Tool approval system**: Control which AI actions require confirmation
