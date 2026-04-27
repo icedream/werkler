@@ -9,6 +9,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -783,6 +785,34 @@ up, down, left, right, ctrl+a through ctrl+z, f1-f12.`,
 				},
 			},
 			handle: m.handleProcessStop,
+		},
+		{
+			def: ai.ToolDefinition{
+				Name: "run_command",
+				Description: `Run a command synchronously and return its output in a single call. No polling required.
+Use this for one-shot non-interactive commands (builds, scripts, grep, CLI tools, etc.).
+Do NOT use for interactive programs, programs that require a TTY, or long-running background processes -- use process_start for those.
+
+IMPORTANT: "command" is the executable only; "args" are the arguments WITHOUT the command name.
+Example -- to run "git status --short": command="git", args=["status", "--short"].
+Do NOT put "git" (or any command name) in args.
+
+To use shell operators (pipes, redirects, globs, &&, etc.), set shell=true and put the full shell string in "command". Do NOT provide args when shell=true.`,
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"command":         map[string]any{"type": "string", "description": "Absolute path or PATH-resolvable command name. When shell=true, this is the full shell command string (e.g. \"rg 'TODO' src/ | wc -l\")."},
+						"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command arguments only -- do NOT include the command name. Must not be provided when shell=true."},
+						"shell":           map[string]any{"type": "boolean", "description": "If true, run command via bash -c. Enables pipes, redirects, globs, etc."},
+						"cwd":             map[string]any{"type": "string", "description": "Working directory; empty = inherit werkler's cwd"},
+						"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Extra environment variables merged on top of the current environment"},
+						"timeout_seconds": map[string]any{"type": "number", "description": "Seconds to wait before killing the process (default 30, max 600)"},
+						"title":           map[string]any{"type": "string", "description": "REQUIRED. Short human-readable phrase describing what is being run. Shown in the approval dialog."},
+					},
+					"required": []string{"command", "title"},
+				},
+			},
+			handle: m.handleRunCommand,
 		},
 		// --- File tools ---
 		{
@@ -1592,6 +1622,237 @@ func (m *Manager) handleProcessStop(_ context.Context, args map[string]any) (str
 	return jsonResult(map[string]any{
 		"exit_code": exitCode,
 		"output":    output,
+	}), nil
+}
+
+// runCommandOutputCap is the maximum bytes captured per stream (stdout / stderr / combined).
+const runCommandOutputCap = 512 * 1024
+
+// runCommandMaxTimeout is the maximum allowed value for timeout_seconds.
+const runCommandMaxTimeout = 600.0
+
+// capBuffer is a size-limited buffer. Writes beyond the cap are silently discarded;
+// the Truncated field records the total number of bytes dropped.
+type capBuffer struct {
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	cap       int
+	written   int
+	Truncated int
+}
+
+func newCapBuffer(cap int) *capBuffer { return &capBuffer{cap: cap} }
+
+func (b *capBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := b.cap - b.written
+	if remaining <= 0 {
+		b.Truncated += len(p)
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		b.buf.Write(p[:remaining])
+		b.written += remaining
+		b.Truncated += len(p) - remaining
+		return len(p), nil
+	}
+	b.buf.Write(p)
+	b.written += len(p)
+	return len(p), nil
+}
+
+// String returns the captured bytes as a UTF-8 string, appending a truncation
+// notice if any bytes were dropped.
+func (b *capBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	raw := b.buf.Bytes()
+	// Snap to last complete UTF-8 rune boundary.
+	for len(raw) > 0 && !utf8.Valid(raw) {
+		raw = raw[:len(raw)-1]
+	}
+	s := string(raw)
+	if b.Truncated > 0 {
+		s += fmt.Sprintf("\n[truncated: %d bytes omitted]", b.Truncated)
+	}
+	return s
+}
+
+// combinedWriter multiplexes writes to both a stream-specific buffer and a
+// combined buffer. The combined buffer is protected by a separate mutex so
+// writes from concurrent goroutines are serialised globally.
+type combinedWriter struct {
+	stream   *capBuffer
+	combined *capBuffer
+	mu       *sync.Mutex // shared mutex that serialises combined writes
+}
+
+func (w *combinedWriter) Write(p []byte) (int, error) {
+	_, _ = w.stream.Write(p)
+	w.mu.Lock()
+	_, _ = w.combined.Write(p)
+	w.mu.Unlock()
+	return len(p), nil
+}
+
+func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (string, error) {
+	command := stringArg(args, "command")
+	if command == "" {
+		return jsonResult(map[string]any{"error": "run_command: command is required"}), nil
+	}
+	title := stringArg(args, "title")
+	if title == "" {
+		title = command
+		args["title"] = title
+	}
+
+	useShell := boolArg(args, "shell")
+	cmdArgs := stringSliceArg(args, "args")
+	if useShell && len(cmdArgs) > 0 {
+		return jsonResult(map[string]any{"error": "run_command: args must not be provided when shell is true"}), nil
+	}
+
+	cwd := stringArg(args, "cwd")
+	if cwd != "" {
+		info, err := os.Stat(cwd)
+		if err != nil {
+			return jsonResult(map[string]any{"error": fmt.Sprintf("run_command: cwd does not exist: %s", cwd)}), nil
+		}
+		if !info.IsDir() {
+			return jsonResult(map[string]any{"error": fmt.Sprintf("run_command: cwd is not a directory: %s", cwd)}), nil
+		}
+	}
+
+	timeoutSecs := float64Arg(args, "timeout_seconds", 30)
+	if timeoutSecs <= 0 {
+		timeoutSecs = 30
+	}
+	if timeoutSecs > runCommandMaxTimeout {
+		timeoutSecs = runCommandMaxTimeout
+	}
+
+	// Build env: start from current environment, apply overrides.
+	// A null JSON value for a key (which arrives as nil in map[string]any) means unset.
+	baseEnv := os.Environ()
+	var envOverrides map[string]any
+	if raw, ok := args["env"].(map[string]any); ok {
+		envOverrides = raw
+	}
+	var finalEnv []string
+	if len(envOverrides) > 0 {
+		// Build a map of key->value from os.Environ() then apply overrides.
+		envMap := make(map[string]string, len(baseEnv))
+		for _, kv := range baseEnv {
+			if idx := strings.IndexByte(kv, '='); idx >= 0 {
+				envMap[kv[:idx]] = kv[idx+1:]
+			}
+		}
+		for k, v := range envOverrides {
+			if v == nil {
+				delete(envMap, k)
+			} else if s, ok := v.(string); ok {
+				envMap[k] = s
+			}
+		}
+		finalEnv = make([]string, 0, len(envMap))
+		for k, v := range envMap {
+			finalEnv = append(finalEnv, k+"="+v)
+		}
+	} else {
+		finalEnv = baseEnv
+	}
+
+	// Build the exec.Cmd.
+	var cmd *exec.Cmd
+	if useShell {
+		cmd = exec.Command("bash", "-c", command)
+	} else {
+		cmd = exec.Command(command, cmdArgs...)
+	}
+	cmd.Env = finalEnv
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	// Attach stdin to /dev/null so blocking reads are immediately detected.
+	devNull, err := os.Open(os.DevNull)
+	if err == nil {
+		cmd.Stdin = devNull
+		defer func() { _ = devNull.Close() }()
+	}
+	// Spawn in a new process group so we can kill the whole group on timeout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	// Check path approval before executing.
+	effectiveCommand := command
+	if useShell {
+		effectiveCommand = "bash"
+	}
+	if unapproved := m.checkWritePaths(ctx, effectiveCommand, cmdArgs, cwd); len(unapproved) > 0 {
+		return "", &UnapprovedPathsError{Requests: unapproved}
+	}
+
+	// Set up output capture.
+	stdoutBuf := newCapBuffer(runCommandOutputCap)
+	stderrBuf := newCapBuffer(runCommandOutputCap)
+	combinedBuf := newCapBuffer(runCommandOutputCap)
+	combinedMu := &sync.Mutex{}
+
+	cmd.Stdout = &combinedWriter{stream: stdoutBuf, combined: combinedBuf, mu: combinedMu}
+	cmd.Stderr = &combinedWriter{stream: stderrBuf, combined: combinedBuf, mu: combinedMu}
+
+	if startErr := cmd.Start(); startErr != nil {
+		return jsonResult(map[string]any{"error": fmt.Sprintf("run_command: %s", startErr.Error())}), nil
+	}
+
+	// Wait for process in a goroutine so we can enforce the timeout.
+	type waitResult struct {
+		exitCode int
+	}
+	done := make(chan waitResult, 1)
+	go func() {
+		err := cmd.Wait()
+		code := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			} else {
+				code = -1
+			}
+		}
+		done <- waitResult{code}
+	}()
+
+	timeout := time.Duration(timeoutSecs * float64(time.Second))
+	timedOut := false
+	var exitCode int
+
+	select {
+	case result := <-done:
+		exitCode = result.exitCode
+	case <-time.After(timeout):
+		timedOut = true
+		// Kill the process group: SIGTERM first, then SIGKILL after 2s grace.
+		if cmd.Process != nil {
+			pgid := -cmd.Process.Pid // negative PID signals the whole process group
+			_ = syscall.Kill(pgid, syscall.SIGTERM)
+			select {
+			case result := <-done:
+				exitCode = result.exitCode
+			case <-time.After(2 * time.Second):
+				_ = syscall.Kill(pgid, syscall.SIGKILL)
+				result := <-done
+				exitCode = result.exitCode
+			}
+		}
+	}
+
+	return jsonResult(map[string]any{
+		"exit_code":       exitCode,
+		"stdout":          stdoutBuf.String(),
+		"stderr":          stderrBuf.String(),
+		"combined_output": combinedBuf.String(),
+		"timed_out":       timedOut,
 	}), nil
 }
 
