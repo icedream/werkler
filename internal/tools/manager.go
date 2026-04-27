@@ -851,10 +851,10 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 			builtins = append(builtins, builtin{
 				def: ai.ToolDefinition{
 					Name: "connect_server",
-					Description: "Connect to a configured MCP server by name. " +
-						"Only call this when the user's current task specifically requires tools from that server — " +
-						"do NOT connect servers proactively or before a concrete need arises. " +
-						"After connecting, the available tools from that server will be listed in the result.",
+					Description: "Connect to a configured MCP server to make its tools available. " +
+						"Call this immediately when the user's request requires tools from that server — " +
+						"do not ask for permission first and do not connect servers unrelated to the current task. " +
+						"After connecting, the server's tools will be listed in the result.",
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
