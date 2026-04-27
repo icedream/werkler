@@ -76,7 +76,9 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 					return msg.Content, fmt.Errorf("autopilot reached cycle cap of %d without calling task_complete", maxCycles)
 				}
 				// Ephemeral continuation — not appended to messages permanently.
-				step = 0
+				// Set step to -1 so the post-increment brings it back to 0,
+				// giving this autopilot cycle a full maxAgentSteps budget.
+				step = -1
 				messages = append(messages, ai.Message{Role: "user", Content: "Continue working."})
 				continue
 			}
