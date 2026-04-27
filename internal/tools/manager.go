@@ -841,12 +841,14 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 	}
 
 	if m.mcpMgr != nil {
-		// Build an enum of currently configured (lazy, not yet connected) server names.
 		configured := m.mcpMgr.ConfiguredServers()
 		if len(configured) > 0 {
-			names := make([]any, len(configured))
+			// Build a plain-text list of names for the description rather than an
+			// enum constraint — some models (e.g. devstral) misformat tool call JSON
+			// when the schema contains an enum, causing the call to be silently dropped.
+			nameList := make([]string, len(configured))
 			for i, srv := range configured {
-				names[i] = srv.Name
+				nameList[i] = srv.Name
 			}
 			builtins = append(builtins, builtin{
 				def: ai.ToolDefinition{
@@ -854,14 +856,14 @@ Keep entries concise. Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytes) + ` by
 					Description: "Connect to a configured MCP server to make its tools available. " +
 						"Call this immediately when the user's request requires tools from that server — " +
 						"do not ask for permission first and do not connect servers unrelated to the current task. " +
-						"After connecting, the server's tools will be listed in the result.",
+						"After connecting, the server's tools will be listed in the result. " +
+						"Available servers: " + strings.Join(nameList, ", ") + ".",
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"name": map[string]any{
 								"type":        "string",
-								"enum":        names,
-								"description": "Exact name of the server to connect (must match one of the configured servers)",
+								"description": "Name of the server to connect",
 							},
 						},
 						"required": []string{"name"},
