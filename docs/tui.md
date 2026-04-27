@@ -40,6 +40,10 @@ Type `/` to open autocomplete. Press `↑`/`↓` to navigate, `Enter` to select,
 | `/image <path-or-url>` | Load a local image file and attach it to your next message so the AI can see it                                                                        |
 | `/allow-all`           | Toggle allow-all mode — approves all tool calls and path access without prompting. A `⚠ allow-all ON` indicator appears in the status bar when active. |
 | `/reasoning`           | Toggle display of model reasoning/thinking content (on by default).                                                                                    |
+| `/agent [new\|<name>\|off]` | Create a new agent with the wizard (`/agent new`), activate a named agent (`/agent <name>`), or deactivate the current agent (`/agent off`). See [Agents](agents.md). |
+| `/expand [<handle>\|all]`   | Expand collapsed process output — show full output for a process handle, or `all` to expand every collapsed handle.                                    |
+| `/collapse [<handle>\|all]` | Collapse expanded process output to save screen space.                                                                                                 |
+| `/sidebar [wider\|narrower\|reset]` | Resize the todo sidebar.                                                                                                                    |
 
 ## Prompt queuing
 
