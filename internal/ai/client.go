@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -154,9 +155,10 @@ func NewWithHTTPClient(baseURL, model string, httpClient *http.Client, opts ...C
 	cfg.BaseURL = baseURL
 	cfg.HTTPClient = httpClient
 	c := &Client{
-		inner:    *openai.NewClientWithConfig(cfg),
-		model:    model,
-		endpoint: baseURL,
+		inner:       *openai.NewClientWithConfig(cfg),
+		model:       model,
+		endpoint:    baseURL,
+		probeClient: httpClient,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -298,9 +300,13 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 				stream, err = c.inner.CreateChatCompletionStream(ctx, req)
 			}
 			if err != nil && isHTTPStatusError(err, http.StatusBadRequest) {
-				// Dump the request body to stderr so the user can diagnose the rejection.
+				// Dump the request body to a temp file so the user can diagnose the rejection.
 				if raw, merr := json.Marshal(req); merr == nil {
-					_, _ = fmt.Fprintf(os.Stderr, "\n[werkler debug] 400 Bad Request — request body:\n%s\n", raw)
+					if f, ferr := os.CreateTemp("", "werkler-400-*.json"); ferr == nil {
+						_, _ = f.Write(raw)
+						_ = f.Close()
+						_, _ = fmt.Fprintf(os.Stderr, "\n[werkler debug] 400 Bad Request — request body written to: %s\n", f.Name())
+					}
 				}
 			}
 		}
@@ -436,6 +442,9 @@ func toOpenAIMessages(msgs []Message) []openai.ChatCompletionMessage {
 		}
 		for _, tc := range m.ToolCalls {
 			raw, _ := json.Marshal(tc.Arguments)
+			if string(raw) == "null" {
+				raw = []byte("{}")
+			}
 			msg.ToolCalls = append(msg.ToolCalls, openai.ToolCall{
 				ID:   tc.ID,
 				Type: openai.ToolTypeFunction,
@@ -490,37 +499,56 @@ func fromOpenAIMessage(m openai.ChatCompletionMessage) (Message, error) {
 	return msg, nil
 }
 
-// GetModelInfo probes the provider for model metadata. Currently only Ollama
-// is supported: it tries <base>/api/show (stripping a /v1 suffix from the
-// configured endpoint). Returns an empty ModelInfo without error for
-// non-Ollama providers or when the probe fails.
+// GetModelInfo probes the provider for model metadata. Tries two strategies:
 //
-// For Ollama, num_ctx from the Modelfile parameters is preferred over the
-// architectural context length because it reflects the actually-configured
-// context window.
+//  1. Ollama-specific: POST <base>/api/show — gives the effective num_ctx.
+//  2. OpenAI-compatible GET <base>/models/<model> — used for providers like
+//     GitHub Copilot that expose context_window or
+//     capabilities.limits.max_context_window_tokens.
+//
+// The Ollama probe is tried first; if it returns a non-zero MaxTokens that
+// result is used. Otherwise the OpenAI models endpoint is tried (only when a
+// probeClient is set, i.e. when the client was built with NewWithHTTPClient).
 func (c *Client) GetModelInfo(ctx context.Context) (ModelInfo, error) {
 	base := strings.TrimSuffix(strings.TrimSuffix(strings.TrimRight(c.endpoint, "/"), "/v1"), "/")
 	if base == "" {
 		return ModelInfo{}, nil
 	}
 
+	// --- Strategy 1: Ollama /api/show ---
+	if info := c.probeOllama(ctx, base); info.Context.MaxTokens > 0 {
+		return info, nil
+	}
+
+	// --- Strategy 2: OpenAI-compatible /models/{id} ---
+	if c.probeClient != nil {
+		if info := c.probeOpenAIModel(ctx); info.Context.MaxTokens > 0 {
+			return info, nil
+		}
+	}
+
+	return ModelInfo{Model: c.model}, nil
+}
+
+// probeOllama tries POST <base>/api/show and returns the context window if found.
+func (c *Client) probeOllama(ctx context.Context, base string) ModelInfo {
 	type showRequest struct {
 		Model string `json:"model"`
 	}
 	body, err := json.Marshal(showRequest{Model: c.model})
 	if err != nil {
-		return ModelInfo{}, nil
+		return ModelInfo{}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/show", strings.NewReader(string(body)))
 	if err != nil {
-		return ModelInfo{}, nil
+		return ModelInfo{}
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return ModelInfo{}, nil
+		return ModelInfo{}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -529,17 +557,13 @@ func (c *Client) GetModelInfo(ctx context.Context) (ModelInfo, error) {
 		ModelInfo  map[string]any `json:"model_info"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return ModelInfo{}, nil
+		return ModelInfo{}
 	}
 
 	info := ModelInfo{Model: c.model}
-
-	// Prefer num_ctx from the Modelfile parameters (effective limit) over the
-	// architectural maximum reported in model_info.
 	if n := parseNumCtx(payload.Parameters); n > 0 {
 		info.Context.MaxTokens = n
 	} else {
-		// Fall back to the architectural context length from model_info.
 		for k, v := range payload.ModelInfo {
 			if strings.HasSuffix(k, ".context_length") {
 				if f, ok := v.(float64); ok {
@@ -549,7 +573,62 @@ func (c *Client) GetModelInfo(ctx context.Context) (ModelInfo, error) {
 			}
 		}
 	}
-	return info, nil
+	return info
+}
+
+// probeOpenAIModel queries <endpoint>/models/<model> and extracts the context
+// window size. Handles several provider-specific field layouts:
+//   - top-level "context_window"                             (OpenAI standard)
+//   - top-level "max_context_window_tokens"                  (some providers)
+//   - "capabilities.limits.max_context_window_tokens"        (GitHub Copilot)
+func (c *Client) probeOpenAIModel(ctx context.Context) ModelInfo {
+	endpoint := strings.TrimRight(c.endpoint, "/")
+	modelPath := url.PathEscape(c.model)
+	reqURL := endpoint + "/models/" + modelPath
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return ModelInfo{}
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.probeClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ModelInfo{}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return ModelInfo{}
+	}
+
+	info := ModelInfo{Model: c.model}
+
+	// Check fields in priority order; take the first non-zero value.
+	if n := intField(payload, "context_window"); n > 0 {
+		info.Context.MaxTokens = n
+	} else if n := intField(payload, "max_context_window_tokens"); n > 0 {
+		info.Context.MaxTokens = n
+	} else if caps, ok := payload["capabilities"].(map[string]any); ok {
+		if limits, ok := caps["limits"].(map[string]any); ok {
+			if n := intField(limits, "max_context_window_tokens"); n > 0 {
+				info.Context.MaxTokens = n
+			}
+		}
+	}
+	return info
+}
+
+// intField extracts a positive integer from a map field that may be float64 or int.
+func intField(m map[string]any, key string) int {
+	switch v := m[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	}
+	return 0
 }
 
 // parseNumCtx extracts the num_ctx value from an Ollama parameters string.
