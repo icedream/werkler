@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -275,6 +276,13 @@ type mcpToolsRefreshedMsg struct {
 	tools      []ai.ToolDefinition
 	err        error
 	resumeCall bool
+}
+
+// autoConnectResultMsg is sent when a programmatic auto-connect attempt
+// (triggered by detecting server names in a model's intent explanation) completes.
+type autoConnectResultMsg struct {
+	connected []string
+	failed    map[string]error
 }
 
 // modelInfoMsg is sent when a GetModelInfo probe completes.
@@ -841,6 +849,11 @@ type Model struct {
 	// attempted after an empty response within the current user turn. Resets
 	// alongside turnRoundtrips at every new-turn boundary.
 	emptyResponseRetries int
+
+	// itemsBeforeRetry records len(m.items) just before an empty-response retry
+	// nudge is dispatched. Used to roll back display items if the retry response
+	// triggers programmatic auto-connect (so the recovery explanation is removed).
+	itemsBeforeRetry int
 
 	// autoCompactPending is set when context compaction was triggered
 	// automatically (not by the user). After compaction completes, the
@@ -2007,6 +2020,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, doRefreshMCPTools(m.ctx, m.session, false))
 		}
 
+	case autoConnectResultMsg:
+		for _, name := range msg.connected {
+			// Replace "Auto-connecting to X…" with "✓ Connected to X".
+			for i := len(m.items) - 1; i >= 0; i-- {
+				if m.items[i].kind == itemInfo && m.items[i].content == "Auto-connecting to "+name+"…" {
+					m.items[i].content = "✓ Auto-connected to " + name
+					break
+				}
+			}
+		}
+		for name, err := range msg.failed {
+			m.items = append(m.items, displayItem{
+				kind:    itemError,
+				content: "Auto-connect failed for " + name + ": " + err.Error(),
+			})
+		}
+		needRebuild = true
+		if len(msg.connected) > 0 {
+			// Refresh tool list, then resume the stream via processNextCall.
+			cmds = append(cmds, doRefreshMCPTools(m.ctx, m.session, true))
+		} else {
+			cmds = append(cmds, m.processQueueOrIdle())
+		}
+
 	case mcpToolsRefreshedMsg:
 		if msg.err != nil {
 			m.items = append(m.items, displayItem{kind: itemError, content: "loading MCP tools: " + msg.err.Error()})
@@ -2368,6 +2405,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			isEmpty := chunk.Msg.Content == "" && len(chunk.Msg.ToolCalls) == 0 && chunk.Msg.Reasoning == ""
 			if !isEmpty {
 				m.messages = append(m.messages, chunk.Msg)
+				// Auto-connect recovery: when we're in an empty-response retry and the
+				// model responds with text (no tool calls) mentioning configured server
+				// names, connect those servers programmatically — bypassing the tool call
+				// mechanism entirely (which devstral/Ollama can silently drop).
+				if m.emptyResponseRetries > 0 &&
+					len(chunk.Msg.ToolCalls) == 0 &&
+					chunk.Msg.Content != "" &&
+					m.mcpManager != nil {
+					if serverNames := m.detectMentionedServers(chunk.Msg.Content); len(serverNames) > 0 {
+						// Pop the recovery explanation from history and display — it was
+						// scaffolding, not real conversation content.
+						m.messages = m.messages[:len(m.messages)-1]
+						if m.itemsBeforeRetry > 0 && m.itemsBeforeRetry <= len(m.items) {
+							m.items = m.items[:m.itemsBeforeRetry]
+						}
+						m.emptyResponseRetries = 0
+						for _, name := range serverNames {
+							m.items = append(m.items, displayItem{
+								kind:    itemInfo,
+								content: "Auto-connecting to " + name + "…",
+							})
+						}
+						debugLog("streamChunk: auto-connect triggered for %v", serverNames)
+						m.state = stateThinking
+						cmds = append(cmds, doAutoConnectServers(m.newOpCtx(), m.mcpManager, serverNames))
+						needRebuild = true
+						break
+					}
+				}
 			} else if chunk.Usage.CompletionTokens > 0 {
 				const maxEmptyRetries = 2
 				if m.emptyResponseRetries < maxEmptyRetries {
@@ -2392,8 +2458,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						debugLog("streamChunk: empty response (tokens=%d), clean retry (%d/%d)",
 							chunk.Usage.CompletionTokens, m.emptyResponseRetries, maxEmptyRetries)
 					} else {
-						// Second retry: ask for intent so the user can see what the model
-						// is trying to do and guide it. Tool calls are still allowed here.
+						// Second retry: ask for intent. Tool calls are still allowed so the
+						// model can act on its explanation immediately. We record the item
+						// count here so we can roll back the display if auto-connect fires.
 						nudgeMsgs[len(base)] = ai.Message{
 							Role: "user",
 							Content: "Your response was empty again. Explain what you were trying to do " +
@@ -2406,6 +2473,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						debugLog("streamChunk: empty response (tokens=%d), intent retry (%d/%d)",
 							chunk.Usage.CompletionTokens, m.emptyResponseRetries, maxEmptyRetries)
 					}
+					// Record items watermark so auto-connect can roll back the display.
+					m.itemsBeforeRetry = len(m.items)
 					m.state = stateThinking
 					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, nudgeMsgs, m.tools))
 					needRebuild = true
@@ -3636,6 +3705,54 @@ func doRefreshMCPTools(ctx context.Context, session *chat.Session, resumeCall bo
 		tools, err := session.Tools(ctx)
 		return mcpToolsRefreshedMsg{tools: tools, err: err, resumeCall: resumeCall}
 	}
+}
+
+// doAutoConnectServers connects a list of MCP servers by name programmatically,
+// bypassing the AI tool-call mechanism. Used as a fallback when the model correctly
+// identifies servers it needs (in text) but cannot produce a valid tool call.
+func doAutoConnectServers(ctx context.Context, mgr *mcppkg.Manager, names []string) tea.Cmd {
+	return func() tea.Msg {
+		connected := make([]string, 0, len(names))
+		failed := make(map[string]error)
+		for _, name := range names {
+			if _, err := mgr.ConnectByName(ctx, name); err != nil {
+				failed[name] = err
+			} else {
+				connected = append(connected, name)
+			}
+		}
+		return autoConnectResultMsg{connected: connected, failed: failed}
+	}
+}
+
+// detectMentionedServers scans text for occurrences of configured-but-not-yet-connected
+// MCP server names and returns those that are mentioned. Names are checked
+// longest-first to prevent a shorter name from matching as a substring of a longer one.
+func (m *Model) detectMentionedServers(text string) []string {
+	if m.mcpManager == nil {
+		return nil
+	}
+	configured := m.mcpManager.ConfiguredServers()
+	// Sort longest name first to avoid "cloudflare" matching inside "cloudflare-dns-analytics".
+	slices.SortFunc(configured, func(a, b config.MCPServerConfig) int {
+		return len(b.Name) - len(a.Name)
+	})
+	lower := strings.ToLower(text)
+	var found []string
+	seen := make(map[string]bool)
+	for _, srv := range configured {
+		if seen[srv.Name] {
+			continue
+		}
+		srvLower := strings.ToLower(srv.Name)
+		if strings.Contains(lower, srvLower) {
+			found = append(found, srv.Name)
+			seen[srv.Name] = true
+			// Blank out this name in the search string so no shorter prefix matches it.
+			lower = strings.ReplaceAll(lower, srvLower, strings.Repeat(" ", len(srvLower)))
+		}
+	}
+	return found
 }
 
 func doGetModelInfo(ctx context.Context, getter ai.ModelInfoGetter) tea.Cmd {
