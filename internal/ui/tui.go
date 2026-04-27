@@ -1005,6 +1005,10 @@ type Model struct {
 	// Cleared when the AI returns to idle or calls task_complete.
 	currentTaskTitle string
 
+	// thinkingStart records when we entered stateThinking for elapsed-time display.
+	// Zero value means we are not in a thinking state.
+	thinkingStart time.Time
+
 	// showReasoning controls whether reasoning/thinking items are displayed.
 	// Toggled by /reasoning. Defaults to true.
 	showReasoning bool
@@ -1398,7 +1402,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							needRebuild = true
 							cmds = append(cmds, nextCmd)
 						} else {
-							m.state = stateIdle
+							m.setIdle()
 						}
 					}
 				case "esc":
@@ -1528,7 +1532,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						needRebuild = true
 						m.turnRoundtrips = 0
 						m.emptyResponseRetries = 0
-						m.state = stateThinking
+						m.setThinking()
 						cmds = append(cmds, doStartStream(
 							m.newOpCtx(), m.client,
 							m.buildStreamMessages(m.autopilotMessagesForStream()),
@@ -1565,7 +1569,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								m.state = stateCompacting
 								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages))
 							} else {
-								m.state = stateThinking
+								m.setThinking()
 								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
 							}
 						}
@@ -1668,7 +1672,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingModel:
 			switch msg.Type {
 			case tea.KeyEsc, tea.KeyCtrlC:
-				m.state = stateIdle
+				m.setIdle()
 				m.updateCompletion()
 			case tea.KeyEnter:
 				if sel := m.modelPicker.SelectedItem(); sel != nil {
@@ -1681,7 +1685,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, doGetModelInfo(m.ctx, getter))
 					}
 				}
-				m.state = stateIdle
+				m.setIdle()
 				m.updateCompletion()
 			default:
 				var pickerCmd tea.Cmd
@@ -1692,7 +1696,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingSession:
 			switch msg.Type {
 			case tea.KeyEsc, tea.KeyCtrlC:
-				m.state = stateIdle
+				m.setIdle()
 				m.updateCompletion()
 			case tea.KeyEnter:
 				if sel := m.sessionPicker.SelectedItem(); sel != nil {
@@ -1716,7 +1720,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				}
-				m.state = stateIdle
+				m.setIdle()
 				m.updateCompletion()
 			default:
 				var pickerCmd tea.Cmd
@@ -1729,7 +1733,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyEsc, tea.KeyCtrlC:
 				// Refresh m.tools from the (possibly updated) disabled set and go back.
 				m.tools = m.filteredFromAllDefs()
-				m.state = stateIdle
+				m.setIdle()
 				m.updateCompletion()
 			case tea.KeyEnter:
 				// Open detail view for the selected tool.
@@ -1773,7 +1777,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingSkills:
 			switch msg.Type {
 			case tea.KeyEsc, tea.KeyCtrlC:
-				m.state = stateIdle
+				m.setIdle()
 				m.updateCompletion()
 			case tea.KeyRunes:
 				if msg.String() == " " {
@@ -1813,7 +1817,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.registryCancelCtx()
 						m.registryCancelCtx = nil
 					}
-					m.state = stateIdle
+					m.setIdle()
 					m.updateCompletion()
 					cmds = append(cmds, m.input.Focus())
 				}
@@ -2236,7 +2240,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				content: "Context compaction failed: " + msg.err.Error(),
 			})
 			m.autoCompactPending = false
-			m.state = stateIdle
+			m.setIdle()
 			needRebuild = true
 			cmds = append(cmds, m.input.Focus())
 		} else {
@@ -2261,7 +2265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelsErrMsg:
 		if m.state == statePickingModel {
 			m.items = append(m.items, displayItem{kind: itemError, content: "listing models: " + msg.err.Error()})
-			m.state = stateIdle
+			m.setIdle()
 			m.updateCompletion()
 			needRebuild = true
 		}
@@ -2285,7 +2289,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case allToolsErrMsg:
 		if m.state == statePickingTools {
 			m.items = append(m.items, displayItem{kind: itemError, content: "listing tools: " + msg.err.Error()})
-			m.state = stateIdle
+			m.setIdle()
 			m.updateCompletion()
 			needRebuild = true
 		}
@@ -2297,7 +2301,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					kind:    itemError,
 					content: "registry fetch failed: " + msg.err.Error(),
 				})
-				m.state = stateIdle
+				m.setIdle()
 				m.updateCompletion()
 				needRebuild = true
 				break
@@ -2343,7 +2347,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			content = `Added "` + msg.cfg.Name + `" — restart werkler to connect.`
 		}
 		if m.state == statePickingRegistry {
-			m.state = stateIdle
+			m.setIdle()
 			m.updateCompletion()
 		}
 		m.items = append(m.items, displayItem{kind: itemInfo, content: content})
@@ -2396,7 +2400,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == statePickingSession {
 			if msg.err != nil {
 				m.items = append(m.items, displayItem{kind: itemError, content: "listing sessions: " + msg.err.Error()})
-				m.state = stateIdle
+				m.setIdle()
 				m.updateCompletion()
 				needRebuild = true
 			} else {
@@ -2522,7 +2526,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.cancelOp = nil
 				m.cancelPending = false
-				m.state = stateIdle
+				m.setIdle()
 				needRebuild = true
 				cmds = append(cmds, m.input.Focus())
 			} else {
@@ -2535,7 +2539,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.items = append(m.items, displayItem{kind: itemError, content: chunk.Err.Error()})
 				}
-				m.state = stateIdle
+				m.setIdle()
 				needRebuild = true
 				cmds = append(cmds, m.input.Focus())
 			}
@@ -2586,7 +2590,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							})
 						}
 						debugLog("streamChunk: auto-connect triggered for %v", serverNames)
-						m.state = stateThinking
+						m.setThinking()
 						cmds = append(cmds, doAutoConnectServers(m.newOpCtx(), m.mcpManager, serverNames))
 						needRebuild = true
 						break
@@ -2633,7 +2637,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					// Record items watermark so auto-connect can roll back the display.
 					m.itemsBeforeRetry = len(m.items)
-					m.state = stateThinking
+					m.setThinking()
 					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, nudgeMsgs, m.tools))
 					needRebuild = true
 					break
@@ -2651,7 +2655,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					debugLog("streamChunk: finish_reason=length, auto-continuing")
 					m.messages = append(m.messages, ai.Message{Role: "user", Content: "Continue."})
 					m.turnRoundtrips++
-					m.state = stateThinking
+					m.setThinking()
 					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
 					needRebuild = true
 					break
@@ -2691,7 +2695,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.turnRoundtrips = 0
 						m.emptyResponseRetries = 0
-						m.state = stateThinking
+						m.setThinking()
 						cmds = append(cmds, doStartStream(
 							m.newOpCtx(), m.client,
 							m.buildStreamMessages(m.autopilotMessagesForStream()),
@@ -2799,7 +2803,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.callingToolName = ""
 				m.cancelOp = nil
 				m.cancelPending = false
-				m.state = stateIdle
+				m.setIdle()
 				needRebuild = true
 				cmds = append(cmds, m.input.Focus())
 			default:
@@ -2914,7 +2918,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.oauthInfoIdx = -1
 		// Keep the user's queued prompt but return to idle so they can retry.
-		m.state = stateIdle
+		m.setIdle()
 		needRebuild = true
 		cmds = append(cmds, m.input.Focus())
 
@@ -3058,9 +3062,7 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.currentTaskTitle != "" {
 			label = m.currentTaskTitle
 		}
-		return statusStyle.Render(m.spinner.View()+" "+label) + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
-	case stateConnectingMCP:
-		return statusStyle.Render(m.spinner.View()+" Connecting to MCP servers…") + queueHint + autopilotIndicator + allowAllIndicator, ""
+		return statusStyle.Render(m.spinner.View()+" "+label) + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.thinkingElapsedHint() + m.roundtripHint(), ""
 	case stateConnectingOAuth:
 		return statusStyle.Render(m.spinner.View()+" Waiting for OAuth authorization…") + queueHint + autopilotIndicator + allowAllIndicator, ""
 	case stateCompacting:
@@ -3271,6 +3273,35 @@ func (m Model) roundtripHint() string {
 	default:
 		return ""
 	}
+}
+
+// setThinking transitions to stateThinking and records the start time for
+// elapsed-time display. Call this instead of assigning m.state directly when
+// entering stateThinking.
+func (m *Model) setThinking() {
+	m.state = stateThinking
+	m.thinkingStart = time.Now()
+}
+
+// setIdle transitions to stateIdle and clears the thinking-elapsed timer.
+func (m *Model) setIdle() {
+	m.state = stateIdle
+	m.thinkingStart = time.Time{}
+}
+
+// thinkingElapsedHint returns a dimmed elapsed-time string (e.g. " 12s") once
+// thinking has lasted more than a few seconds, so users can see the model is
+// still working. Returns an empty string when elapsed is negligible or when
+// not in a thinking state.
+func (m Model) thinkingElapsedHint() string {
+	if m.thinkingStart.IsZero() {
+		return ""
+	}
+	d := time.Since(m.thinkingStart).Round(time.Second)
+	if d < 3*time.Second {
+		return ""
+	}
+	return "  " + statusStyle.Render(fmt.Sprintf("%ds", int(d.Seconds())))
 }
 
 // completionView renders the slash-command popup lines that appear above the
@@ -3516,7 +3547,7 @@ func (m *Model) processNextPath() tea.Cmd {
 		return nil
 	}
 	// All paths approved — proceed with the pending tool call.
-	m.state = stateIdle
+	m.setIdle()
 	if m.pendingCallAfterPaths != nil {
 		call := *m.pendingCallAfterPaths
 		m.pendingCallAfterPaths = nil
@@ -3709,10 +3740,10 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 			m.state = stateCompacting
 			return doCompact(m.newOpCtx(), m.client, m.messages)
 		}
-		m.state = stateThinking
+		m.setThinking()
 		return doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools)
 	}
-	m.state = stateIdle
+	m.setIdle()
 	m.cancelOp = nil
 	m.cancelPending = false
 	m.currentTaskTitle = "" // clear when the AI is done with its turn
@@ -3729,7 +3760,7 @@ func (m *Model) processNextCall() tea.Cmd {
 			m.state = stateCompacting
 			return doCompact(m.newOpCtx(), m.client, m.messages)
 		}
-		m.state = stateThinking
+		m.setThinking()
 		m.turnRoundtrips++
 		return doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools)
 	}
@@ -4192,10 +4223,10 @@ func (m *Model) applyCompaction(summary string) []tea.Cmd {
 		// Auto-compact: restart the AI turn that was interrupted.
 		m.autoCompactPending = false
 		m.turnRoundtrips++
-		m.state = stateThinking
+		m.setThinking()
 		cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
 	} else {
-		m.state = stateIdle
+		m.setIdle()
 		cmds = append(cmds, m.input.Focus())
 	}
 	return cmds
