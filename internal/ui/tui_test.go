@@ -346,15 +346,20 @@ func TestUpdate_ToolResult_Failure_InformsAI(t *testing.T) {
 
 	// Tool item marked failed in display.
 	assert.Equal(t, toolStatusFailed, m.items[0].toolStatus)
-	// Error forwarded to AI as a tool result message.
-	last := m.messages[len(m.messages)-1]
-	assert.Equal(t, "tool", last.Role)
-	assert.Equal(t, "c1", last.ToolCallID)
-	assert.Contains(t, last.Content, "Error:")
-	// New stream started so AI can respond.
+	// Error forwarded to AI as a tool result message (now second-to-last; the
+	// queued prompt was injected as a new user turn immediately after).
+	toolMsg := m.messages[len(m.messages)-2]
+	assert.Equal(t, "tool", toolMsg.Role)
+	assert.Equal(t, "c1", toolMsg.ToolCallID)
+	assert.Contains(t, toolMsg.Content, "Error:")
+	// Queued prompt injected as new turn (interjection behaviour).
+	userMsg := m.messages[len(m.messages)-1]
+	assert.Equal(t, "user", userMsg.Role)
+	assert.Equal(t, "follow-up", userMsg.Content)
+	// New stream started for the injected turn.
 	assert.Equal(t, stateThinking, m.state)
-	// Queued prompts preserved.
-	require.Len(t, m.queuedPrompts, 1)
+	// Queue was fully drained by interjection.
+	assert.Empty(t, m.queuedPrompts)
 	assert.Nil(t, m.pendingCalls)
 	assert.Nil(t, m.currentCall)
 }
@@ -525,8 +530,9 @@ func TestUpdate_ProcessQueueOrIdle_NoQueue_GoesIdle(t *testing.T) {
 }
 
 func TestUpdate_Queue_SurvivesToolCalls(t *testing.T) {
-	// Proves the invariant: queued prompts must survive an entire assistant turn
-	// (including tool calls) and only be consumed after the final response.
+	// Proves the new interjection behaviour: a queued prompt is injected as a
+	// new user turn immediately after the current tool-call batch completes,
+	// rather than waiting for the full agent turn to finish.
 
 	sc := &mockStreamCompleter{}
 	tm := &mockToolManager{}
@@ -546,24 +552,18 @@ func TestUpdate_Queue_SurvivesToolCalls(t *testing.T) {
 	firstDone := ai.Message{Role: "assistant", ToolCalls: []ai.ToolCall{tc}}
 	ch := chanOf()
 	m, _ = update(t, m, streamChunkMsg{ch: ch, chunk: ai.StreamChunk{Done: true, Msg: firstDone}})
-	// Queue must still be intact — tool calls haven't finished.
+	// Queue must still be intact — tool calls haven't finished yet.
 	require.Len(t, m.queuedPrompts, 1, "queue must survive tool-call processing")
 	assert.Equal(t, stateCallingTool, m.state)
 
-	// 3. Tool result comes back; processNextCall → doStartStream for the second AI turn.
+	// 3. Tool result comes back; processNextCall sees an empty pendingCalls and a
+	// non-empty queue → injects the queued prompt as a new turn immediately.
 	sc.On("CompleteStream", mock.Anything, mock.Anything, mock.Anything).
 		Return(chanOf(ai.StreamChunk{Done: true, Msg: ai.Message{Role: "assistant", Content: "all done"}}))
 	m, _ = update(t, m, toolResultMsg{callID: "c1", toolName: "my_tool", result: "tool output"})
-	// processNextCall has no more pending calls → starts next stream.
-	require.Len(t, m.queuedPrompts, 1, "queue must survive after tool result, before final response")
-	assert.Equal(t, stateThinking, m.state)
-
-	// 4. Second stream finishes with no tool calls → processQueueOrIdle drains the queue.
-	secondDone := ai.Message{Role: "assistant", Content: "all done"}
-	ch2 := chanOf()
-	m, _ = update(t, m, streamChunkMsg{ch: ch2, chunk: ai.StreamChunk{Done: true, Msg: secondDone}})
-	assert.Empty(t, m.queuedPrompts, "queue must be drained after full agent turn completes")
-	assert.Equal(t, stateThinking, m.state, "next queued turn should start immediately")
+	// Queue drained — queued prompt was injected as a new turn.
+	assert.Empty(t, m.queuedPrompts, "queue must be drained after tool batch completes (interjection)")
+	assert.Equal(t, stateThinking, m.state, "new turn should start immediately after interjection")
 }
 
 // --- inputPlaceholder ---

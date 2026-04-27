@@ -4096,6 +4096,11 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 // next command to execute. Must only be called from Update.
 func (m *Model) processNextCall() tea.Cmd {
 	if len(m.pendingCalls) == 0 {
+		// If the user queued a prompt while tools were running, inject it now
+		// as a new turn rather than continuing the current one invisibly.
+		if len(m.queuedPrompts) > 0 {
+			return m.processQueueOrIdle()
+		}
 		debugLog("processNextCall: no more pending calls, starting new stream (messages=%d)", len(m.messages))
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
