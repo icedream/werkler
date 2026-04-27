@@ -917,6 +917,40 @@ func init() {
 			},
 		},
 		{
+			name:          "expand",
+			description:   "Expand collapsed process output  (usage: /expand <handle> | /expand all)",
+			safeWhileBusy: true,
+			action: func(m *Model) []tea.Cmd {
+				// Without an argument, list collapsed handles.
+				var collapsed []string
+				for h, c := range m.collapsedHandles {
+					if c {
+						collapsed = append(collapsed, h)
+					}
+				}
+				if len(collapsed) == 0 {
+					m.items = append(m.items, displayItem{kind: itemInfo, content: "No collapsed process outputs."})
+				} else {
+					m.items = append(m.items, displayItem{kind: itemInfo, content: fmt.Sprintf("Collapsed handles: %s  (use /expand <handle> or /expand all)", strings.Join(collapsed, ", "))})
+				}
+				m.rebuildContent()
+				return nil
+			},
+		},
+		{
+			name:          "collapse",
+			description:   "Collapse expanded process output  (usage: /collapse <handle> | /collapse all)",
+			safeWhileBusy: true,
+			action: func(m *Model) []tea.Cmd {
+				// Without an argument, collapse all expanded handles.
+				for h := range m.collapsedHandles {
+					m.collapsedHandles[h] = true
+				}
+				m.rebuildContent()
+				return nil
+			},
+		},
+		{
 			name:          "help",
 			description:   "Show available keyboard shortcuts and commands",
 			safeWhileBusy: true,
@@ -1182,6 +1216,11 @@ type Model struct {
 	todoStore   *todostore.Store
 	sidebarOpen bool
 
+	// collapsedHandles tracks which process output handles are collapsed.
+	// By default all process outputs are collapsed (show first 2 lines).
+	// Handle is un-collapsed via /expand <handle> or /expand (expands all).
+	collapsedHandles map[string]bool
+
 	// Cross-session project memory.
 	memoryStore *memorystore.MemoryStore
 
@@ -1317,6 +1356,7 @@ func initialModel(
 		agentWizardToolPicker: agentToolPickerM,
 		agentWizardExcluded:   make(map[string]bool),
 		disabledSkills:        make(map[string]bool),
+		collapsedHandles:      make(map[string]bool),
 		input:                 ti,
 		spinner:               sp,
 		modelName:             modelName,
@@ -2134,6 +2174,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								needRebuild = true
 							}
 						}
+					case strings.HasPrefix(text, "/expand "):
+						arg := strings.TrimSpace(strings.TrimPrefix(text, "/expand "))
+						m.input.Reset()
+						m.updateCompletion()
+						if arg == "all" {
+							for h := range m.collapsedHandles {
+								m.collapsedHandles[h] = false
+							}
+						} else if arg != "" {
+							m.collapsedHandles[arg] = false
+						}
+						needRebuild = true
+					case strings.HasPrefix(text, "/collapse "):
+						arg := strings.TrimSpace(strings.TrimPrefix(text, "/collapse "))
+						m.input.Reset()
+						m.updateCompletion()
+						if arg == "all" {
+							for h := range m.collapsedHandles {
+								m.collapsedHandles[h] = true
+							}
+						} else if arg != "" {
+							m.collapsedHandles[arg] = true
+						}
+						needRebuild = true
 					case text != "":
 						m.input.Reset()
 						m.appendInputHistory(text)
@@ -3376,6 +3440,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			item.truncatedLines += trimProcessOutputLines(&item.content, processOutputLineCap)
 			m.items = append(m.items, item)
+			// New process output starts collapsed.
+			m.collapsedHandles[msg.handle] = true
 		}
 		needRebuild = true
 
@@ -4437,13 +4503,32 @@ func (m Model) renderItem(item displayItem) string {
 		prefix := processHandleStyle.Render("[process:" + item.handle + "]")
 		var sb strings.Builder
 		sb.WriteString(prefix)
-		if item.truncatedLines > 0 {
+		if m.collapsedHandles[item.handle] {
+			lines := strings.SplitN(item.content, "\n", 4)
+			shown := lines
+			hiddenFromContent := 0
+			if len(lines) > 2 {
+				shown = lines[:2]
+				hiddenFromContent = len(lines) - 2
+			}
+			if len(shown) > 0 {
+				sb.WriteString("\n")
+				sb.WriteString(strings.Join(shown, "\n"))
+			}
+			totalHidden := hiddenFromContent + item.truncatedLines
+			if totalHidden > 0 {
+				sb.WriteString("\n")
+				sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  … %d more lines (use /expand %s to show all)", totalHidden, item.handle)))
+			}
+		} else {
+			if item.truncatedLines > 0 {
+				sb.WriteString("\n")
+				sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  … %d lines above …", item.truncatedLines)))
+			}
+			// Raw output may contain ANSI codes, display as-is.
 			sb.WriteString("\n")
-			sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  … %d lines above …", item.truncatedLines)))
+			sb.WriteString(item.content)
 		}
-		// Raw output may contain ANSI codes, display as-is.
-		sb.WriteString("\n")
-		sb.WriteString(item.content)
 		return sb.String()
 
 	case itemAskUser:
