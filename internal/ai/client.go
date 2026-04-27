@@ -632,7 +632,11 @@ func (c *Client) probeOllama(ctx context.Context, base string) ModelInfo {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	httpClient := c.probeClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return ModelInfo{}
 	}
