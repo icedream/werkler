@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"bytes"
 	"io"
 	"net/http"
 	"net/url"
@@ -623,7 +624,7 @@ func (c *Client) probeOllama(ctx context.Context, base string) ModelInfo {
 		return ModelInfo{}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/show", strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/show", bytes.NewReader(body))
 	if err != nil {
 		return ModelInfo{}
 	}
