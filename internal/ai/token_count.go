@@ -23,7 +23,7 @@ func (tc TokenCount) Format() string {
 	if tc.Approx {
 		prefix = "~"
 	}
-	return prefix + formatTokenCount(tc.Total)
+	return prefix + formatCompactInt(tc.Total)
 }
 
 // FormatWithMax returns a string like "4.2k / 128k (3%)" when maxTokens > 0,
@@ -35,7 +35,7 @@ func (tc TokenCount) FormatWithMax(maxTokens int) string {
 		return base
 	}
 	pct := tc.Total * 100 / maxTokens
-	return fmt.Sprintf("%s / %s (%d%%)", base, formatTokenCount(maxTokens), pct)
+	return fmt.Sprintf("%s / %s (%d%%)", base, formatCompactInt(maxTokens), pct)
 }
 
 // UsageFraction returns a value in [0.0, 1.0] representing how full the context
@@ -98,17 +98,4 @@ func encodingForModel(modelName string) (*tiktoken.Tiktoken, bool, error) {
 		return nil, false, fmt.Errorf("loading cl100k_base fallback: %w", err)
 	}
 	return enc, true, nil
-}
-
-// formatTokenCount formats a token count as a compact string: "512", "4.2k",
-// "128k", "1.2M".
-func formatTokenCount(n int) string {
-	switch {
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	case n >= 1_000:
-		return fmt.Sprintf("%.1fk", float64(n)/1_000)
-	default:
-		return fmt.Sprintf("%d", n)
-	}
 }

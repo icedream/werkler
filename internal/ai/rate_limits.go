@@ -22,7 +22,7 @@ func (r RateLimits) FormatTokens() string {
 	if r.LimitTokens == 0 {
 		return ""
 	}
-	return formatCount(r.RemainingTokens)
+	return formatCompactInt(r.RemainingTokens)
 }
 
 // FormatRequests returns a compact string for remaining requests. Returns ""
@@ -31,10 +31,10 @@ func (r RateLimits) FormatRequests() string {
 	if r.LimitRequests == 0 {
 		return ""
 	}
-	return formatCount(r.RemainingRequests)
+	return formatCompactInt(r.RemainingRequests)
 }
 
-func formatCount(n int) string {
+func formatCompactInt(n int) string {
 	switch {
 	case n >= 1_000_000:
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
