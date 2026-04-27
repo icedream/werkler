@@ -70,6 +70,7 @@ const (
 	statePickingModel         // model selection list is open
 	statePickingSession       // session picker list is open
 	statePickingTools         // tool enable/disable picker is open
+	stateViewingToolDetail    // detail view for a single tool (schema + description)
 	stateAwaitingUserQuestion // AI asked a question; waiting for the user's reply
 	stateCompacting           // compacting conversation history via AI summary
 	statePickingRegistry      // MCP registry browser is open
@@ -330,6 +331,7 @@ type toolItem struct {
 	name        string
 	description string
 	enabled     bool
+	inputSchema any
 }
 
 func toolServerName(name string) string {
@@ -352,7 +354,7 @@ func (t toolItem) Title() string {
 	if t.enabled {
 		check = "[✓]"
 	}
-	return check + " " + toolBaseName(t.name)
+	return check + " " + toolFriendlyName(t.name)
 }
 func (t toolItem) Description() string {
 	server := toolServerName(t.name)
@@ -361,10 +363,50 @@ func (t toolItem) Description() string {
 	if len(desc) > maxDesc {
 		desc = desc[:maxDesc] + "…"
 	}
-	if desc == "" {
-		return "[" + server + "]"
+	params := toolParamSummary(t.inputSchema)
+	suffix := ""
+	if params != "" {
+		suffix = "  · " + params
 	}
-	return "[" + server + "] " + desc
+	if desc == "" {
+		return "[" + server + "]" + suffix
+	}
+	return "[" + server + "] " + desc + suffix
+}
+
+// toolParamSummary returns a compact comma-separated list of parameter names
+// extracted from a JSON Schema object (the InputSchema of a tool definition).
+func toolParamSummary(schema any) string {
+	m, ok := schema.(map[string]any)
+	if !ok {
+		return ""
+	}
+	props, ok := m["properties"].(map[string]any)
+	if !ok || len(props) == 0 {
+		return ""
+	}
+	required := map[string]bool{}
+	if req, ok := m["required"].([]any); ok {
+		for _, r := range req {
+			if s, ok := r.(string); ok {
+				required[s] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(props))
+	for k := range props {
+		if required[k] {
+			names = append(names, k)
+		}
+	}
+	// Append optional params after required ones.
+	for k := range props {
+		if !required[k] {
+			names = append(names, k+"?")
+		}
+	}
+	slices.Sort(names)
+	return strings.Join(names, ", ")
 }
 
 // skillItem implements list.Item for the skill enable/disable picker.
@@ -774,8 +816,10 @@ type Model struct {
 	sessionPicker list.Model
 
 	// Tool picker (only valid during statePickingTools).
-	toolPicker  list.Model
-	allToolDefs []ai.ToolDefinition // full unfiltered list, set on allToolsMsg
+	toolPicker     list.Model
+	allToolDefs    []ai.ToolDefinition // full unfiltered list, set on allToolsMsg
+	toolDetailVP   viewport.Model      // detail view for a single tool
+	toolDetailItem toolItem            // tool being inspected in stateViewingToolDetail
 
 	// Session persistence.
 	sessionStore     *sessionstore.Store
@@ -958,7 +1002,7 @@ func initialModel(
 	// Tool picker: space to toggle, filtering enabled.
 	toolDel := list.NewDefaultDelegate()
 	toolPickerM := list.New(nil, toolDel, 0, 0)
-	toolPickerM.Title = "Toggle tools  [space] enable/disable"
+	toolPickerM.Title = "Tools  [space] toggle  [enter] details"
 	toolPickerM.SetShowStatusBar(false)
 	toolPickerM.SetFilteringEnabled(true)
 	toolPickerM.DisableQuitKeybindings()
@@ -1640,6 +1684,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tools = m.filteredFromAllDefs()
 				m.state = stateIdle
 				m.updateCompletion()
+			case tea.KeyEnter:
+				// Open detail view for the selected tool.
+				if sel := m.toolPicker.SelectedItem(); sel != nil {
+					item := sel.(toolItem)
+					m.toolDetailItem = item
+					m.toolDetailVP = viewport.New(m.width, m.height-fixedLines)
+					m.toolDetailVP.SetContent(buildToolDetail(item, m.width))
+					m.state = stateViewingToolDetail
+				}
 			case tea.KeyRunes:
 				if msg.String() == " " {
 					// Toggle the currently selected tool.
@@ -1658,6 +1711,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var pickerCmd tea.Cmd
 				m.toolPicker, pickerCmd = m.toolPicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
+			}
+
+		case stateViewingToolDetail:
+			switch msg.Type {
+			case tea.KeyEsc, tea.KeyCtrlC, tea.KeyEnter:
+				m.state = statePickingTools
+			default:
+				var vpCmd tea.Cmd
+				m.toolDetailVP, vpCmd = m.toolDetailVP.Update(msg)
+				cmds = append(cmds, vpCmd)
 			}
 
 		case statePickingSkills:
@@ -2152,6 +2215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					name:        t.Name,
 					description: t.Description,
 					enabled:     m.session.IsToolEnabled(t.Name),
+					inputSchema: t.InputSchema,
 				}
 			}
 			m.toolPicker.SetItems(items)
@@ -2330,6 +2394,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modelPicker.SetSize(m.width, m.height-fixedLines)
 		m.toolPicker.SetSize(m.width, m.height-fixedLines)
 		m.skillPicker.SetSize(m.width, m.height-fixedLines)
+		if m.state == stateViewingToolDetail {
+			m.toolDetailVP.Width = m.width
+			m.toolDetailVP.Height = m.height - fixedLines
+		}
 		if m.state == statePickingRegistry {
 			m.registryPicker.SetSize(m.width, m.height-fixedLines-2)
 			m.registryInstalledList.SetSize(m.width, m.height-fixedLines)
@@ -2783,6 +2851,9 @@ func (m Model) View() string {
 	}
 	if m.state == statePickingTools {
 		return m.toolPicker.View()
+	}
+	if m.state == stateViewingToolDetail {
+		return m.toolDetailView()
 	}
 	if m.state == statePickingSkills {
 		return m.skillPicker.View()
@@ -4052,6 +4123,96 @@ func (m Model) registryView() string {
 		return m.registryInstalledList.View()
 	}
 	return m.registrySearchInput.View() + "\n" + m.registryPicker.View()
+}
+
+// toolDetailView renders the full-screen detail view for a single tool.
+func (m Model) toolDetailView() string {
+	title := headerStyle.Render(toolFriendlyName(m.toolDetailItem.name))
+	raw := toolDimStyle.Render("[" + m.toolDetailItem.name + "]")
+	hint := statusStyle.Render("  ↑/↓ scroll  ·  esc/enter back")
+	header := title + " " + raw + hint
+	return header + "\n" + m.toolDetailVP.View()
+}
+
+// buildToolDetail constructs the scrollable content for the tool detail viewport.
+func buildToolDetail(t toolItem, width int) string {
+	var b strings.Builder
+
+	server := toolServerName(t.name)
+	b.WriteString(statusStyle.Render("Server: ") + server + "\n\n")
+
+	if t.description != "" {
+		b.WriteString(t.description + "\n\n")
+	}
+
+	schema, ok := t.inputSchema.(map[string]any)
+	if !ok || schema == nil {
+		b.WriteString(statusStyle.Render("(no parameters)") + "\n")
+		return b.String()
+	}
+
+	props, hasProps := schema["properties"].(map[string]any)
+	if !hasProps || len(props) == 0 {
+		b.WriteString(statusStyle.Render("(no parameters)") + "\n")
+		return b.String()
+	}
+
+	required := map[string]bool{}
+	if req, ok := schema["required"].([]any); ok {
+		for _, r := range req {
+			if s, ok := r.(string); ok {
+				required[s] = true
+			}
+		}
+	}
+
+	b.WriteString(toolNameStyle.Render("Parameters") + "\n")
+
+	// Sort: required first, then optional, each group alphabetically.
+	reqNames := make([]string, 0, len(props))
+	optNames := make([]string, 0, len(props))
+	for k := range props {
+		if required[k] {
+			reqNames = append(reqNames, k)
+		} else {
+			optNames = append(optNames, k)
+		}
+	}
+	slices.Sort(reqNames)
+	slices.Sort(optNames)
+
+	for _, name := range append(reqNames, optNames...) {
+		prop, _ := props[name].(map[string]any)
+		typeStr, _ := prop["type"].(string)
+		desc, _ := prop["description"].(string)
+		enumVals, _ := prop["enum"].([]any)
+
+		req := ""
+		if !required[name] {
+			req = statusStyle.Render(" (optional)")
+		}
+		line := "  " + toolNameStyle.Render(name) + req
+		if typeStr != "" {
+			line += "  " + toolDimStyle.Render(typeStr)
+		}
+		b.WriteString(line + "\n")
+
+		if len(enumVals) > 0 {
+			enumStrs := make([]string, 0, len(enumVals))
+			for _, v := range enumVals {
+				enumStrs = append(enumStrs, fmt.Sprintf("%v", v))
+			}
+			b.WriteString("    " + toolDimStyle.Render("one of: "+strings.Join(enumStrs, ", ")) + "\n")
+		}
+		if desc != "" {
+			wrapped := wordwrap.String(desc, width-4)
+			for _, l := range strings.Split(wrapped, "\n") {
+				b.WriteString("    " + l + "\n")
+			}
+		}
+	}
+
+	return b.String()
 }
 
 func (m *Model) rebuildRegistryInstalledState() {
