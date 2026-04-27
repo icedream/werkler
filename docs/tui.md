@@ -60,6 +60,14 @@ appears automatically. Use `/todos` to toggle it manually.
 
 Todos have four statuses: `pending`, `in_progress`, `done`, `blocked`.
 
+## Task title
+
+While the AI is working it may call the `task_start` tool to report what it is
+currently doing (e.g. *"Implementing OAuth callback"* or *"Writing tests for
+parser"*). The title is displayed in the status bar next to the activity
+indicator and updates as the AI moves between phases. It is cleared
+automatically when the turn ends.
+
 ## Token usage
 
 After each AI response the status bar briefly shows the token counts for that
