@@ -105,7 +105,6 @@ func (r RubberDuckConfig) IsConfigured() bool {
 }
 
 // AIConfig holds AI provider settings.
-// AIConfig holds AI provider settings.
 type AIConfig struct {
 	// Multi-provider configuration.
 	Providers []ProviderConfig `mapstructure:"providers"`
