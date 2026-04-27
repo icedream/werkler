@@ -422,6 +422,13 @@ func toOpenAIMessages(msgs []Message) []openai.ChatCompletionMessage {
 		if m.Role == "assistant" && m.Content == "" && len(m.ToolCalls) == 0 {
 			continue
 		}
+		// Merge consecutive system messages — some providers (e.g. GitHub Copilot)
+		// reject requests with more than one role:"system" message. This can happen
+		// with sessions saved before the single-system-message invariant was enforced.
+		if m.Role == "system" && len(out) > 0 && out[len(out)-1].Role == "system" {
+			out[len(out)-1].Content += "\n\n" + m.Content
+			continue
+		}
 		msg := openai.ChatCompletionMessage{
 			Role:       m.Role,
 			Content:    m.Content,
