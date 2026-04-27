@@ -229,12 +229,22 @@ func pathCoveredBy(approvedPath, requestedPath string) bool {
 		strings.HasPrefix(requestedPath, approvedPath+"/")
 }
 
+// resolveForApproval resolves symlinks in path to its real path.
+// Falls back to the original path when resolution fails (e.g. path does not exist yet).
+func resolveForApproval(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	return path
+}
+
 // IsPathReadApproved returns true if path may be read without interactive approval.
 // Write approval implies read approval.
 func (s *Session) IsPathReadApproved(path string) bool {
 	if s.allowAll {
 		return true
 	}
+	path = resolveForApproval(path)
 	if s.cwdReadPrefix != "" && pathCoveredBy(s.cwdReadPrefix, path) {
 		return true
 	}
@@ -264,6 +274,7 @@ func (s *Session) IsPathWriteApproved(path string) bool {
 	if s.allowAll {
 		return true
 	}
+	path = resolveForApproval(path)
 	for approved := range s.sessionWritePaths {
 		if pathCoveredBy(approved, path) {
 			return true
@@ -282,13 +293,14 @@ func (s *Session) IsPathWriteApproved(path string) bool {
 
 // ApprovePathReadForSession grants read-only access to path for this session.
 func (s *Session) ApprovePathReadForSession(path string) {
-	s.sessionReadPaths[path] = true
+	s.sessionReadPaths[resolveForApproval(path)] = true
 }
 
 // ApprovePathWriteForSession grants write (and read) access to path for this session.
 func (s *Session) ApprovePathWriteForSession(path string) {
-	s.sessionWritePaths[path] = true
-	s.sessionReadPaths[path] = true
+	real := resolveForApproval(path)
+	s.sessionWritePaths[real] = true
+	s.sessionReadPaths[real] = true
 }
 
 // IsApproved returns true if the tool can be called without interactive user approval.
