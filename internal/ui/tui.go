@@ -4425,7 +4425,15 @@ func (m Model) renderItem(item displayItem) string {
 
 	case itemAskUser:
 		var sb strings.Builder
-		sb.WriteString(approvalPromptStyle.Render("❓") + "  " + m.askUserQuestion)
+		question := m.askUserQuestion
+		// Wrap the question text to the terminal width, leaving room for the ❓ prefix (3 chars + 2 spaces = 5).
+		if m.width > 9 {
+			wrapped := wordwrap.String(question, max(1, m.width-7))
+			// Indent continuation lines to align under the first word of the question.
+			indent := strings.Repeat(" ", 5) // "❓  " prefix width
+			question = strings.ReplaceAll(wrapped, "\n", "\n"+indent)
+		}
+		sb.WriteString(approvalPromptStyle.Render("❓") + "  " + question)
 		for i, choice := range m.askUserChoices {
 			sb.WriteString("\n")
 			rec := choice == m.askUserRecommended
