@@ -12,6 +12,27 @@ import (
 // autopilotDefaultMaxCycles mirrors the TUI default so prompt mode behaves consistently.
 const autopilotDefaultMaxCycles = 50
 
+// alwaysApprovedTools is the set of built-in tool names that are always
+// allowed in non-interactive (--prompt) mode without appearing in
+// auto_approve_tools. These are control-flow, state, and utility tools that
+// carry no side-effects or whose denial would break normal operation.
+var alwaysApprovedTools = map[string]bool{
+	"ask_user":       true,
+	"confirm_plan":   true,
+	"todo_add":       true,
+	"todo_add_many":  true,
+	"todo_update":    true,
+	"todo_list":      true,
+	"memory_list":    true,
+	"memory_read":    true,
+	"memory_write":   true,
+	"memory_delete":  true,
+	"memory_promote": true,
+	"get_time":       true,
+	"calculate":      true,
+	"sleep":          true,
+}
+
 // PromptOptions configures non-interactive RunPrompt behaviour.
 type PromptOptions struct {
 	// Progress, if non-nil, receives tool call events.
@@ -114,10 +135,7 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 				return summary, nil
 			}
 
-			if !session.IsApproved(tc.Name) && tc.Name != "ask_user" && tc.Name != "confirm_plan" && !session.IsSubagentTool(tc.Name) &&
-				tc.Name != "todo_add" && tc.Name != "todo_update" && tc.Name != "todo_list" &&
-				tc.Name != "memory_list" && tc.Name != "memory_read" && tc.Name != "memory_write" &&
-				tc.Name != "get_time" && tc.Name != "calculate" && tc.Name != "sleep" {
+			if !session.IsApproved(tc.Name) && !alwaysApprovedTools[tc.Name] && !session.IsSubagentTool(tc.Name) {
 				if opts.Progress != nil {
 					_, _ = fmt.Fprintf(opts.Progress, "[tool denied (not pre-approved in non-interactive mode): %s]\n", tc.Name)
 				}
