@@ -1480,6 +1480,10 @@ Use this when you need to think through a specific aspect of the problem while c
 your response — for example, choosing the right algorithm, evaluating a design tradeoff,
 or verifying correctness of an approach.
 
+This tool invokes the model's native reasoning/thinking token pathway (at low effort
+by default, or the configured reasoning_effort level). Use it only when you genuinely
+need to think something through — not for routine lookups.
+
 Unlike enable_reasoning (which affects an entire response turn), think is a targeted
 sub-call: you ask a specific question, get back a careful analysis, and use it inline.
 The reasoning is not added to the conversation history.

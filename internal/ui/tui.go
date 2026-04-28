@@ -4977,7 +4977,11 @@ func (m *Model) processNextCall() tea.Cmd {
 		m.executingCall = &callCopy
 		m.state = stateCallingTool
 		recent := recentContextMessages(m.messages, 6)
-		return doThinkTool(m.newOpCtx(), call.ID, m.client, question, recent, m.configuredReasoningEffort)
+		thinkEffort := m.configuredReasoningEffort
+		if thinkEffort == "" {
+			thinkEffort = "low"
+		}
+		return doThinkTool(m.newOpCtx(), call.ID, m.client, question, recent, thinkEffort)
 	}
 
 	// ask_user, confirm_plan, subagent tools, use_skill, use_agent, task_start, todo_*, memory_*, and connect_server
