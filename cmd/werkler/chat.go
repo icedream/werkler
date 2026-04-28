@@ -38,7 +38,8 @@ var (
 	chatAutopilotMaxCyc int
 	chatMode            string
 	chatAgent           string
-	chatStagedWrites    bool
+	chatStagedWrites      bool
+	chatSandboxProcesses  bool
 )
 
 var chatCmd = &cobra.Command{
@@ -63,6 +64,7 @@ func init() {
 	chatCmd.Flags().StringVar(&chatMode, "mode", "", "Activate a named mode preset (e.g. default, plan, document)")
 	chatCmd.Flags().StringVar(&chatAgent, "agent", "", "Activate a named custom agent on startup")
 	chatCmd.Flags().BoolVar(&chatStagedWrites, "staging", false, "Intercept file writes into a staging store; changes are only flushed when the AI calls commit_staged_writes")
+	chatCmd.Flags().BoolVar(&chatSandboxProcesses, "sandbox-processes", false, "Wrap AI-spawned processes (process_start/run_command) with bubblewrap for namespace isolation (requires bwrap on PATH)")
 	rootCmd.AddCommand(chatCmd)
 }
 
@@ -139,6 +141,18 @@ func runChat(_ *cobra.Command, _ []string) error {
 	}
 	if len(loadedAgents) > 0 {
 		fmt.Fprintf(os.Stderr, "Loaded %d agent(s).\n", len(loadedAgents))
+	}
+
+	// Enable process sandboxing via bubblewrap if configured or --sandbox-processes flag set.
+	if cfg.Sandbox.ProcessSandbox || chatSandboxProcesses {
+		if !sandbox.BwrapAvailable() {
+			fmt.Fprintln(os.Stderr, "Warning: --sandbox-processes requested but bwrap not found on PATH; process sandboxing disabled.")
+		} else {
+			toolMgr.SetBwrapConfig(&sandbox.BwrapConfig{
+				AllowNetwork: cfg.Sandbox.AllowNetwork,
+			})
+			fmt.Fprintln(os.Stderr, "Sandbox: process sandboxing enabled via bubblewrap.")
+		}
 	}
 
 	// Enable staged writes if configured via config or --staging flag.

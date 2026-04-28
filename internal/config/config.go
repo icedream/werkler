@@ -136,6 +136,16 @@ type SandboxConfig struct {
 	// immediately. The AI must call commit_staged_writes to flush changes to
 	// disk, or discard_staged_writes to drop them.
 	StagedWrites bool `mapstructure:"staged_writes"`
+
+	// ProcessSandbox, when true, wraps AI-spawned processes (process_start,
+	// run_command) with bubblewrap for namespace isolation. Requires bwrap on
+	// PATH. Has no effect on non-Linux systems or when bwrap is unavailable.
+	ProcessSandbox bool `mapstructure:"process_sandbox"`
+
+	// AllowNetwork permits outbound network access inside sandboxed processes.
+	// Only meaningful when ProcessSandbox is true. Defaults to false (network
+	// is blocked inside the sandbox).
+	AllowNetwork bool `mapstructure:"allow_network"`
 }
 
 // ModeConfig defines a named mode preset that bundles session options together.

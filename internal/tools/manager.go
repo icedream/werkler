@@ -148,6 +148,7 @@ type Manager struct {
 	todoStore     *todostore.Store
 	memoryStore   *memorystore.MemoryStore
 	stagingStore  *sandbox.Store
+	bwrapCfg      atomic.Pointer[sandbox.BwrapConfig]
 	taskTitle     func(string) // optional; called when the AI sets a task title via task_start
 	agentActivate func(string) // optional; called when use_agent requests activation
 	activeCallID  atomic.Value // stores string; set/cleared by doCallTool goroutine
@@ -226,6 +227,20 @@ func (m *Manager) SetMemoryStore(s *memorystore.MemoryStore) {
 func (m *Manager) SetStagingStore(s *sandbox.Store) {
 	m.stagingStore = s
 	m.builtins = m.makeBuiltins()
+}
+
+// SetBwrapConfig installs a BwrapConfig for process sandboxing. When cfg is
+// non-nil, process_start and run_command invocations are wrapped with bwrap.
+// Pass nil to disable. Safe for concurrent use.
+func (m *Manager) SetBwrapConfig(cfg *sandbox.BwrapConfig) {
+	m.bwrapCfg.Store(cfg)
+}
+
+// maybeWrapCmd applies bwrap wrapping when a BwrapConfig is installed.
+// cwd may be empty; WrapCommand handles the empty-cwd case.
+func (m *Manager) maybeWrapCmd(cmd string, args []string, cwd string) (string, []string) {
+	cfg := m.bwrapCfg.Load()
+	return sandbox.WrapCommand(cfg, cmd, args, cwd)
 }
 
 // SetActiveCallID records the ID of the tool call currently being executed.
@@ -1648,7 +1663,10 @@ func (m *Manager) handleProcessStart(ctx context.Context, args map[string]any) (
 		return "", &UnapprovedPathsError{Requests: unapproved}
 	}
 
-	handle, err := m.processes.Start(ctx, command, cmdArgs, cwd, env, usePTY)
+	// Optionally wrap with bubblewrap for process isolation.
+	startCmd, startArgs := m.maybeWrapCmd(command, cmdArgs, cwd)
+
+	handle, err := m.processes.Start(ctx, startCmd, startArgs, cwd, env, usePTY)
 	if err != nil {
 		return "", fmt.Errorf("process_start: %w", err)
 	}
@@ -1885,13 +1903,27 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 		finalEnv = baseEnv
 	}
 
-	// Build the exec.Cmd.
-	var cmd *exec.Cmd
+	// Check path approval before executing.
+	effectiveCommand := command
 	if useShell {
-		cmd = exec.Command("bash", "-c", command)
-	} else {
-		cmd = exec.Command(command, cmdArgs...)
+		effectiveCommand = "bash"
 	}
+	if unapproved := m.checkWritePaths(ctx, effectiveCommand, cmdArgs, cwd); len(unapproved) > 0 {
+		return "", &UnapprovedPathsError{Requests: unapproved}
+	}
+
+	// Optionally wrap with bubblewrap for process isolation.
+	// For shell mode, wrap bash -c <script>; for direct mode, wrap the command directly.
+	var runCmd string
+	var runArgs []string
+	if useShell {
+		runCmd, runArgs = m.maybeWrapCmd("bash", []string{"-c", command}, cwd)
+	} else {
+		runCmd, runArgs = m.maybeWrapCmd(command, cmdArgs, cwd)
+	}
+
+	// Build the exec.Cmd.
+	cmd := exec.Command(runCmd, runArgs...)
 	cmd.Env = finalEnv
 	if cwd != "" {
 		cmd.Dir = cwd
@@ -1904,15 +1936,6 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 	}
 	// Spawn in a new process group so we can kill the whole group on timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	// Check path approval before executing.
-	effectiveCommand := command
-	if useShell {
-		effectiveCommand = "bash"
-	}
-	if unapproved := m.checkWritePaths(ctx, effectiveCommand, cmdArgs, cwd); len(unapproved) > 0 {
-		return "", &UnapprovedPathsError{Requests: unapproved}
-	}
 
 	// Set up output capture.
 	stdoutBuf := newCapBuffer(runCommandOutputCap)
