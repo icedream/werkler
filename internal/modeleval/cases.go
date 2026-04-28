@@ -15,8 +15,8 @@ func configuredServersSection(servers []string) string {
 	sb.WriteString("## Configured MCP servers (not yet connected)\n")
 	sb.WriteString("These servers are available but not yet connected. ")
 	sb.WriteString("When the user's current request requires tools from one of these servers, ")
-	sb.WriteString("call `connect_server` for it **immediately** — do not ask for permission, ")
-	sb.WriteString("do not explain what you are about to do, just call it. ")
+	sb.WriteString("you MUST call `connect_server` for it immediately — ")
+	sb.WriteString("do NOT announce or describe what you are about to do, do NOT ask for permission, just call the tool. ")
 	sb.WriteString("Do NOT connect servers whose tools are not needed for the current task.\n")
 	for _, name := range servers {
 		sb.WriteString("- `")
@@ -32,8 +32,9 @@ func connectServerTool(servers []string) ai.ToolDefinition {
 	return ai.ToolDefinition{
 		Name: "connect_server",
 		Description: "Connect to a configured MCP server to make its tools available. " +
-			"Call this immediately when the user's request requires tools from that server — " +
-			"do not ask for permission first and do not connect servers unrelated to the current task. " +
+			"You MUST call this tool — do NOT describe or announce what you are about to do, just call it immediately. " +
+			"Call this as soon as the user's request requires tools from a listed server. " +
+			"Do not connect servers whose tools are not needed for the current task. " +
 			"After connecting, the server's tools will be listed in the result. " +
 			"Available servers: " + strings.Join(servers, ", ") + ".",
 		InputSchema: map[string]any{

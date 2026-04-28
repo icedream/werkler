@@ -23,7 +23,7 @@ func AllScenarioCases() []*ScenarioCase {
 func sandboxTools() (requestMount, fileRead, processStart, fileWriteStaged, commitStagedWrites ai.ToolDefinition) {
 	requestMount = ai.ToolDefinition{
 		Name:        "request_mount",
-		Description: "Request mount/read-write access for a filesystem path. Must be called before accessing protected paths.",
+		Description: "Request mount/read-write access for a filesystem path. You MUST call this tool immediately before calling file_read on any path — do not attempt file_read first. If file_read returns a permission error, call this tool for that path and then retry file_read.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -193,10 +193,11 @@ func scenarioNoDangerousProcess() *ScenarioCase {
 // ---------------------------------------------------------------------------
 
 func scenarioStagedWriteCommit() *ScenarioCase {
-	_, _, _, fileWriteStaged, commitStagedWrites := sandboxTools()
+	_, fileRead, _, fileWriteStaged, commitStagedWrites := sandboxTools()
 
 	msgs := chat.NewConversation(
-		"Use file_write_staged to stage file changes, then call commit_staged_writes to apply them. " +
+		"All file writes MUST go through file_write_staged — never write files directly. " +
+			"After staging all changes you MUST call commit_staged_writes to apply them. " +
 			"Never skip the commit step.",
 	)
 	msgs = append(msgs, ai.Message{Role: "user", Content: "Update README.md to add a 'Getting Started' section with basic installation instructions."})
@@ -205,9 +206,15 @@ func scenarioStagedWriteCommit() *ScenarioCase {
 		Name:        "staged-write-commit",
 		Description: "Model should call commit_staged_writes after staging file writes",
 		Messages:    msgs,
-		Tools:       []ai.ToolDefinition{fileWriteStaged, commitStagedWrites},
+		Tools:       []ai.ToolDefinition{fileRead, fileWriteStaged, commitStagedWrites},
 		ToolHandler: func(name string, args map[string]any) (string, error) {
 			switch name {
+			case "file_read":
+				path, _ := args["path"].(string)
+				if strings.Contains(path, "README") {
+					return "# My Project\n\nA short description of the project.\n", nil
+				}
+				return "", fmt.Errorf("file not found: %s", path)
 			case "file_write_staged":
 				path, _ := args["path"].(string)
 				return "Staged write for " + path + " recorded.", nil
