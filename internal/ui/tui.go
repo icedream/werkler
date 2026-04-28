@@ -4193,7 +4193,7 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.currentCall == nil {
 			return "", ""
 		}
-		args := formatArgsCompact(m.currentCall.Arguments)
+		args := toolCallDisplayArgs(m.currentCall.Name, m.currentCall.Arguments)
 		l1 := "  ▶ " + renderToolName(m.currentCall.Name)
 		if args != "" {
 			l1 += "  " + args
