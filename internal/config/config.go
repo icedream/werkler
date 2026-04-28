@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
@@ -80,6 +81,10 @@ type ProviderConfig struct {
 	// DisableReasoning prevents all reasoning/thinking for this provider —
 	// reasoning tools are hidden and reasoning_effort is never sent.
 	DisableReasoning bool `mapstructure:"disable_reasoning"`
+	// Timeout is the per-request time limit for this provider.
+	// Used by modeltest and any other per-request context wrapping.
+	// 0 means no provider-specific timeout (caller's context wins).
+	Timeout time.Duration `mapstructure:"timeout"`
 }
 
 // RubberDuckConfig configures an optional secondary AI model used for critical

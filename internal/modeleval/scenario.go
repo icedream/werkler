@@ -59,6 +59,9 @@ type ScenarioCase struct {
 	// Repeat runs the scenario this many times and reports the pass rate.
 	// 0 and 1 both mean a single run.
 	Repeat int
+	// PerCallTimeout wraps each individual model call within the scenario in
+	// a context with this deadline. 0 means no per-call timeout.
+	PerCallTimeout time.Duration
 }
 
 // ScenarioResult holds the outcome of running one ScenarioCase (possibly
@@ -115,9 +118,17 @@ func runScenarioOnce(ctx context.Context, client ai.Completer, sc *ScenarioCase)
 	var turns []Turn
 
 	for turn := 0; turn < maxTurns; turn++ {
+		callCtx := ctx
+		var callCancel context.CancelFunc
+		if sc.PerCallTimeout > 0 {
+			callCtx, callCancel = context.WithTimeout(ctx, sc.PerCallTimeout)
+		}
 		start := time.Now()
-		response, err := client.Complete(ctx, messages, sc.Tools)
+		response, err := client.Complete(callCtx, messages, sc.Tools)
 		elapsed := time.Since(start)
+		if callCancel != nil {
+			callCancel()
+		}
 		if err != nil {
 			return ScenarioRunResult{
 				Turns: turns,

@@ -29,6 +29,9 @@ type TestCase struct {
 	// Repeat runs the case this many times and reports the pass rate.
 	// 0 and 1 both mean a single run.
 	Repeat int
+	// PerCallTimeout wraps each individual model call in a context with this
+	// deadline. 0 means no per-call timeout (the outer ctx governs).
+	PerCallTimeout time.Duration
 }
 
 // Result holds the outcome of running one TestCase (possibly multiple times).
@@ -72,6 +75,11 @@ func Run(ctx context.Context, client ai.Completer, tc *TestCase) *Result {
 }
 
 func runOnce(ctx context.Context, client ai.Completer, tc *TestCase) RunResult {
+	if tc.PerCallTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, tc.PerCallTimeout)
+		defer cancel()
+	}
 	start := time.Now()
 	resp, err := client.Complete(ctx, tc.Messages, tc.Tools)
 	elapsed := time.Since(start)

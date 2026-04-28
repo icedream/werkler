@@ -16,19 +16,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/config"
 	"github.com/icedream/werkler/internal/copilot"
 	"github.com/icedream/werkler/internal/modeleval"
 	"github.com/spf13/cobra"
-	"net/http"
 )
 
 func main() {
@@ -80,15 +81,15 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func buildClientFromConfig(providerName, configPath, modelOverride string) (ai.Completer, string, error) {
+func buildClientFromConfig(providerName, configPath, modelOverride string) (ai.Completer, string, time.Duration, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return nil, "", fmt.Errorf("loading config %s: %w", configPath, err)
+		return nil, "", 0, fmt.Errorf("loading config %s: %w", configPath, err)
 	}
 
 	providers, err := config.NormalizeProviders(&cfg.AI)
 	if err != nil {
-		return nil, "", fmt.Errorf("normalizing providers: %w", err)
+		return nil, "", 0, fmt.Errorf("normalizing providers: %w", err)
 	}
 
 	var p config.ProviderConfig
@@ -105,7 +106,7 @@ func buildClientFromConfig(providerName, configPath, modelOverride string) (ai.C
 		for i, pp := range providers {
 			names[i] = pp.Name
 		}
-		return nil, "", fmt.Errorf("provider %q not found in config; available: %s", providerName, strings.Join(names, ", "))
+		return nil, "", 0, fmt.Errorf("provider %q not found in config; available: %s", providerName, strings.Join(names, ", "))
 	}
 
 	if modelOverride != "" {
@@ -120,31 +121,32 @@ func buildClientFromConfig(providerName, configPath, modelOverride string) (ai.C
 	switch p.Type {
 	case config.ProviderTypeOpenAI, "":
 		c := ai.NewWithTransport(p.Endpoint, p.APIKey, p.Model, ai.NewReasoningAliasTransport(nil))
-		return c, label, nil
+		return c, label, p.Timeout, nil
 	case config.ProviderTypeCopilot:
 		tok, err := copilot.LoadGitHubToken()
 		if err != nil {
-			return nil, "", fmt.Errorf("loading Copilot token: %w", err)
+			return nil, "", 0, fmt.Errorf("loading Copilot token: %w", err)
 		}
 		if tok == nil {
-			return nil, "", fmt.Errorf("Copilot not authenticated — run `werkler auth copilot` first")
+			return nil, "", 0, fmt.Errorf("Copilot not authenticated — run `werkler auth copilot` first")
 		}
 		transport := ai.NewReasoningAliasTransport(copilot.NewTransport(tok.AccessToken))
 		c := ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport}, ai.WithNoStreamUsage())
-		return c, label, nil
+		return c, label, p.Timeout, nil
 	default:
-		return nil, "", fmt.Errorf("unsupported provider type %q", p.Type)
+		return nil, "", 0, fmt.Errorf("unsupported provider type %q", p.Type)
 	}
 }
 
 func runEval(ctx context.Context, baseURL, model, apiKey, provider, configPath string, run []string, repeat int, verbose bool) error {
 	var client ai.Completer
 	var label string
+	var perCallTimeout time.Duration
 
 	switch {
 	case provider != "":
 		var err error
-		client, label, err = buildClientFromConfig(provider, configPath, model)
+		client, label, perCallTimeout, err = buildClientFromConfig(provider, configPath, model)
 		if err != nil {
 			return err
 		}
@@ -164,6 +166,15 @@ func runEval(ctx context.Context, baseURL, model, apiKey, provider, configPath s
 	cases := modeleval.AllCases()
 	scenarios := modeleval.AllScenarioCases()
 
+	// Apply per-call timeout from provider config.
+	if perCallTimeout > 0 {
+		for _, tc := range cases {
+			tc.PerCallTimeout = perCallTimeout
+		}
+		for _, sc := range scenarios {
+			sc.PerCallTimeout = perCallTimeout
+		}
+	}
 	// Filter by --run flags (applies to both suites).
 	if len(run) > 0 {
 		filteredCases := cases[:0]
