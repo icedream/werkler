@@ -48,16 +48,32 @@ func TestRunCommand_ShellMode(t *testing.T) {
 	assert.Contains(t, out["stdout"].(string), "HELLO")
 }
 
-// TestRunCommand_ShellWithArgsFails verifies that args + shell=true returns a structured error.
-func TestRunCommand_ShellWithArgsFails(t *testing.T) {
+// TestRunCommand_ShellWithArgsIgnored verifies that passing args alongside shell=true
+// succeeds (args are silently dropped) rather than returning a hard error.
+// Weaker models sometimes pass both; we tolerate it rather than failing the call.
+func TestRunCommand_ShellWithArgsIgnored(t *testing.T) {
 	out := callRunCommand(t, map[string]any{
 		"command": "echo foo",
 		"args":    []any{"bar"},
 		"shell":   true,
 		"title":   "shell+args test",
 	})
-	require.NotNil(t, out["error"])
-	assert.Contains(t, out["error"].(string), "args must not be provided when shell is true")
+	// Should succeed: args are dropped, "echo foo" runs via bash -c.
+	assert.Nil(t, out["error"])
+	assert.EqualValues(t, 0, out["exit_code"])
+	assert.Contains(t, out["stdout"].(string), "foo")
+}
+
+// TestRunCommand_SpaceInCommandAutoShell verifies that a command containing spaces
+// is automatically treated as a shell command (shell auto-promote).
+func TestRunCommand_SpaceInCommandAutoShell(t *testing.T) {
+	out := callRunCommand(t, map[string]any{
+		"command": "echo hello world",
+		"title":   "auto-shell test",
+	})
+	assert.Nil(t, out["error"])
+	assert.EqualValues(t, 0, out["exit_code"])
+	assert.Contains(t, out["stdout"].(string), "hello world")
 }
 
 // TestRunCommand_NonzeroExit verifies non-zero exit codes are reported correctly.

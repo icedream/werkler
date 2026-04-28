@@ -1788,8 +1788,18 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 
 	useShell := boolArg(args, "shell")
 	cmdArgs := stringSliceArg(args, "args")
+	// When shell=true, args must be empty — the full command goes in "command".
+	// Weaker models sometimes pass both; silently drop args rather than erroring
+	// so the call still succeeds.
 	if useShell && len(cmdArgs) > 0 {
-		return jsonResult(map[string]any{"error": "run_command: args must not be provided when shell is true"}), nil
+		cmdArgs = nil
+	}
+	// When shell=false but command contains spaces, the model most likely intended
+	// a shell command (e.g. "ls -la"). Auto-promote to shell mode so the call
+	// succeeds rather than failing with "executable not found".
+	if !useShell && strings.ContainsRune(command, ' ') {
+		useShell = true
+		cmdArgs = nil
 	}
 
 	cwd := stringArg(args, "cwd")
