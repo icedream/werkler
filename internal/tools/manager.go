@@ -804,13 +804,18 @@ IMPORTANT: "command" is the executable only; "args" are the arguments WITHOUT th
 Example -- to run "git status --short": command="git", args=["status", "--short"].
 Do NOT put "git" (or any command name) in args.
 
-To use shell operators (pipes, redirects, globs, &&, etc.), set shell=true and put the full shell string in "command". Do NOT provide args when shell=true.`,
+SHELL MODE: Any time your command uses pipes (|), redirects (>, >>), logical operators (&&, ||),
+subshells ($(...)), globs, or any other shell syntax, you MUST set shell=true and put the entire
+command string in "command" with no "args".
+Examples requiring shell=true: "ps aux | grep nginx", "cat /proc/loadavg", "free -m && uptime",
+"ls *.go | wc -l", "top -bn1 | head -20".
+Examples NOT requiring shell=true: "git", "grep", "uptime", "free", "ps" (with args instead).`,
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"command":         map[string]any{"type": "string", "description": "Absolute path or PATH-resolvable command name. When shell=true, this is the full shell command string (e.g. \"rg 'TODO' src/ | wc -l\")."},
+						"command":         map[string]any{"type": "string", "description": "Absolute path or PATH-resolvable command name. When shell=true, this is the full shell command string (e.g. \"ps aux | grep nginx\")."},
 						"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command arguments only -- do NOT include the command name. Must not be provided when shell=true."},
-						"shell":           map[string]any{"type": "boolean", "description": "If true, run command via bash -c. Enables pipes, redirects, globs, etc."},
+						"shell":           map[string]any{"type": "boolean", "description": "If true, run via bash -c. REQUIRED for any command containing |, &&, ||, >, >>, $(...), or other shell syntax."},
 						"cwd":             map[string]any{"type": "string", "description": "Working directory; empty = inherit werkler's cwd"},
 						"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Extra environment variables merged on top of the current environment"},
 						"timeout_seconds": map[string]any{"type": "number", "description": "Seconds to wait before killing the process (default 30, max 600)"},
