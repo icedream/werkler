@@ -1023,6 +1023,7 @@ type Model struct {
 	pendingCalls     []ai.ToolCall
 	currentCall      *ai.ToolCall
 	callingToolName  string // name of tool currently executing (stateCallingTool)
+	callingToolTitle string // AI-provided title for the current tool call (may be empty)
 	streamingItemIdx int    // index into items of the in-progress assistant item; -1 if none
 	reasoningItemIdx int    // index into items of the in-progress reasoning item; -1 if none
 
@@ -2057,7 +2058,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 							m.items[idx].toolStatus = toolStatusRunning
 						}
-						m.callingToolName = call.Name
+						m.setCallingTool(call)
 						m.currentCall = nil
 						m.executingCall = &call
 						m.state = stateCallingTool
@@ -2069,7 +2070,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 							m.items[idx].toolStatus = toolStatusRunning
 						}
-						m.callingToolName = call.Name
+						m.setCallingTool(call)
 						m.currentCall = nil
 						m.executingCall = &call
 						m.state = stateCallingTool
@@ -2087,7 +2088,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 							m.items[idx].toolStatus = toolStatusRunning
 						}
-						m.callingToolName = call.Name
+						m.setCallingTool(call)
 						m.currentCall = nil
 						m.executingCall = &call
 						m.state = stateCallingTool
@@ -2481,17 +2482,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.toolDetailVP.SetContent(buildToolDetail(item, m.width))
 					m.state = stateViewingToolDetail
 				}
-			case tea.KeyRunes:
-				if msg.String() == " " {
-					// Toggle the currently selected tool.
-					if sel := m.toolPicker.SelectedItem(); sel != nil {
-						item := sel.(toolItem)
-						item.enabled = !item.enabled
-						m.session.SetToolEnabled(item.name, item.enabled)
-						m.toolPicker.SetItem(m.toolPicker.Index(), item)
-					}
-					break
+			case tea.KeySpace:
+				// Toggle the currently selected tool.
+				if sel := m.toolPicker.SelectedItem(); sel != nil {
+					item := sel.(toolItem)
+					item.enabled = !item.enabled
+					m.session.SetToolEnabled(item.name, item.enabled)
+					m.toolPicker.SetItem(m.toolPicker.Index(), item)
 				}
+			case tea.KeyRunes:
 				var pickerCmd tea.Cmd
 				m.toolPicker, pickerCmd = m.toolPicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
@@ -2516,17 +2515,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyEsc, tea.KeyCtrlC:
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyRunes:
-				if msg.String() == " " {
-					if sel := m.skillPicker.SelectedItem(); sel != nil {
-						item := sel.(skillItem)
-						item.enabled = !item.enabled
-						m.disabledSkills[item.name] = !item.enabled
-						m.skillPicker.SetItem(m.skillPicker.Index(), item)
-						m.applySkillToggle()
-					}
-					break
+			case tea.KeySpace:
+				if sel := m.skillPicker.SelectedItem(); sel != nil {
+					item := sel.(skillItem)
+					item.enabled = !item.enabled
+					m.disabledSkills[item.name] = !item.enabled
+					m.skillPicker.SetItem(m.skillPicker.Index(), item)
+					m.applySkillToggle()
 				}
+			case tea.KeyRunes:
 				var pickerCmd tea.Cmd
 				m.skillPicker, pickerCmd = m.skillPicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
@@ -2696,18 +2693,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyEnter:
 				// Confirm tool selection and save.
 				cmds = append(cmds, m.saveAgentFromWizard()...)
-			case tea.KeyRunes:
-				if msg.String() == " " {
-					if sel := m.agentWizardToolPicker.SelectedItem(); sel != nil {
-						item := sel.(agentToolItem)
-						if !item.alwaysOn {
-							item.enabled = !item.enabled
-							m.agentWizardExcluded[item.name] = !item.enabled
-							m.agentWizardToolPicker.SetItem(m.agentWizardToolPicker.Index(), item)
-						}
+			case tea.KeySpace:
+				if sel := m.agentWizardToolPicker.SelectedItem(); sel != nil {
+					item := sel.(agentToolItem)
+					if !item.alwaysOn {
+						item.enabled = !item.enabled
+						m.agentWizardExcluded[item.name] = !item.enabled
+						m.agentWizardToolPicker.SetItem(m.agentWizardToolPicker.Index(), item)
 					}
-					break
 				}
+			case tea.KeyRunes:
 				var pickerCmd tea.Cmd
 				m.agentWizardToolPicker, pickerCmd = m.agentWizardToolPicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
@@ -3847,6 +3842,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executingCall = nil
 				m.currentCall = nil
 				m.callingToolName = ""
+				m.callingToolTitle = ""
 				m.cancelOp = nil
 				m.cancelPending = false
 				m.setIdle()
@@ -3881,6 +3877,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executingCall = nil
 				m.currentCall = nil
 				m.callingToolName = ""
+				m.callingToolTitle = ""
 				needRebuild = true
 				cmds = append(cmds, m.processNextCall())
 			}
@@ -3904,6 +3901,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Parts:      msg.parts,
 			})
 			m.callingToolName = ""
+			m.callingToolTitle = ""
 			m.executingCall = nil
 			// Save after every successful tool result so that session state is
 			// preserved even if the app is terminated mid-turn.
@@ -4151,6 +4149,9 @@ func (m Model) statusLines() (line1, line2 string) {
 		return statusStyle.Render(m.spinner.View()+" "+label) + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
 	case stateCallingTool:
 		name := renderToolName(m.callingToolName)
+		if m.callingToolTitle != "" {
+			name = toolNameStyle.Render(m.callingToolTitle) + " " + toolDimStyle.Render("["+m.callingToolName+"]")
+		}
 		cancelHint := ""
 		if m.cancelPending {
 			cancelHint = "  " + keyHintStyle.Render("[esc]") + " to cancel"
@@ -4676,7 +4677,7 @@ func (m *Model) processNextPath() tea.Cmd {
 		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
-		m.callingToolName = call.Name
+		m.setCallingTool(call)
 		m.executingCall = &call
 		m.state = stateCallingTool
 		return doCallTool(m.newOpCtx(), m.toolMgr, m.session, call)
@@ -4685,6 +4686,13 @@ func (m *Model) processNextPath() tea.Cmd {
 }
 
 // --- Autopilot helpers ---
+
+// setCallingTool records the name and optional AI-provided title for the tool
+// currently executing, so the status bar can show a meaningful label.
+func (m *Model) setCallingTool(call ai.ToolCall) {
+	m.setCallingTool(call)
+	m.callingToolTitle = toolCallIntent(call.Name, call.Arguments)
+}
 
 // effectiveAutopilotMax returns the active cycle cap, falling back to the default.
 func (m *Model) effectiveAutopilotMax() int {
@@ -4964,7 +4972,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
-		m.callingToolName = call.Name
+		m.setCallingTool(call)
 		m.currentCall = nil
 		m.executingCall = &callCopy
 		m.state = stateCallingTool
@@ -4985,7 +4993,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
-		m.callingToolName = call.Name
+		m.setCallingTool(call)
 		m.currentCall = nil
 		m.executingCall = &callCopy
 		m.state = stateCallingTool
@@ -5984,6 +5992,23 @@ func toolCallDisplayArgs(toolName string, args map[string]any) string {
 			}
 			return "$ " + strings.Join(parts, " ")
 		}
+	case "run_command":
+		cmd, _ := args["command"].(string)
+		if cmd != "" {
+			useShell, _ := args["shell"].(bool)
+			if useShell {
+				return "$ " + cmd
+			}
+			parts := []string{cmd}
+			if rawArgs, ok := args["args"].([]any); ok {
+				for _, a := range rawArgs {
+					if s, ok := a.(string); ok {
+						parts = append(parts, s)
+					}
+				}
+			}
+			return "$ " + strings.Join(parts, " ")
+		}
 	case "connect_server":
 		if name, ok := args["name"].(string); ok && name != "" {
 			return "→ " + name
@@ -5993,9 +6018,10 @@ func toolCallDisplayArgs(toolName string, args map[string]any) string {
 }
 
 // toolCallIntent returns a short intent annotation for tool calls that carry a
-// human-readable title field (currently process_start). Returns "" for all others.
+// human-readable title field. Returns "" for all others.
 func toolCallIntent(toolName string, args map[string]any) string {
-	if toolName == "process_start" {
+	switch toolName {
+	case "process_start", "run_command":
 		if title, ok := args["title"].(string); ok {
 			return title
 		}
