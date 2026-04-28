@@ -7,13 +7,13 @@ import (
 	"strings"
 )
 
-// NewReasoningAliasTransport returns an [http.RoundTripper] that renames the
-// "reasoning" field to "reasoning_content" in SSE delta JSON objects.
+// NewReasoningAliasTransport returns an [http.RoundTripper] that renames
+// provider-specific thinking-token fields to "reasoning_content" in SSE delta
+// JSON objects so that go-openai's delta.ReasoningContent field is populated.
 //
-// Ollama's OpenAI-compatible endpoint emits thinking tokens as
-// delta.reasoning (json:"reasoning"), but go-openai only maps
-// delta.reasoning_content. Applying this transport makes thinking tokens from
-// Ollama-hosted models visible to the rest of the application.
+// Two aliases are applied:
+//   - "reasoning":  → "reasoning_content":  (Ollama / DeepSeek thinking models)
+//   - "thinking":   → "reasoning_content":  (GitHub Copilot / Claude models)
 //
 // The transform is a no-op for providers that already use "reasoning_content"
 // (OpenAI o-series) or that send no thinking tokens at all (most models).
@@ -39,9 +39,9 @@ func (t *reasoningAliasTransport) RoundTrip(req *http.Request) (*http.Response, 
 	return resp, nil
 }
 
-// reasoningAliasBody wraps an SSE response body and renames "reasoning": to
-// "reasoning_content": in data: lines so go-openai parses Ollama's thinking
-// tokens correctly.
+// reasoningAliasBody wraps an SSE response body and renames provider-specific
+// thinking-token fields ("reasoning": or "thinking":) to "reasoning_content":
+// in data: lines so go-openai parses thinking tokens correctly.
 type reasoningAliasBody struct {
 	inner   io.ReadCloser
 	outBuf  []byte
@@ -53,6 +53,7 @@ type reasoningAliasBody struct {
 var (
 	sseDataPrefix   = []byte("data:")
 	reasoningKeyOld = []byte(`"reasoning":`)
+	thinkingKeyOld  = []byte(`"thinking":`)
 	reasoningKeyNew = []byte(`"reasoning_content":`)
 )
 
@@ -105,25 +106,41 @@ func (b *reasoningAliasBody) Read(p []byte) (int, error) {
 
 func (b *reasoningAliasBody) Close() error { return b.inner.Close() }
 
-// transformSSELine renames "reasoning": to "reasoning_content": in SSE data
-// lines. Non-data lines (comments, event:, blank) are returned unchanged.
+// transformSSELine renames provider-specific thinking-token keys to
+// "reasoning_content": in SSE data lines so go-openai can parse them.
+// It handles two aliases:
+//   - "reasoning":  (Ollama / DeepSeek)
+//   - "thinking":   (GitHub Copilot / Claude)
+//
+// Non-data lines (comments, event:, blank) are returned unchanged.
 func transformSSELine(line []byte) []byte {
 	// Find the "data:" prefix, allowing optional whitespace after it.
-	rest := line
-	if !bytes.HasPrefix(rest, sseDataPrefix) {
+	if !bytes.HasPrefix(line, sseDataPrefix) {
 		return line
 	}
-	payload := bytes.TrimLeft(rest[len(sseDataPrefix):], " \t")
+	payload := bytes.TrimLeft(line[len(sseDataPrefix):], " \t")
 	if len(payload) == 0 || payload[0] != '{' {
 		return line
 	}
-	if !bytes.Contains(payload, reasoningKeyOld) {
+	// Skip if already uses reasoning_content (avoid double-replace).
+	if bytes.Contains(payload, reasoningKeyNew) {
 		return line
 	}
+
+	var oldKey []byte
+	switch {
+	case bytes.Contains(payload, reasoningKeyOld):
+		oldKey = reasoningKeyOld
+	case bytes.Contains(payload, thinkingKeyOld):
+		oldKey = thinkingKeyOld
+	default:
+		return line
+	}
+
 	// Rebuild: keep the original "data:" prefix bytes (preserving original
-	// spacing), then replace reasoning key in the JSON payload.
+	// spacing), then replace the matched key in the JSON payload.
 	prefixLen := len(line) - len(payload)
-	transformed := bytes.Replace(payload, reasoningKeyOld, reasoningKeyNew, 1)
+	transformed := bytes.Replace(payload, oldKey, reasoningKeyNew, 1)
 	out := make([]byte, prefixLen+len(transformed))
 	copy(out, line[:prefixLen])
 	copy(out[prefixLen:], transformed)

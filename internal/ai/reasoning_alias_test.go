@@ -26,6 +26,11 @@ func TestTransformSSELine(t *testing.T) {
 		{"data:\t{\"choices\":[{\"delta\":{\"reasoning\":\"x\"}}]}", "data:\t{\"choices\":[{\"delta\":{\"reasoning_content\":\"x\"}}]}"},
 		// Already uses reasoning_content — must NOT double-replace
 		{`data: {"choices":[{"delta":{"reasoning_content":"already"}}]}`, `data: {"choices":[{"delta":{"reasoning_content":"already"}}]}`},
+		// thinking: alias (GitHub Copilot / Claude)
+		{`data: {"choices":[{"delta":{"thinking":"think"}}]}`, `data: {"choices":[{"delta":{"reasoning_content":"think"}}]}`},
+		{`data:{"choices":[{"delta":{"thinking":"x"}}]}`, `data:{"choices":[{"delta":{"reasoning_content":"x"}}]}`},
+		// thinking: must NOT fire when reasoning_content already present
+		{`data: {"choices":[{"delta":{"reasoning_content":"already","thinking":"x"}}]}`, `data: {"choices":[{"delta":{"reasoning_content":"already","thinking":"x"}}]}`},
 		// Non-data lines untouched
 		{`event: ping`, `event: ping`},
 		{``, ``},
