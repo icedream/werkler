@@ -33,6 +33,7 @@ import (
 	"github.com/icedream/werkler/internal/config"
 	"github.com/icedream/werkler/internal/memorystore"
 	"github.com/icedream/werkler/internal/process"
+	"github.com/icedream/werkler/internal/sandbox"
 	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/todostore"
 )
@@ -146,6 +147,7 @@ type Manager struct {
 	agents        []agents.Agent
 	todoStore     *todostore.Store
 	memoryStore   *memorystore.MemoryStore
+	stagingStore  *sandbox.Store
 	taskTitle     func(string) // optional; called when the AI sets a task title via task_start
 	agentActivate func(string) // optional; called when use_agent requests activation
 	activeCallID  atomic.Value // stores string; set/cleared by doCallTool goroutine
@@ -213,6 +215,16 @@ func (m *Manager) SetTodoStore(s *todostore.Store) {
 // (not concurrency-safe).
 func (m *Manager) SetMemoryStore(s *memorystore.MemoryStore) {
 	m.memoryStore = s
+	m.builtins = m.makeBuiltins()
+}
+
+// SetStagingStore enables write-staging mode: file_write, file_edit, and
+// file_delete are intercepted and stored in s rather than written to disk.
+// file_read will read from the staging store first before falling back to disk.
+// When s is nil, staging is disabled and operations go directly to disk.
+// Must be called at setup time only (not concurrency-safe).
+func (m *Manager) SetStagingStore(s *sandbox.Store) {
+	m.stagingStore = s
 	m.builtins = m.makeBuiltins()
 }
 
@@ -1177,6 +1189,27 @@ Duplicate titles or IDs are skipped with a note in the result — do not retry t
 		)
 	}
 
+	if m.stagingStore != nil {
+		builtins = append(builtins,
+			builtin{
+				def: ai.ToolDefinition{
+					Name:        "commit_staged_writes",
+					Description: "Commit all staged file writes and deletes to disk. Call this once you are satisfied with the staged changes.",
+					InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+				},
+				handle: m.handleCommitStagedWrites,
+			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name:        "discard_staged_writes",
+					Description: "Discard all staged file writes and deletes without touching disk.",
+					InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+				},
+				handle: m.handleDiscardStagedWrites,
+			},
+		)
+	}
+
 	if m.memoryStore != nil {
 		builtins = append(builtins,
 			builtin{
@@ -1958,17 +1991,31 @@ func (m *Manager) handleFileRead(ctx context.Context, args map[string]any) (stri
 		return "", err
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("file_read: %w", err)
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("file_read: %s is a directory; use file_list to list directories", path)
+	// If staging is active, serve staged content (or honour staged deletions).
+	var data []byte
+	if m.stagingStore != nil {
+		if staged, found := m.stagingStore.Read(path); found {
+			if staged == nil {
+				return "", fmt.Errorf("file_read: %s has been staged for deletion", path)
+			}
+			data = staged
+		}
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("file_read: %w", err)
+	if data == nil {
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", fmt.Errorf("file_read: %w", err)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("file_read: %s is a directory; use file_list to list directories", path)
+		}
+
+		var readErr error
+		data, readErr = os.ReadFile(path)
+		if readErr != nil {
+			return "", fmt.Errorf("file_read: %w", readErr)
+		}
 	}
 
 	if !utf8.Valid(data) {
@@ -2272,6 +2319,15 @@ func (m *Manager) handleFileWrite(ctx context.Context, args map[string]any) (str
 		return "", err
 	}
 
+	if m.stagingStore != nil {
+		m.stagingStore.StageWrite(path, []byte(content))
+		return jsonResult(map[string]any{
+			"path":   path,
+			"bytes":  len(content),
+			"staged": true,
+		}), nil
+	}
+
 	if createParents {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return "", fmt.Errorf("file_write: creating parent directories: %w", err)
@@ -2327,15 +2383,28 @@ func (m *Manager) handleFileEdit(ctx context.Context, args map[string]any) (stri
 		return "", err
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("file_edit: %w", err)
+	// Read from staging store if active, fall back to disk.
+	var fileData []byte
+	if m.stagingStore != nil {
+		if staged, found := m.stagingStore.Read(path); found {
+			if staged == nil {
+				return "", fmt.Errorf("file_edit: %s has been staged for deletion", path)
+			}
+			fileData = staged
+		}
 	}
-	if !utf8.Valid(data) {
+	if fileData == nil {
+		var readErr error
+		fileData, readErr = os.ReadFile(path)
+		if readErr != nil {
+			return "", fmt.Errorf("file_edit: %w", readErr)
+		}
+	}
+	if !utf8.Valid(fileData) {
 		return "", fmt.Errorf("file_edit: %s appears to be a binary file", path)
 	}
 
-	content := string(data)
+	content := string(fileData)
 
 	// Validate all hunks before writing anything (atomic failure).
 	for i, h := range hunks {
@@ -2373,7 +2442,9 @@ func (m *Manager) handleFileEdit(ctx context.Context, args map[string]any) (stri
 		content = strings.Replace(content, h.old, h.new, 1)
 	}
 
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if m.stagingStore != nil {
+		m.stagingStore.StageWrite(path, []byte(content))
+	} else if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("file_edit: writing %s: %w", path, err)
 	}
 
@@ -2427,10 +2498,31 @@ func (m *Manager) handleFileDelete(ctx context.Context, args map[string]any) (st
 		return "", fmt.Errorf("file_delete: %s is a directory; use process_start with rm -r to delete directories", path)
 	}
 
+	if m.stagingStore != nil {
+		m.stagingStore.StageDelete(path)
+		return jsonResult(map[string]any{"deleted": path, "staged": true}), nil
+	}
+
 	if err := os.Remove(path); err != nil {
 		return "", fmt.Errorf("file_delete: %w", err)
 	}
 	return jsonResult(map[string]any{"deleted": path}), nil
+}
+
+func (m *Manager) handleCommitStagedWrites(_ context.Context, _ map[string]any) (string, error) {
+	if m.stagingStore == nil {
+		return "no staging store active", nil
+	}
+	res := m.stagingStore.Commit()
+	return res.String(), nil
+}
+
+func (m *Manager) handleDiscardStagedWrites(_ context.Context, _ map[string]any) (string, error) {
+	if m.stagingStore == nil {
+		return "no staging store active", nil
+	}
+	n := m.stagingStore.Discard()
+	return fmt.Sprintf("discarded %d staged operation(s)", n), nil
 }
 
 // ensure Manager implements chat.ToolManager.
