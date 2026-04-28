@@ -173,6 +173,14 @@ type streamChunkMsg struct {
 	chunk ai.StreamChunk
 }
 
+// thinkChunkMsg carries one StreamChunk from a think tool sub-completion,
+// together with the call ID and the channel for subsequent reads.
+type thinkChunkMsg struct {
+	callID string
+	ch     <-chan ai.StreamChunk
+	chunk  ai.StreamChunk
+}
+
 type toolResultMsg struct {
 	callID   string
 	toolName string
@@ -1022,13 +1030,15 @@ type Model struct {
 	messages []ai.Message
 
 	// Agent state machine.
-	state            tuiState
-	pendingCalls     []ai.ToolCall
-	currentCall      *ai.ToolCall
-	callingToolName  string // name of tool currently executing (stateCallingTool)
-	callingToolTitle string // AI-provided title for the current tool call (may be empty)
-	streamingItemIdx int    // index into items of the in-progress assistant item; -1 if none
-	reasoningItemIdx int    // index into items of the in-progress reasoning item; -1 if none
+	state                 tuiState
+	pendingCalls          []ai.ToolCall
+	currentCall           *ai.ToolCall
+	callingToolName       string          // name of tool currently executing (stateCallingTool)
+	callingToolTitle      string          // AI-provided title for the current tool call (may be empty)
+	streamingItemIdx      int             // index into items of the in-progress assistant item; -1 if none
+	reasoningItemIdx      int             // index into items of the in-progress reasoning item; -1 if none
+	thinkReasoningItemIdx int             // index into items of the in-progress think-tool reasoning item; -1 if none
+	thinkTextAccum        strings.Builder // accumulates text output during a think sub-completion
 
 	// Path approval state (stateAwaitingPathApproval).
 	pendingPathApprovals  []chat.PathAccessRequest // remaining paths needing approval
@@ -1382,6 +1392,7 @@ func initialModel(
 		state:                 stateIdle,
 		streamingItemIdx:      -1,
 		reasoningItemIdx:      -1,
+		thinkReasoningItemIdx: -1,
 		oauthInfoIdx:          -1,
 		askUserSelectedIdx:    -1,
 		askUserItemIdx:        -1,
@@ -3839,6 +3850,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, readNextChunk(msg.ch))
 		}
 
+	case thinkChunkMsg:
+		chunk := msg.chunk
+		switch {
+		case chunk.Err != nil && !errors.Is(chunk.Err, io.EOF):
+			cmds = append(cmds, func() tea.Msg {
+				return toolResultMsg{callID: msg.callID, toolName: "think", err: chunk.Err}
+			})
+		case chunk.Done || errors.Is(chunk.Err, io.EOF):
+			// Sub-completion finished — deliver accumulated text as tool result.
+			if chunk.Done {
+				m.thinkTextAccum.WriteString(chunk.Msg.Content)
+			}
+			result := m.thinkTextAccum.String()
+			m.thinkTextAccum.Reset()
+			m.thinkReasoningItemIdx = -1
+			callID := msg.callID
+			cmds = append(cmds, func() tea.Msg {
+				return toolResultMsg{callID: callID, toolName: "think", result: result}
+			})
+		default:
+			if chunk.ReasoningDelta != "" {
+				// First reasoning delta — allocate the reasoning display item.
+				if m.thinkReasoningItemIdx < 0 {
+					m.thinkReasoningItemIdx = len(m.items)
+					m.items = append(m.items, displayItem{kind: itemReasoning, content: ""})
+				}
+				m.items[m.thinkReasoningItemIdx].content += chunk.ReasoningDelta
+				needRebuild = true
+			} else {
+				m.thinkTextAccum.WriteString(chunk.Delta)
+			}
+			cmds = append(cmds, readNextThinkChunk(msg.callID, msg.ch))
+		}
+
 	case toolResultMsg:
 		// If a toolResultMsg arrives while we're still showing the ask_user prompt
 		// (e.g. ctx was cancelled), tear down the question display gracefully.
@@ -5083,6 +5128,8 @@ func (m *Model) processNextCall() tea.Cmd {
 		m.currentCall = nil
 		m.executingCall = &callCopy
 		m.state = stateCallingTool
+		m.thinkReasoningItemIdx = -1
+		m.thinkTextAccum.Reset()
 		recent := recentContextMessages(m.messages, 6)
 		thinkEffort := m.configuredReasoningEffort
 		if thinkEffort == "" {
@@ -5213,40 +5260,25 @@ func recentContextMessages(msgs []ai.Message, n int) []ai.Message {
 	return filtered
 }
 
-// doThinkTool makes a focused sub-completion for the think tool and returns the
-// answer as a toolResultMsg. The reasoning tokens from the sub-call are discarded;
-// only the final answer text is returned.
+// doThinkTool starts a focused sub-completion for the think tool and returns
+// a command that reads the first chunk. Subsequent chunks are read via
+// thinkChunkMsg dispatch in Update. Reasoning tokens are displayed live as an
+// itemReasoning block; the final text answer is returned as a toolResultMsg.
 func doThinkTool(ctx context.Context, callID string, client ai.StreamCompleter, question string, recentMsgs []ai.Message, effort string) tea.Cmd {
-	return func() tea.Msg {
-		msgs := []ai.Message{
-			{
-				Role: "system",
-				Content: "Reason carefully and step by step. Provide a thorough, accurate analysis. " +
-					"Focus only on the question asked — be concise but complete.",
-			},
-		}
-		msgs = append(msgs, recentMsgs...)
-		msgs = append(msgs, ai.Message{Role: "user", Content: question})
-		if effort != "" {
-			ctx = ai.WithReasoningEffortCtx(ctx, effort)
-		}
-		ch := client.CompleteStream(ctx, msgs, nil)
-		var answer strings.Builder
-		for chunk := range ch {
-			if chunk.Err != nil {
-				if errors.Is(chunk.Err, io.EOF) {
-					break
-				}
-				return toolResultMsg{callID: callID, toolName: "think", err: chunk.Err}
-			}
-			if chunk.Done {
-				answer.WriteString(chunk.Msg.Content)
-				break
-			}
-			answer.WriteString(chunk.Delta)
-		}
-		return toolResultMsg{callID: callID, toolName: "think", result: answer.String()}
+	msgs := []ai.Message{
+		{
+			Role: "system",
+			Content: "Reason carefully and step by step. Provide a thorough, accurate analysis. " +
+				"Focus only on the question asked — be concise but complete.",
+		},
 	}
+	msgs = append(msgs, recentMsgs...)
+	msgs = append(msgs, ai.Message{Role: "user", Content: question})
+	if effort != "" {
+		ctx = ai.WithReasoningEffortCtx(ctx, effort)
+	}
+	ch := client.CompleteStream(ctx, msgs, nil)
+	return readNextThinkChunk(callID, ch)
 }
 
 // readNextChunk returns a Cmd that reads one chunk from ch and wraps it in a
@@ -5259,6 +5291,19 @@ func readNextChunk(ch <-chan ai.StreamChunk) tea.Cmd {
 			return streamChunkMsg{ch: ch, chunk: ai.StreamChunk{Done: true}}
 		}
 		return streamChunkMsg{ch: ch, chunk: chunk}
+	}
+}
+
+// readNextThinkChunk returns a Cmd that reads one chunk from a think sub-completion
+// channel and wraps it in a thinkChunkMsg (which carries ch and callID so Update
+// can dispatch the next read and associate the result with the correct tool call).
+func readNextThinkChunk(callID string, ch <-chan ai.StreamChunk) tea.Cmd {
+	return func() tea.Msg {
+		chunk, ok := <-ch
+		if !ok {
+			return thinkChunkMsg{callID: callID, ch: ch, chunk: ai.StreamChunk{Done: true}}
+		}
+		return thinkChunkMsg{callID: callID, ch: ch, chunk: chunk}
 	}
 }
 
