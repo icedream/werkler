@@ -2,9 +2,14 @@
 // and system prompt by running a scripted test suite against any
 // OpenAI-compatible endpoint.
 //
-// Usage:
+// Usage (direct):
 //
 //	modeltest --base-url https://... --model my-model [--api-key sk-...] [--run case-name] [--repeat N]
+//
+// Usage (from werkler config):
+//
+//	modeltest --provider kubeai [--config ~/.config/werkler/config.toml] [--run case-name]
+//	modeltest --provider copilot
 package main
 
 import (
@@ -19,8 +24,11 @@ import (
 	"text/tabwriter"
 
 	"github.com/icedream/werkler/internal/ai"
+	"github.com/icedream/werkler/internal/config"
+	"github.com/icedream/werkler/internal/copilot"
 	"github.com/icedream/werkler/internal/modeleval"
 	"github.com/spf13/cobra"
+	"net/http"
 )
 
 func main() {
@@ -35,29 +43,32 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	var (
-		baseURL string
-		model   string
-		apiKey  string
-		run     []string
-		repeat  int
-		verbose bool
+		baseURL    string
+		model      string
+		apiKey     string
+		provider   string
+		configPath string
+		run        []string
+		repeat     int
+		verbose    bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "modeltest",
 		Short: "Evaluate a model's tool-calling behaviour against werkler's prompts",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runEval(cmd.Context(), baseURL, model, apiKey, run, repeat, verbose)
+			return runEval(cmd.Context(), baseURL, model, apiKey, provider, configPath, run, repeat, verbose)
 		},
 	}
 
 	cmd.Flags().StringVarP(&baseURL, "base-url", "u", "", "OpenAI-compatible API base URL (e.g. http://localhost:11434/v1)")
-	cmd.Flags().StringVarP(&model, "model", "m", "gpt-4o", "Model name to test")
-	cmd.Flags().StringVarP(&apiKey, "api-key", "k", envOr("OPENAI_API_KEY", "unused"), "API key (defaults to $OPENAI_API_KEY)")
+	cmd.Flags().StringVarP(&model, "model", "m", "", "Model name to test (overrides provider default when --provider is set)")
+	cmd.Flags().StringVarP(&apiKey, "api-key", "k", envOr("OPENAI_API_KEY", ""), "API key (defaults to $OPENAI_API_KEY)")
+	cmd.Flags().StringVarP(&provider, "provider", "p", "", "Use a named provider from the werkler config (e.g. copilot, kubeai)")
+	cmd.Flags().StringVar(&configPath, "config", config.DefaultConfigPath(), "Path to werkler config.toml (used with --provider)")
 	cmd.Flags().StringArrayVarP(&run, "run", "r", nil, "Run only the named test/scenario case(s); repeatable. Default: all.")
 	cmd.Flags().IntVarP(&repeat, "repeat", "n", 0, "Override Repeat count for every case")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Print each run's full trace and error details")
-	_ = cmd.MarkFlagRequired("base-url")
 
 	return cmd
 }
@@ -69,8 +80,86 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func runEval(ctx context.Context, baseURL, model, apiKey string, run []string, repeat int, verbose bool) error {
-	client := ai.New(baseURL, apiKey, model)
+func buildClientFromConfig(providerName, configPath, modelOverride string) (ai.Completer, string, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("loading config %s: %w", configPath, err)
+	}
+
+	providers, err := config.NormalizeProviders(&cfg.AI)
+	if err != nil {
+		return nil, "", fmt.Errorf("normalizing providers: %w", err)
+	}
+
+	var p config.ProviderConfig
+	found := false
+	for _, pp := range providers {
+		if pp.Name == providerName {
+			p = pp
+			found = true
+			break
+		}
+	}
+	if !found {
+		names := make([]string, len(providers))
+		for i, pp := range providers {
+			names[i] = pp.Name
+		}
+		return nil, "", fmt.Errorf("provider %q not found in config; available: %s", providerName, strings.Join(names, ", "))
+	}
+
+	if modelOverride != "" {
+		p.Model = modelOverride
+	}
+
+	label := string(p.Type) + "/" + p.Model
+	if p.Type == "" {
+		label = "openai/" + p.Model
+	}
+
+	switch p.Type {
+	case config.ProviderTypeOpenAI, "":
+		c := ai.NewWithTransport(p.Endpoint, p.APIKey, p.Model, ai.NewReasoningAliasTransport(nil))
+		return c, label, nil
+	case config.ProviderTypeCopilot:
+		tok, err := copilot.LoadGitHubToken()
+		if err != nil {
+			return nil, "", fmt.Errorf("loading Copilot token: %w", err)
+		}
+		if tok == nil {
+			return nil, "", fmt.Errorf("Copilot not authenticated — run `werkler auth copilot` first")
+		}
+		transport := ai.NewReasoningAliasTransport(copilot.NewTransport(tok.AccessToken))
+		c := ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport}, ai.WithNoStreamUsage())
+		return c, label, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported provider type %q", p.Type)
+	}
+}
+
+func runEval(ctx context.Context, baseURL, model, apiKey, provider, configPath string, run []string, repeat int, verbose bool) error {
+	var client ai.Completer
+	var label string
+
+	switch {
+	case provider != "":
+		var err error
+		client, label, err = buildClientFromConfig(provider, configPath, model)
+		if err != nil {
+			return err
+		}
+	case baseURL != "":
+		if model == "" {
+			model = "gpt-4o"
+		}
+		if apiKey == "" {
+			apiKey = "unused"
+		}
+		client = ai.New(baseURL, apiKey, model)
+		label = model + " @ " + baseURL
+	default:
+		return fmt.Errorf("specify either --provider <name> or --base-url <url>")
+	}
 
 	cases := modeleval.AllCases()
 	scenarios := modeleval.AllScenarioCases()
@@ -113,7 +202,7 @@ func runEval(ctx context.Context, baseURL, model, apiKey string, run []string, r
 		}
 	}
 
-	fmt.Printf("Testing model %q against %s\n\n", model, baseURL)
+	fmt.Printf("Testing %q\n\n", label)
 
 	anyFailed := false
 
