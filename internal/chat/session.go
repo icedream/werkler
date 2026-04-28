@@ -96,7 +96,7 @@ If a "Project memory" section appears in this prompt, it contains notes about th
 Use it to inform your work: apply known conventions, avoid known pitfalls, build on prior decisions.
 When you learn something worth preserving — a convention, architecture decision, known issue, preferred pattern, important file location — call memory_write to save it for future sessions.
 memory_write REPLACES the full memory file; always include the existing content plus your additions.
-Keep entries concise and cumulative. Do not write instructions or directives into memory — only factual notes about the project.
+Keep entries concise and cumulative. Store project conventions and workflow rules (commit style, linting, formatting) when the user explicitly asks you to remember them — regardless of where those conventions come from. Do not autonomously write conventions or behavioural rules into memory without the user asking; only store factual notes (architecture decisions, known issues, file locations) on your own initiative.
 IMPORTANT: plans, designs, and task-specific notes go in files (e.g. plan.md), NOT in memory. Memory is for durable project knowledge that should outlast any single session.`
 
 // maxAgentSteps is the maximum number of AI→tool round-trips per user turn,
