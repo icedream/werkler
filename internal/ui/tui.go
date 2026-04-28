@@ -682,10 +682,7 @@ func init() {
 			description: "Switch the active AI model",
 			available:   func(m *Model) bool { return m.modelManager != nil },
 			action: func(m *Model) []tea.Cmd {
-				m.state = statePickingModel
-				m.modelPicker.SetItems(nil)
-				m.modelPicker.SetSize(m.width, m.height-fixedLines)
-				return []tea.Cmd{doListModels(m.ctx, m.modelManager)}
+				return []tea.Cmd{m.openModelPicker(m.state)}
 			},
 		},
 		{
@@ -1059,7 +1056,8 @@ type Model struct {
 	oauthInfoIdx int            // index of the OAuth status item; -1 if none
 
 	// Model picker (only valid during statePickingModel).
-	modelPicker list.Model
+	modelPicker       list.Model
+	pickerReturnState tuiState // state to restore when model picker is dismissed
 
 	// Session picker (only valid during statePickingSession).
 	sessionPicker list.Model
@@ -1932,6 +1930,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.EnableMouseCellMotion
 		}
 
+		// ctrl+p opens the model picker from any quiescent state.
+		if msg.Type == tea.KeyCtrlP && m.modelManager != nil &&
+			m.state != statePickingModel {
+			switch m.state {
+			case stateIdle, stateAwaitingUserQuestion:
+				m.showCompletion = false
+				cmds = append(cmds, m.openModelPicker(m.state))
+			}
+		}
+
 		switch m.state {
 		case stateAwaitingPathApproval:
 			if m.currentPathRequest.Path != "" {
@@ -2372,15 +2380,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateCompletion()
 				}
 
-			case tea.KeyCtrlP:
-				if m.modelManager != nil {
-					m.showCompletion = false
-					m.state = statePickingModel
-					m.modelPicker.SetItems(nil)
-					m.modelPicker.SetSize(m.width, m.height-fixedLines)
-					cmds = append(cmds, doListModels(m.ctx, m.modelManager))
-				}
-
 			case tea.KeyCtrlR:
 				if m.sessionStore != nil {
 					m.showCompletion = false
@@ -2410,8 +2409,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingModel:
 			switch msg.Type {
 			case tea.KeyEsc, tea.KeyCtrlC:
-				m.setIdle()
-				m.updateCompletion()
+				m.returnFromModelPicker()
 			case tea.KeyEnter:
 				if sel := m.modelPicker.SelectedItem(); sel != nil {
 					item := sel.(modelItem)
@@ -2423,8 +2421,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, doGetModelInfo(m.ctx, getter))
 					}
 				}
-				m.setIdle()
-				m.updateCompletion()
+				m.returnFromModelPicker()
 			default:
 				var pickerCmd tea.Cmd
 				m.modelPicker, pickerCmd = m.modelPicker.Update(msg)
@@ -3254,8 +3251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelsErrMsg:
 		if m.state == statePickingModel {
 			m.items = append(m.items, displayItem{kind: itemError, content: "listing models: " + msg.err.Error()})
-			m.setIdle()
-			m.updateCompletion()
+			m.returnFromModelPicker()
 			needRebuild = true
 		}
 
@@ -4220,6 +4216,9 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.askUserAllowFreeform {
 			l2 += "  " + keyHintStyle.Render("[type]") + " custom answer"
 		}
+		if m.modelManager != nil {
+			l2 += "  " + keyHintStyle.Render("ctrl+p") + " switch model"
+		}
 		return l1 + allowAllIndicator, l2
 	default:
 		mouseHint := "  " + keyHintStyle.Render("alt+m") + " enable text selection"
@@ -4382,6 +4381,27 @@ func (m *Model) setThinking() {
 func (m *Model) setIdle() {
 	m.state = stateIdle
 	m.thinkingStart = time.Time{}
+}
+
+// openModelPicker switches to the model picker, remembering returnTo so that
+// returnFromModelPicker can restore it. Only valid when modelManager != nil.
+func (m *Model) openModelPicker(returnTo tuiState) tea.Cmd {
+	m.pickerReturnState = returnTo
+	m.state = statePickingModel
+	m.modelPicker.SetItems(nil)
+	m.modelPicker.SetSize(m.width, m.height-fixedLines)
+	return doListModels(m.ctx, m.modelManager)
+}
+
+// returnFromModelPicker exits the model picker and restores the state that was
+// active before openModelPicker was called. If the saved state is idle (or
+// unset), updateCompletion is called so the slash-command list stays in sync.
+func (m *Model) returnFromModelPicker() {
+	m.state = m.pickerReturnState
+	m.pickerReturnState = stateIdle // reset so it does not linger
+	if m.state == stateIdle {
+		m.updateCompletion()
+	}
 }
 
 // thinkingElapsedHint returns a dimmed elapsed-time string (e.g. " 12s") once
