@@ -2545,14 +2545,16 @@ Identify: correctness issues, bugs, logic errors, edge cases, security concerns,
 Be concise. Only surface issues that genuinely matter.
 If you find no significant issues, say so briefly.
 Do NOT comment on style, formatting, naming conventions, or other minor matters.
-You have access to file reading and process execution tools. Use them to look up referenced files,
-search the codebase with rg or grep (via process_start), or inspect directory structure when relevant.`,
+
+IMPORTANT: Your every response must be either a tool call or your complete final review.
+Never output "I will now...", "Let me read...", or any other intermediate narration — that would
+be treated as your final answer. Call tools first to gather context, then produce the full review.
+Use run_command (shell=true) to search with grep, file_read to read specific files, and
+file_list to explore directory structure when relevant.`,
 		allowedTools: map[string]bool{
-			"file_read":     true,
-			"file_list":     true,
-			"process_start": true,
-			"process_read":  true,
-			"process_stop":  true,
+			"file_read":   true,
+			"file_list":   true,
+			"run_command": true,
 		},
 		maxSteps:  10,
 		completer: c,
@@ -2575,7 +2577,11 @@ func makeDocReviewSubagent(c ai.Completer, label string) subagentDef {
 Evaluate whether the content is clear, easy to understand, and free of unnecessary jargon.
 Flag: confusing phrasing, unexplained technical terms, missing context, unclear steps, or anything a new user would find hard to follow.
 Be concise. Only surface issues that genuinely affect clarity or usability.
-Do NOT comment on technical correctness, code style, or implementation details.`,
+Do NOT comment on technical correctness, code style, or implementation details.
+
+IMPORTANT: Your every response must be either a tool call or your complete final review.
+Never output "I will now...", "Let me read...", or any other intermediate narration — that would
+be treated as your final answer.`,
 		allowedTools: map[string]bool{
 			"file_read": true,
 			"file_list": true,
