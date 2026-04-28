@@ -4577,7 +4577,12 @@ func (m Model) renderItem(item displayItem) string {
 		return renderMarkdown(m.renderer, item.content)
 
 	case itemProcessOutput:
-		prefix := processHandleStyle.Render("[process:" + item.handle + "]")
+		// Use toolNote (AI-formulated intent) as primary label; fall back to "[process:<handle>]".
+		label := "[process:" + item.handle + "]"
+		if item.toolNote != "" {
+			label = item.toolNote
+		}
+		prefix := processHandleStyle.Render(label)
 		var sb strings.Builder
 		sb.WriteString(prefix)
 		if m.collapsedHandles[item.handle] {
