@@ -2546,17 +2546,26 @@ Be concise. Only surface issues that genuinely matter.
 If you find no significant issues, say so briefly.
 Do NOT comment on style, formatting, naming conventions, or other minor matters.
 
+RESEARCH REQUIREMENT: Before writing your review you MUST use your tools to verify the plan
+against the actual codebase. Do not trust the description alone — read the real files.
+Specifically:
+- Use file_read to read every source file that the plan touches or references.
+- Use run_command (shell=true) with grep/rg to find related functions, types, and patterns.
+- Use file_list to discover files when paths are not given explicitly.
+- Check that types, field names, function signatures, and interfaces cited in the plan actually
+  exist and match what the plan says.
+- Look for existing code that conflicts with or duplicates the proposed changes.
+Only after this investigation should you write your final review.
+
 IMPORTANT: Your every response must be either a tool call or your complete final review.
 Never output "I will now...", "Let me read...", or any other intermediate narration — that would
-be treated as your final answer. Call tools first to gather context, then produce the full review.
-Use run_command (shell=true) to search with grep, file_read to read specific files, and
-file_list to explore directory structure when relevant.`,
+be treated as your final answer. Call tools to gather context, then produce the full review.`,
 		allowedTools: map[string]bool{
 			"file_read":   true,
 			"file_list":   true,
 			"run_command": true,
 		},
-		maxSteps:  10,
+		maxSteps:  20,
 		completer: c,
 		label:     label,
 	}
