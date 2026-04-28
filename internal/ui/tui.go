@@ -4690,7 +4690,7 @@ func (m *Model) processNextPath() tea.Cmd {
 // setCallingTool records the name and optional AI-provided title for the tool
 // currently executing, so the status bar can show a meaningful label.
 func (m *Model) setCallingTool(call ai.ToolCall) {
-	m.setCallingTool(call)
+	m.callingToolName = call.Name
 	m.callingToolTitle = toolCallIntent(call.Name, call.Arguments)
 }
 
