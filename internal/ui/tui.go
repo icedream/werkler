@@ -4514,7 +4514,14 @@ func (m Model) renderItem(item displayItem) string {
 		case toolStatusDenied:
 			badge = toolDeniedStyle.Render("✗")
 		}
-		name := renderToolName(item.toolName)
+		// For tools that carry an AI-formulated title (process_start, run_command),
+		// use the title as the primary display name instead of the generic friendly name.
+		var name string
+		if item.toolNote != "" && (item.toolName == "process_start" || item.toolName == "run_command") {
+			name = toolNameStyle.Render(item.toolNote) + " " + toolDimStyle.Render("["+item.toolName+"]")
+		} else {
+			name = renderToolName(item.toolName)
+		}
 		badgeAndName := "  " + badge + " " + name
 		prefixW := lipgloss.Width(badgeAndName)
 		line := badgeAndName
@@ -4532,7 +4539,9 @@ func (m Model) renderItem(item displayItem) string {
 		if item.toolStatus == toolStatusDenied {
 			line += "  " + toolDeniedStyle.Render("(denied)")
 		}
-		if item.toolNote != "" {
+		// Only show toolNote as a secondary annotation when it wasn't already
+		// promoted to the name line above.
+		if item.toolNote != "" && item.toolName != "process_start" && item.toolName != "run_command" {
 			var ns lipgloss.Style
 			if item.toolStatus == toolStatusFailed {
 				ns = errorStyle
