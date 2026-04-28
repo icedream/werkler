@@ -20,6 +20,7 @@ import (
 	mcppkg "github.com/icedream/werkler/internal/mcp"
 	"github.com/icedream/werkler/internal/memorystore"
 	"github.com/icedream/werkler/internal/pathutil"
+	"github.com/icedream/werkler/internal/sandbox"
 	"github.com/icedream/werkler/internal/sessionstore"
 	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/todostore"
@@ -37,6 +38,7 @@ var (
 	chatAutopilotMaxCyc int
 	chatMode            string
 	chatAgent           string
+	chatStagedWrites    bool
 )
 
 var chatCmd = &cobra.Command{
@@ -60,6 +62,7 @@ func init() {
 	chatCmd.Flags().IntVar(&chatAutopilotMaxCyc, "autopilot-max-cycles", 0, "Maximum autopilot cycles before pausing (0 = use config default)")
 	chatCmd.Flags().StringVar(&chatMode, "mode", "", "Activate a named mode preset (e.g. default, plan, document)")
 	chatCmd.Flags().StringVar(&chatAgent, "agent", "", "Activate a named custom agent on startup")
+	chatCmd.Flags().BoolVar(&chatStagedWrites, "staging", false, "Intercept file writes into a staging store; changes are only flushed when the AI calls commit_staged_writes")
 	rootCmd.AddCommand(chatCmd)
 }
 
@@ -136,6 +139,12 @@ func runChat(_ *cobra.Command, _ []string) error {
 	}
 	if len(loadedAgents) > 0 {
 		fmt.Fprintf(os.Stderr, "Loaded %d agent(s).\n", len(loadedAgents))
+	}
+
+	// Enable staged writes if configured via config or --staging flag.
+	if cfg.Sandbox.StagedWrites || chatStagedWrites {
+		toolMgr.SetStagingStore(sandbox.NewStore())
+		fmt.Fprintln(os.Stderr, "Sandbox: staged writes enabled — file changes will not touch disk until commit_staged_writes is called.")
 	}
 
 	todoStore := todostore.New()

@@ -129,6 +129,15 @@ type AutopilotConfig struct {
 	MaxCycles int `mapstructure:"max_cycles"`
 }
 
+// SandboxConfig holds settings for sandboxed AI tool execution.
+type SandboxConfig struct {
+	// StagedWrites, when true, intercepts file_write / file_edit / file_delete
+	// and holds them in an in-memory staging store instead of writing to disk
+	// immediately. The AI must call commit_staged_writes to flush changes to
+	// disk, or discard_staged_writes to drop them.
+	StagedWrites bool `mapstructure:"staged_writes"`
+}
+
 // ModeConfig defines a named mode preset that bundles session options together.
 // Built-in modes are "default", "plan", and "document".
 // User-defined modes can extend a built-in via the Base field.
@@ -156,6 +165,7 @@ type Config struct {
 	MCP       MCPConfig       `mapstructure:"mcp"`
 	Skills    SkillsConfig    `mapstructure:"skills"`
 	Autopilot AutopilotConfig `mapstructure:"autopilot"`
+	Sandbox   SandboxConfig   `mapstructure:"sandbox"`
 	Modes     []ModeConfig    `mapstructure:"modes"`
 	// ImplementationMode is the name of the mode preset to switch to when the
 	// AI calls start_implementation. Empty means use the default mode.
