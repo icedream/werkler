@@ -189,6 +189,8 @@ func (m *Manager) Start(
 		done:    make(chan struct{}),
 	}
 
+	var handle string
+
 	if usePTY {
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
@@ -209,11 +211,12 @@ func (m *Manager) Start(
 		if err := cmd.Start(); err != nil {
 			return "", fmt.Errorf("starting process: %w", err)
 		}
-		// Read from the merged stdout/stderr pipe.
-		go m.readLoop(p, stdout)
+		// readLoop is started after registering the handle below to avoid a
+		// race where output arrives before the handle is in m.procs.
+		defer func() { go m.readLoop(handle, p, stdout) }()
 	}
 
-	handle := newHandle()
+	handle = newHandle()
 
 	m.mu.Lock()
 	m.procs[handle] = p
@@ -227,7 +230,7 @@ func (m *Manager) Start(
 	m.mu.Unlock()
 
 	if usePTY {
-		go m.readLoop(p, p.ptmx)
+		go m.readLoop(handle, p, p.ptmx)
 	}
 	go waitLoop(m, handle, p)
 
@@ -235,7 +238,7 @@ func (m *Manager) Start(
 }
 
 // readLoop drains r into the process output buffer until EOF.
-func (m *Manager) readLoop(p *process, r io.Reader) {
+func (m *Manager) readLoop(handle string, p *process, r io.Reader) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := r.Read(buf)
@@ -245,15 +248,8 @@ func (m *Manager) readLoop(p *process, r io.Reader) {
 			_ = p.write(chunk)
 			m.mu.Lock()
 			notify := m.notify
-			handle := ""
-			for h, proc := range m.procs {
-				if proc == p {
-					handle = h
-					break
-				}
-			}
 			m.mu.Unlock()
-			if notify != nil && handle != "" {
+			if notify != nil {
 				raw := string(chunk)
 				clean := string(stripANSI(chunk))
 				notify(handle, raw, clean)
