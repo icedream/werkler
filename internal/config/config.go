@@ -60,6 +60,7 @@ const (
 	ProviderTypeOpenAI          ProviderType = "openai"
 	ProviderTypeCopilot         ProviderType = "copilot"
 	ProviderTypeOpenAIResponses ProviderType = "openai-responses"
+	ProviderTypeAnthropic       ProviderType = "anthropic"
 )
 
 // ProviderConfig describes a single named AI provider.

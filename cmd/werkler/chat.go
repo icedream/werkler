@@ -293,6 +293,12 @@ func buildProviderClient(p config.ProviderConfig) (ai.StreamCompleter, error) {
 		transport := ai.NewReasoningAliasTransport(copilot.NewTransport(tok.AccessToken))
 		httpClient := &http.Client{Transport: transport}
 		return copilot.NewCopilotMuxClient(p.Model, httpClient, p.DisableReasoning), nil
+	case config.ProviderTypeAnthropic:
+		var anthropicOpts []ai.AnthropicClientOption
+		if p.DisableReasoning {
+			anthropicOpts = append(anthropicOpts, ai.WithAnthropicDisableReasoning())
+		}
+		return ai.NewAnthropicClient(p.Endpoint, p.APIKey, p.Model, anthropicOpts...), nil
 	default:
 		return nil, fmt.Errorf("unknown provider type %q for provider %q", p.Type, p.Name)
 	}
