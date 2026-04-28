@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/icedream/werkler/docs"
 	"github.com/icedream/werkler/internal/agents"
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
@@ -1205,6 +1206,26 @@ only to re-read a specific memory mid-session (e.g. one that was too large to in
 					},
 				},
 				handle: m.handleMemoryRead,
+			},
+			builtin{
+				def: ai.ToolDefinition{
+					Name:        "lookup_werkler_docs",
+					Description: "Look up information from werkler's built-in documentation. Call this when the user asks about werkler features, keybindings, configuration options, modes, skills, autopilot, memory, or agents. Returns the relevant documentation sections.",
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"topic": map[string]any{
+								"type":        "string",
+								"description": `The topic or question to look up (e.g. "keybindings", "how to configure providers", "autopilot cycle limit")`,
+							},
+						},
+						"required": []string{"topic"},
+					},
+				},
+				handle: func(_ context.Context, args map[string]any) (string, error) {
+					topic, _ := args["topic"].(string)
+					return docs.Search(topic), nil
+				},
 			},
 			builtin{
 				def: ai.ToolDefinition{
