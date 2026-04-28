@@ -350,6 +350,12 @@ type taskCompleteMsg struct {
 // taskTitleMsg is sent when the AI calls task_start to name its current work.
 type taskTitleMsg struct{ title string }
 
+// sessionTitleRefinedMsg carries the async AI-generated session title back to Update.
+type sessionTitleRefinedMsg struct {
+	title string
+	err   error
+}
+
 // agentActivateMsg is sent when the AI calls use_agent.
 type agentActivateMsg struct{ name string }
 
@@ -1259,6 +1265,15 @@ type Model struct {
 	// bar in place of the generic "Thinking…"/"Streaming…" text.
 	// Cleared when the AI returns to idle or calls task_complete.
 	currentTaskTitle string
+
+	// sessionTitle is the human-readable title for the current session.
+	// Initially set from GenerateTitle on the first user message; refined
+	// asynchronously by a short AI call after the first text exchange.
+	sessionTitle string
+	// sessionTitleRefined is true once the async title refinement has been
+	// dispatched (or suppressed, e.g. on resume with an existing title).
+	// Set synchronously at dispatch time to prevent double-firing.
+	sessionTitleRefined bool
 
 	// thinkingStart records when we entered stateThinking for elapsed-time display.
 	// Zero value means we are not in a thinking state.
@@ -2293,6 +2308,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							cmds = append(cmds, doConnectOAuth(m.ctx, m.session, m.send))
 						} else {
 							m.messages = append(m.messages, ai.Message{Role: "user", Content: text, Parts: parts})
+							// Set initial session title from the first user message (synchronous).
+							if m.sessionTitle == "" {
+								m.sessionTitle = sessionstore.GenerateTitle(m.messages)
+								cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
+								if m.sessionStore != nil {
+									cmds = append(cmds, m.saveSession())
+								}
+							}
 							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.turnRoundtrips = 0
 							m.emptyResponseRetries = 0
@@ -2449,6 +2472,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case sessionItem:
 						m.resumeHint = nil
 						m.applySession(&item.sess)
+						cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
 						needRebuild = true
 						if cmd := m.recountContext(); cmd != nil {
 							cmds = append(cmds, cmd)
@@ -3177,6 +3201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		m.autopilotDisable()
 		m.currentTaskTitle = "" // clear task title on completion
+		cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
 		m.items = append(m.items, displayItem{
 			kind:    itemMarkdown,
 			content: "✓ **Task complete**\n\n" + msg.summary,
@@ -3189,7 +3214,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskTitleMsg:
 		m.currentTaskTitle = msg.title
+		cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
 		needRebuild = true
+
+	case sessionTitleRefinedMsg:
+		if msg.err == nil && msg.title != "" {
+			m.sessionTitle = msg.title
+			cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
+			if m.sessionStore != nil {
+				cmds = append(cmds, m.saveSession())
+			}
+		}
 
 	case agentActivateMsg:
 		// Ignore if busy -- the use_agent tool call is completing but we
@@ -3709,6 +3744,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					})
 				}
 				needRebuild = true
+				// Fire async title refinement on the first text-producing AI turn
+				// of a new session (not yet refined, not a resumed session).
+				if !m.sessionTitleRefined && chunk.Msg.Content != "" {
+					m.sessionTitleRefined = true // set synchronously before dispatch
+					var firstUser, firstAI string
+					for _, msg := range m.messages {
+						if firstUser == "" && msg.Role == "user" && msg.Content != "" {
+							firstUser = msg.Content
+						}
+						if firstAI == "" && msg.Role == "assistant" && msg.Content != "" {
+							firstAI = msg.Content
+						}
+						if firstUser != "" && firstAI != "" {
+							break
+						}
+					}
+					if firstUser != "" && firstAI != "" {
+						cmds = append(cmds, doRefineSessionTitle(m.newOpCtx(), m.client, firstUser, firstAI))
+					}
+				}
 				if m.sessionStore != nil {
 					cmds = append(cmds, m.saveSession())
 				}
@@ -4071,6 +4126,20 @@ func (m Model) View() string {
 
 // --- Helper views ---
 
+// effectiveWindowTitle returns the string that should be set as the terminal
+// window title. Format: "werkler — <session title> · <task title>".
+// Components that are empty are omitted.
+func (m Model) effectiveWindowTitle() string {
+	base := "werkler"
+	if m.sessionTitle != "" {
+		base += " — " + m.sessionTitle
+	}
+	if m.currentTaskTitle != "" {
+		base += " · " + m.currentTaskTitle
+	}
+	return base
+}
+
 func (m Model) headerView() string {
 	servers := "none"
 	if n := len(m.serverNames); n == 1 {
@@ -4078,7 +4147,11 @@ func (m Model) headerView() string {
 	} else if n > 1 {
 		servers = fmt.Sprintf("%d servers", n)
 	}
-	text := fmt.Sprintf("werkler  model: %s  mcp: %s", m.modelName, servers)
+	text := "werkler"
+	if m.sessionTitle != "" {
+		text += " · " + m.sessionTitle
+	}
+	text += fmt.Sprintf("  model: %s  mcp: %s", m.modelName, servers)
 	if m.contextUsage.Total > 0 {
 		maxTok := m.modelInfo.Context.MaxTokens
 		ctx := m.contextUsage.FormatWithMax(maxTok)
@@ -6257,6 +6330,9 @@ func (m *Model) applySession(sess *sessionstore.Session) {
 		m.recalcLayout()
 	}
 	m.populateHistoryFromMessages(sess.Messages)
+	// Restore session title; mark refined to suppress re-generation.
+	m.sessionTitle = sess.Title
+	m.sessionTitleRefined = (sess.Title != "")
 	// Show a resume banner as the first visible item.
 	banner := displayItem{
 		kind:    itemInfo,
@@ -6300,6 +6376,44 @@ func rebuildItemsFromMessages(msgs []ai.Message) []displayItem {
 }
 
 // doSaveSession saves the current session state asynchronously.
+// doRefineSessionTitle fires an async non-streaming AI call to generate a concise
+// session title from the first user message and first AI text response.
+// It dispatches sessionTitleRefinedMsg when done (error is non-fatal).
+func doRefineSessionTitle(ctx context.Context, client ai.StreamCompleter, firstUserMsg, firstAIText string) tea.Cmd {
+	return func() tea.Msg {
+		const maxInput = 200
+		truncate := func(s string) string {
+			if len(s) > maxInput {
+				return s[:maxInput] + "…"
+			}
+			return s
+		}
+		prompt := "User: " + truncate(firstUserMsg) + "\nAssistant: " + truncate(firstAIText) + "\nTitle:"
+		msgs := []ai.Message{
+			{
+				Role: "system",
+				Content: "You generate extremely short session titles. " +
+					"Reply with ONLY the title text — no punctuation, no quotes, no explanation. 6 words maximum.",
+			},
+			{Role: "user", Content: prompt},
+		}
+		completer, ok := client.(ai.Completer)
+		if !ok {
+			return sessionTitleRefinedMsg{err: fmt.Errorf("client does not support Complete")}
+		}
+		result, err := completer.Complete(ctx, msgs, nil)
+		if err != nil {
+			return sessionTitleRefinedMsg{err: err}
+		}
+		// Trim to first line, cap at 60 chars.
+		title := strings.SplitN(strings.TrimSpace(result.Content), "\n", 2)[0]
+		if len(title) > 60 {
+			title = title[:60]
+		}
+		return sessionTitleRefinedMsg{title: title}
+	}
+}
+
 // seq is a monotonically increasing counter; the sessionSavedMsg handler
 // discards arrivals with a seq older than the most recent confirmed save.
 func doSaveSession(store *sessionstore.Store, sess sessionstore.Session, seq int) tea.Cmd {
@@ -6369,8 +6483,11 @@ func (m *Model) currentSessionSnapshot() sessionstore.Session {
 	if id == "" {
 		id = sessionstore.NewID()
 	}
-	// Generate a title from the first user message if possible.
-	title := sessionstore.GenerateTitle(m.messages)
+	// Use the in-memory refined title if available; fall back to GenerateTitle.
+	title := m.sessionTitle
+	if title == "" {
+		title = sessionstore.GenerateTitle(m.messages)
+	}
 	snap := sessionstore.Session{
 		ID:        id,
 		Title:     title,
