@@ -57,8 +57,9 @@ type MCPConfig struct {
 type ProviderType string
 
 const (
-	ProviderTypeOpenAI  ProviderType = "openai"
-	ProviderTypeCopilot ProviderType = "copilot"
+	ProviderTypeOpenAI          ProviderType = "openai"
+	ProviderTypeCopilot         ProviderType = "copilot"
+	ProviderTypeOpenAIResponses ProviderType = "openai-responses"
 )
 
 // ProviderConfig describes a single named AI provider.
