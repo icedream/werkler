@@ -38,8 +38,12 @@ import (
 	"github.com/icedream/werkler/internal/tools"
 )
 
-// fixedLines is the number of terminal lines consumed by non-viewport UI elements:
-// header(1) + sep(1) + sep(1) + statusLine1(1) + statusLine2(1) + sep(1) + input(1) = 7
+// countTokens returns an approximate token count for a string.
+func countTokens(text string) int {
+	// Very rough English delta: 4 chars ≈ 1 token. Refine later with per-model tokenizer.
+	return (len(text) + 3) / 4
+}
+
 const fixedLines = 7
 
 // defaultSidebarWidth is the default column width of the todo sidebar (including 1 separator column).
@@ -270,13 +274,17 @@ type oauthConnectFailedMsg struct{ err error }
 
 // --- Model picker messages ---
 
-type modelsLoadedMsg struct{ models []ai.ModelItem }
-type modelsErrMsg struct{ err error }
+type (
+	modelsLoadedMsg struct{ models []ai.ModelItem }
+	modelsErrMsg    struct{ err error }
+)
 
 // --- Tool picker messages ---
 
-type allToolsMsg struct{ tools []ai.ToolDefinition }
-type allToolsErrMsg struct{ err error }
+type (
+	allToolsMsg    struct{ tools []ai.ToolDefinition }
+	allToolsErrMsg struct{ err error }
+)
 
 // processOutputMsg carries new output from a running process for live display.
 type processOutputMsg struct {
@@ -427,6 +435,7 @@ func (t toolItem) Title() string {
 	}
 	return check + " " + toolFriendlyName(t.name)
 }
+
 func (t toolItem) Description() string {
 	server := toolServerName(t.name)
 	desc := t.description
@@ -495,6 +504,7 @@ func (s skillItem) Title() string {
 	}
 	return check + " " + s.name
 }
+
 func (s skillItem) Description() string {
 	const maxDesc = 100
 	desc := s.description
@@ -518,6 +528,7 @@ func (m modeItem) Title() string {
 	}
 	return indicator + m.mode.Name
 }
+
 func (m modeItem) Description() string {
 	if m.mode.IsDefault {
 		return "Standard mode -- no modifications to system prompt or session settings"
@@ -554,6 +565,7 @@ func (a agentToolItem) Title() string {
 	}
 	return check + " " + a.name
 }
+
 func (a agentToolItem) Description() string {
 	if a.alwaysOn {
 		return "Infrastructure tool -- always available regardless of agent tool restrictions"
@@ -578,6 +590,7 @@ func (r registryItem) Title() string {
 	}
 	return t
 }
+
 func (r registryItem) Description() string {
 	desc := r.srv.Description
 	const maxDesc = 100
@@ -597,6 +610,7 @@ type registryInstalledItem struct{ srv config.MCPServerConfig }
 func (r registryInstalledItem) Title() string {
 	return r.srv.Name
 }
+
 func (r registryInstalledItem) Description() string {
 	switch r.srv.Transport {
 	case config.MCPTransportStreamable, config.MCPTransportSSE:
@@ -1013,6 +1027,12 @@ func init() {
 
 // Model is the bubbletea model for the interactive TUI.
 type Model struct {
+	// --- Token speed display fields ---
+	streamingStart time.Time // when current streaming response began
+	streamedTokens int       // token count for live stream
+	showTokenSpeed bool      // toggle: show live tokens/sec
+	lastTokenSpeed float64   // summary: last turn's tokens/sec
+
 	ctx     context.Context
 	client  ai.StreamCompleter
 	session *chat.Session
@@ -1417,6 +1437,7 @@ func initialModel(
 		mouseEnabled:          true,
 		sessionCWD:            cwd,
 		showReasoning:         true,
+		showTokenSpeed:        false,
 	}
 }
 
@@ -1956,6 +1977,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.EnableMouseCellMotion
 		}
 
+		// Ctrl+T toggles live token speed indicator.
+		if msg.String() == "ctrl+t" {
+			m.showTokenSpeed = !m.showTokenSpeed
+			needRebuild = true
+		}
 		// ctrl+p opens the model picker from any quiescent state.
 		if msg.Type == tea.KeyCtrlP && m.modelManager != nil &&
 			m.state != statePickingModel {
@@ -3646,8 +3672,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content})
 				}
 			}
+			m.lastTokenSpeed = 0
+			elapsed := time.Since(m.streamingStart).Seconds()
+			if elapsed > 0 && m.streamedTokens > 0 {
+				m.lastTokenSpeed = float64(m.streamedTokens) / elapsed
+			}
+			// Reset for next stream.
+			m.streamingStart = time.Time{}
+			m.streamedTokens = 0
 			m.streamingItemIdx = -1
 			m.reasoningItemIdx = -1
+
 			// Skip empty assistant messages (no content, no tool calls, no reasoning) — they
 			// provide no value and some providers reject them with a 400 error.
 			isEmpty := chunk.Msg.Content == "" && len(chunk.Msg.ToolCalls) == 0 && chunk.Msg.Reasoning == ""
@@ -3747,11 +3782,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 				// Turn complete: drain queued prompts or go idle.
-				// Show token usage as an informational item if the provider reported it.
-				if chunk.Usage.TotalTokens > 0 {
+				if m.showTokenSpeed && m.lastTokenSpeed > 0 {
 					m.items = append(m.items, displayItem{
 						kind:    itemInfo,
-						content: formatUsage(chunk.Usage),
+						content: formatUsage(m.lastTokenSpeed, chunk.Usage),
 					})
 				}
 				needRebuild = true
@@ -3834,13 +3868,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Delta — reasoning or content fragment. On the first delta of any kind,
 			// reserve both a reasoning slot and an assistant slot in that order so
 			// reasoning is always rendered above the response regardless of arrival order.
+			// --- Token speed indicator updates ---
 			if m.streamingItemIdx < 0 {
 				m.reasoningItemIdx = len(m.items)
 				m.items = append(m.items, displayItem{kind: itemReasoning, content: ""})
 				m.streamingItemIdx = len(m.items)
 				m.items = append(m.items, displayItem{kind: itemAssistant, content: ""})
 				m.state = stateStreaming
+				m.streamingStart = time.Now()
+				m.streamedTokens = 0
 			}
+			addTokens := countTokens(chunk.Delta) + countTokens(chunk.ReasoningDelta)
+			m.streamedTokens += addTokens
+
 			if chunk.ReasoningDelta != "" {
 				m.items[m.reasoningItemIdx].content += chunk.ReasoningDelta
 			} else {
@@ -4260,7 +4300,15 @@ func (m Model) statusLines() (line1, line2 string) {
 		if m.currentTaskTitle != "" {
 			label = m.currentTaskTitle
 		}
-		return statusStyle.Render(m.spinner.View()+" "+label) + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
+		liveSpeed := ""
+		if m.showTokenSpeed && m.state == stateStreaming && !m.streamingStart.IsZero() && m.streamedTokens > 0 {
+			elapsed := time.Since(m.streamingStart).Seconds()
+			if elapsed > 0 {
+				liveSpeed = fmt.Sprintf("  ⏩ %.1f tok/s", float64(m.streamedTokens)/elapsed)
+			}
+		}
+		return statusStyle.Render(m.spinner.View()+" "+label) + liveSpeed + cancelHint + queueHint + autopilotIndicator + allowAllIndicator + m.roundtripHint(), ""
+
 	case stateCallingTool:
 		name := renderToolName(m.callingToolName)
 		if m.callingToolTitle != "" {
@@ -5107,14 +5155,18 @@ func (m *Model) processNextCall() tea.Cmd {
 		callID := call.ID
 		if m.pendingReasoningEffort != "" {
 			return func() tea.Msg {
-				return toolResultMsg{callID: callID, toolName: "enable_reasoning",
-					result: "Reasoning is already enabled for your next response."}
+				return toolResultMsg{
+					callID: callID, toolName: "enable_reasoning",
+					result: "Reasoning is already enabled for your next response.",
+				}
 			}
 		}
 		m.pendingReasoningEffort = effort
 		return func() tea.Msg {
-			return toolResultMsg{callID: callID, toolName: "enable_reasoning",
-				result: fmt.Sprintf("Reasoning enabled (%s). Now produce your reasoning-backed response.", effort)}
+			return toolResultMsg{
+				callID: callID, toolName: "enable_reasoning",
+				result: fmt.Sprintf("Reasoning enabled (%s). Now produce your reasoning-backed response.", effort),
+			}
 		}
 	}
 
@@ -6272,9 +6324,9 @@ func fileEditErrorNote(err error) string {
 
 // formatUsage renders token usage stats as a short human-readable string.
 // For GitHub Copilot the "completion tokens" equates to premium request units.
-func formatUsage(u ai.Usage) string {
-	s := fmt.Sprintf("tokens — prompt: %d  completion: %d  total: %d",
-		u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+func formatUsage(tokenSpeed float64, u ai.Usage) string {
+	s := fmt.Sprintf("tokens — prompt: %d  completion: %d  total: %d  avg speed: %.2f tok/s",
+		u.PromptTokens, u.CompletionTokens, u.TotalTokens, tokenSpeed)
 	return s
 }
 
