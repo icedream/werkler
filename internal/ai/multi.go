@@ -104,15 +104,10 @@ func (mc *MultiClient) activeEntry() *multiEntry {
 	return mc.entries[mc.active]
 }
 
-// Modeler is an optional interface for clients that expose their current model name.
-type Modeler interface {
-	Model() string
-}
-
-// entryCurrentModel tries to read the current model name from the entry's StreamCompleter.
+// entryCurrentModel tries to read the current model name from a *Client.
 func entryCurrentModel(e *multiEntry) string {
-	if m, ok := e.sc.(Modeler); ok {
-		return m.Model()
+	if c, ok := e.sc.(*Client); ok {
+		return c.model
 	}
 	return ""
 }

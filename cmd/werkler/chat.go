@@ -260,7 +260,7 @@ func resolveAutopilotMax(flagVal, cfgVal int) int {
 }
 
 // buildProviderClient constructs a single AI client from a ProviderConfig.
-func buildProviderClient(p config.ProviderConfig) (ai.StreamCompleter, error) {
+func buildProviderClient(p config.ProviderConfig) (*ai.Client, error) {
 	var extraOpts []ai.ClientOption
 	if p.DisableReasoning {
 		extraOpts = append(extraOpts, ai.WithDisableReasoning())
@@ -273,12 +273,6 @@ func buildProviderClient(p config.ProviderConfig) (ai.StreamCompleter, error) {
 		// already use reasoning_content or don't emit thinking tokens at all.
 		return ai.NewWithTransport(p.Endpoint, p.APIKey, p.Model,
 			ai.NewReasoningAliasTransport(nil), extraOpts...), nil
-	case config.ProviderTypeOpenAIResponses:
-		var respOpts []ai.ResponsesClientOption
-		if p.DisableReasoning {
-			respOpts = append(respOpts, ai.WithResponsesDisableReasoning())
-		}
-		return ai.NewResponsesClient(p.Endpoint, p.APIKey, p.Model, nil, respOpts...), nil
 	case config.ProviderTypeCopilot:
 		tok, loadErr := copilot.LoadGitHubToken()
 		if loadErr != nil {
@@ -291,8 +285,9 @@ func buildProviderClient(p config.ProviderConfig) (ai.StreamCompleter, error) {
 			)
 		}
 		transport := ai.NewReasoningAliasTransport(copilot.NewTransport(tok.AccessToken))
-		httpClient := &http.Client{Transport: transport}
-		return copilot.NewCopilotMuxClient(p.Model, httpClient, p.DisableReasoning), nil
+		return ai.NewWithHTTPClient(copilot.CopilotAPIBaseURL, p.Model, &http.Client{Transport: transport},
+			append([]ai.ClientOption{ai.WithNoStreamUsage()}, extraOpts...)...,
+		), nil
 	default:
 		return nil, fmt.Errorf("unknown provider type %q for provider %q", p.Type, p.Name)
 	}
@@ -381,19 +376,12 @@ func buildReviewerClient(providers []config.ProviderConfig) (ai.Completer, strin
 		return nil, "", err
 	}
 
-	var completer ai.Completer
-	if c, ok := client.(ai.Completer); ok {
-		completer = c
-	} else {
-		completer = ai.NewStreamCompleterAdapter(client)
-	}
-
 	label := string(providerCfg.Type) + "/" + providerCfg.Model
 	if rd.Provider != "" {
 		label = rd.Provider + "/" + providerCfg.Model
 	}
 
-	return completer, label, nil
+	return client, label, nil
 }
 
 func runPromptMode(ctx context.Context, aiClient ai.Completer, session *chat.Session, memStore *memorystore.MemoryStore) error {

@@ -173,17 +173,9 @@ var _ Completer = (*Client)(nil)
 var _ StreamCompleter = (*Client)(nil)
 var _ ModelManager = (*Client)(nil)
 
-// Model returns the current model name (implements Modeler).
-func (c *Client) Model() string { return c.model }
-
 // SetModel changes the model used for subsequent completions.
 func (c *Client) SetModel(item ModelItem) {
 	c.model = item.Model
-}
-
-// SetDisableReasoning sets whether reasoning is disabled for this client.
-func (c *Client) SetDisableReasoning(v bool) {
-	c.disableReasoning = v
 }
 
 // ClientOption configures a [Client] at construction time.
