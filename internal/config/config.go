@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
@@ -80,6 +81,10 @@ type ProviderConfig struct {
 	// DisableReasoning prevents all reasoning/thinking for this provider —
 	// reasoning tools are hidden and reasoning_effort is never sent.
 	DisableReasoning bool `mapstructure:"disable_reasoning"`
+	// Timeout is the per-request time limit for this provider.
+	// Used by modeltest and any other per-request context wrapping.
+	// 0 means no provider-specific timeout (caller's context wins).
+	Timeout time.Duration `mapstructure:"timeout"`
 }
 
 // RubberDuckConfig configures an optional secondary AI model used for critical
@@ -129,6 +134,25 @@ type AutopilotConfig struct {
 	MaxCycles int `mapstructure:"max_cycles"`
 }
 
+// SandboxConfig holds settings for sandboxed AI tool execution.
+type SandboxConfig struct {
+	// StagedWrites, when true, intercepts file_write / file_edit / file_delete
+	// and holds them in an in-memory staging store instead of writing to disk
+	// immediately. The AI must call commit_staged_writes to flush changes to
+	// disk, or discard_staged_writes to drop them.
+	StagedWrites bool `mapstructure:"staged_writes"`
+
+	// ProcessSandbox, when true, wraps AI-spawned processes (process_start,
+	// run_command) with bubblewrap for namespace isolation. Requires bwrap on
+	// PATH. Has no effect on non-Linux systems or when bwrap is unavailable.
+	ProcessSandbox bool `mapstructure:"process_sandbox"`
+
+	// AllowNetwork permits outbound network access inside sandboxed processes.
+	// Only meaningful when ProcessSandbox is true. Defaults to false (network
+	// is blocked inside the sandbox).
+	AllowNetwork bool `mapstructure:"allow_network"`
+}
+
 // ModeConfig defines a named mode preset that bundles session options together.
 // Built-in modes are "default", "plan", and "document".
 // User-defined modes can extend a built-in via the Base field.
@@ -156,6 +180,7 @@ type Config struct {
 	MCP       MCPConfig       `mapstructure:"mcp"`
 	Skills    SkillsConfig    `mapstructure:"skills"`
 	Autopilot AutopilotConfig `mapstructure:"autopilot"`
+	Sandbox   SandboxConfig   `mapstructure:"sandbox"`
 	Modes     []ModeConfig    `mapstructure:"modes"`
 	// ImplementationMode is the name of the mode preset to switch to when the
 	// AI calls start_implementation. Empty means use the default mode.
