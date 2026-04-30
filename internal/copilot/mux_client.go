@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -28,9 +29,9 @@ type copilotModelsResponse struct {
 }
 
 type copilotModelEntry struct {
-	ID           string `json:"id"`
+	ID                string   `json:"id"`
+	SupportedEndpoints []string `json:"supported_endpoints"`
 	Capabilities struct {
-		SupportedEndpoints []string `json:"supported_endpoints"`
 	} `json:"capabilities"`
 }
 
@@ -109,12 +110,12 @@ func (c *CopilotMuxClient) resolveBackendLocked() {
 	c.useResponses = false
 }
 
-// ensureCacheLocked fetches the /models endpoint and populates the endpoints cache.
-// Must be called with mu held. Returns error on fetch failure (caller should tolerate).
-func (c *CopilotMuxClient) ensureCacheLocked(ctx context.Context) error {
+// fetchEndpoints fetches the /models endpoint and returns the endpoint map.
+// It must NOT be called with mu held — it performs a network request.
+func (c *CopilotMuxClient) fetchEndpoints(ctx context.Context) (map[string][]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/models", nil)
 	if err != nil {
-		return fmt.Errorf("copilot mux models request: %w", err)
+		return nil, fmt.Errorf("copilot mux models request: %w", err)
 	}
 	cl := c.httpClient
 	if cl == nil {
@@ -122,32 +123,49 @@ func (c *CopilotMuxClient) ensureCacheLocked(ctx context.Context) error {
 	}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return fmt.Errorf("copilot mux models fetch: %w", err)
+		return nil, fmt.Errorf("copilot mux models fetch: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("copilot mux models: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("copilot mux models: HTTP %d", resp.StatusCode)
 	}
 
 	var body copilotModelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return fmt.Errorf("copilot mux models decode: %w", err)
+		return nil, fmt.Errorf("copilot mux models decode: %w", err)
 	}
 
+	m := make(map[string][]string, len(body.Data))
 	for _, entry := range body.Data {
-		c.endpoints[entry.ID] = entry.Capabilities.SupportedEndpoints
+		m[entry.ID] = entry.SupportedEndpoints
 	}
-	c.cacheLoaded = true
-	c.resolveBackendLocked()
-	return nil
+	return m, nil
 }
 
 func (c *CopilotMuxClient) getBackend(ctx context.Context) ai.StreamCompleter {
 	c.mu.Lock()
+	if c.cacheLoaded {
+		useResp := c.useResponses
+		c.mu.Unlock()
+		if useResp {
+			return c.responsesClient
+		}
+		return c.chatClient
+	}
+	c.mu.Unlock()
+
+	// Fetch outside the lock to avoid blocking concurrent callers during HTTP.
+	endpoints, err := c.fetchEndpoints(ctx)
+
+	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.cacheLoaded {
-		_ = c.ensureCacheLocked(ctx)
+	if err == nil && !c.cacheLoaded {
+		for id, eps := range endpoints {
+			c.endpoints[id] = eps
+		}
+		c.cacheLoaded = true
+		c.resolveBackendLocked()
 	}
 	if c.useResponses {
 		return c.responsesClient
@@ -176,15 +194,21 @@ func (c *CopilotMuxClient) ListModels(ctx context.Context) ([]ai.ModelItem, erro
 		return nil, fmt.Errorf("copilot list models: HTTP %d", resp.StatusCode)
 	}
 
+	var rawBody []byte
+	rawBody, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("copilot list models read: %w", err)
+	}
+
 	var body copilotModelsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(rawBody, &body); err != nil {
 		return nil, fmt.Errorf("copilot list models decode: %w", err)
 	}
 
 	// Update endpoints cache.
 	c.mu.Lock()
 	for _, entry := range body.Data {
-		c.endpoints[entry.ID] = entry.Capabilities.SupportedEndpoints
+		c.endpoints[entry.ID] = entry.SupportedEndpoints
 	}
 	if !c.cacheLoaded {
 		c.cacheLoaded = true
@@ -206,7 +230,7 @@ func (c *CopilotMuxClient) ListModels(ctx context.Context) ([]ai.ModelItem, erro
 			continue
 		}
 		hasChat := false
-		for _, ep := range entry.Capabilities.SupportedEndpoints {
+		for _, ep := range entry.SupportedEndpoints {
 			if ep == "/chat/completions" || ep == "/responses" {
 				hasChat = true
 				break

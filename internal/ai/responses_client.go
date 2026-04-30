@@ -291,8 +291,11 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 		}
 		toolAccumMap := map[string]*accumToolCall{}
 		toolAccumOrder := 0
+		var textBuf strings.Builder
 
 		scanner := bufio.NewScanner(httpResp.Body)
+		// Increase scanner buffer to handle large SSE events (tool args, long deltas).
+		scanner.Buffer(make([]byte, 1<<20), 8<<20) // 1 MiB initial, 8 MiB max
 		var eventType string
 
 		for scanner.Scan() {
@@ -338,6 +341,7 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 			case "response.output_text.delta":
 				var ev respOutputTextDeltaEvent
 				if jerr := json.Unmarshal([]byte(data), &ev); jerr == nil && ev.Delta != "" {
+					textBuf.WriteString(ev.Delta)
 					if !send(StreamChunk{Delta: ev.Delta}) {
 						return
 					}
@@ -400,7 +404,7 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 				}
 				slices.SortFunc(ordered, func(a, b indexedCall) int { return cmp.Compare(a.idx, b.idx) })
 
-				msg := Message{Role: "assistant"}
+				msg := Message{Role: "assistant", Content: textBuf.String()}
 				for _, ic := range ordered {
 					var args map[string]any
 					if s := ic.acc.args; s != "" {
