@@ -75,8 +75,13 @@ func baseModel() Model {
 // update is a convenience wrapper that calls Update and asserts no panic.
 func update(t *testing.T, m Model, msg tea.Msg) (Model, tea.Cmd) {
 	t.Helper()
-	next, cmd := m.Update(msg)
-	return next.(Model), cmd
+	next, cmd := (&m).Update(msg)
+	switch v := next.(type) {
+	case *Model:
+		return *v, cmd
+	default:
+		return Model{}, cmd
+	}
 }
 
 // --- formatArgsCompact ---

@@ -1922,7 +1922,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	needRebuild := false
 
@@ -6761,7 +6761,7 @@ func RunTUI(
 		})
 	}
 
-	prog = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	prog = tea.NewProgram(&m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = prog.Run()
 	return err
 }
