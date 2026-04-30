@@ -29,9 +29,9 @@ type copilotModelsResponse struct {
 }
 
 type copilotModelEntry struct {
-	ID                string   `json:"id"`
+	ID                 string   `json:"id"`
 	SupportedEndpoints []string `json:"supported_endpoints"`
-	Capabilities struct {
+	Capabilities       struct {
 	} `json:"capabilities"`
 }
 
