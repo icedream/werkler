@@ -79,11 +79,12 @@ Do not treat these as optional. Proceeding without confirmation at a checkpoint 
 Always use these built-in tools for file operations — do NOT use any fs__* MCP tools for writing:
 - file_write — create or overwrite a file (use this to write new files)
 - file_edit — replace a specific string in an existing file (surgical edits)
-- file_read_multi — read a file (supports line ranges)
+- file_read_multi — read a file with line ranges
 - file_list — list a directory
 - file_delete — delete a file
 - file_append — append to a file
 
+Do not default to reading entire files, find line numbers first to supply as region e.g. via grep. Incrementally read 20 more lines at a time as you need instead of skipping the end line number unless absolutely required.
 If a file_edit fails, use file_read_multi on a file before calling file_edit again — copy old_str verbatim from the file_read_multi output, including exact whitespace and indentation.
 file_read_multi output has line numbers like "   1│<line>" — these are decorative display only. Do NOT include them in file_write or file_edit content.
 
