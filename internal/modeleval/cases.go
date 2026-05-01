@@ -130,6 +130,8 @@ func AllCases() []*TestCase {
 		caseConnectServerExact(),
 		caseConnectServerGenericName(),
 		caseNoSpuriousConnect(),
+		caseCompactSummaryQuality(),
+		caseCompactNoRefusal(),
 	}
 }
 
@@ -265,5 +267,99 @@ func caseNoSpuriousConnect() *TestCase {
 			}
 			return CheckNotEmpty()(resp)
 		},
+	}
+}
+
+// compactionSystemPrompt is the summarizer system prompt used by doCompact,
+// reproduced here so modeltest can exercise it against a live model without
+// importing internal/ui.
+const compactionSystemPrompt = "You are a conversation summarizer. " +
+	"Write a concise but information-dense summary of the conversation transcript below. " +
+	"You MUST preserve: the main objective and current status, " +
+	"key decisions and rationale, ALL file paths created or modified (exact paths), " +
+	"ALL tool calls with their key arguments and outcomes, " +
+	"ALL unresolved errors and open items, and the last clear user intent. " +
+	"Write in past tense. Only verifiable facts — no opinion. " +
+	"Note: reasoning/thinking tokens are excluded from this transcript."
+
+// syntheticTranscriptForCompact is a realistic multi-turn transcript containing
+// a known file path and tool calls with arguments. Used to verify the model
+// preserves specific information when acting as a conversation summarizer.
+//
+// The file path "/src/server/handler.go" and the unresolved error must both
+// appear in a correct summary — these are the canary values checked by
+// caseCompactSummaryQuality.
+const syntheticTranscriptForCompact = `User: Can you add a logging statement to /src/server/handler.go at the top of the HandleRequest function?
+
+Assistant called tool "file_read" args: {"path":"/src/server/handler.go"}
+Tool result: package server
+
+func HandleRequest(w http.ResponseWriter, r *http.Request) {
+	// existing code
+}
+
+Assistant called tool "file_edit" args: {"path":"/src/server/handler.go","old_str":"func HandleRequest(w http.ResponseWriter, r *http.Request) {","new_str":"func HandleRequest(w http.ResponseWriter, r *http.Request) {\n\tlog.Printf(\"HandleRequest called\")"}
+Tool result: error: old_str not found in file
+
+User: It seems the edit failed. Can you try again?`
+
+// caseCompactSummaryQuality sends the real compaction summarizer prompt with a
+// synthetic transcript and verifies the model's summary preserves two canary
+// values: the file path "/src/server/handler.go" and the word "error" (the
+// unresolved edit failure). These are the exact pieces of context that would be
+// lost across a compaction if the model ignores the summarizer instructions.
+//
+// This is the only compaction-related behaviour that actually depends on the
+// model — all other compaction fixes (marker replacement, keepTurns loop,
+// toolTokensCache) are pure Go logic covered by unit tests.
+func caseCompactSummaryQuality() *TestCase {
+	msgs := []ai.Message{
+		{
+			Role:    "system",
+			Content: compactionSystemPrompt,
+		},
+		{
+			Role:    "user",
+			Content: "Summarize this conversation (incorporating the prior summary if present):\n\n" + syntheticTranscriptForCompact,
+		},
+	}
+	return &TestCase{
+		Name:        "compact-summary-quality",
+		Description: "Summarizer preserves file paths and unresolved errors from the transcript",
+		Messages:    msgs,
+		Tools:       nil,
+		Check: All(
+			CheckHasContent(),
+			CheckResponseContains("/src/server/handler.go",
+				"summary must include the exact file path from the transcript"),
+			CheckResponseContains("error",
+				"summary must mention the unresolved tool error"),
+		),
+		Repeat: 3,
+	}
+}
+
+// caseCompactNoRefusal verifies the model does not refuse or return an empty
+// response when given the compaction summarizer prompt. Some smaller models
+// protest when asked to summarise role:tool messages or produce no output at
+// all when the system prompt is terse.
+func caseCompactNoRefusal() *TestCase {
+	msgs := []ai.Message{
+		{
+			Role:    "system",
+			Content: compactionSystemPrompt,
+		},
+		{
+			Role:    "user",
+			Content: "Summarize this conversation (incorporating the prior summary if present):\n\n" + syntheticTranscriptForCompact,
+		},
+	}
+	return &TestCase{
+		Name:        "compact-no-refusal",
+		Description: "Model does not refuse or return empty output when given the compaction summarizer prompt",
+		Messages:    msgs,
+		Tools:       nil,
+		Check:       CheckNotEmpty(),
+		Repeat:      3,
 	}
 }

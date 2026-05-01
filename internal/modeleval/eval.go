@@ -160,6 +160,17 @@ func CheckToolCallArg(nameContains, argValueContains string) func(ai.Message) er
 	}
 }
 
+// CheckResponseContains passes when the response content contains substr
+// (case-insensitive). failMsg is included in the error when the check fails.
+func CheckResponseContains(substr, failMsg string) func(ai.Message) error {
+	return func(resp ai.Message) error {
+		if strings.Contains(strings.ToLower(resp.Content), strings.ToLower(substr)) {
+			return nil
+		}
+		return fmt.Errorf("%s: %q not found in response (content=%q)", failMsg, substr, resp.Content)
+	}
+}
+
 // All returns a check that passes only when every provided check passes.
 func All(checks ...func(ai.Message) error) func(ai.Message) error {
 	return func(resp ai.Message) error {
