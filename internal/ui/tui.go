@@ -791,9 +791,6 @@ func init() {
 		{
 			name:        "compact",
 			description: "Summarize the conversation to free up context window space",
-			available: func(m *Model) bool {
-				return m.hasCompactableHistory()
-			},
 			action: func(m *Model) []tea.Cmd {
 				m.state = stateCompacting
 				return []tea.Cmd{doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)}
