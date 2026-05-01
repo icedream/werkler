@@ -5118,6 +5118,12 @@ func (m *Model) processNextCall() tea.Cmd {
 			return m.processQueueOrIdle()
 		}
 		debugLog("processNextCall: no more pending calls, starting new stream (messages=%d)", len(m.messages))
+		// Synchronously refresh the token count so shouldAutoCompact sees the
+		// accumulated tool results from this batch, not a stale pre-batch count.
+		outbound := m.buildStreamMessages(m.messages)
+		if count, cerr := ai.CountTokensWithTools(m.modelName, outbound, m.tools); cerr == nil {
+			m.contextUsage = count
+		}
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
 			m.state = stateCompacting
@@ -5134,6 +5140,42 @@ func (m *Model) processNextCall() tea.Cmd {
 	m.currentCall = &callCopy
 
 	debugLog("processNextCall: dispatching tool=%q id=%q approved=%v", call.Name, call.ID, m.session.IsApproved(call.Name))
+
+	// Check for auto-compaction before dispatching this tool call. We do the
+	// recount here (not only in the pendingCalls==0 branch above) so that a
+	// single long turn with many tool results can trigger compaction mid-batch
+	// rather than only between stream rounds.
+	// When compaction fires we synthesise "not yet executed" results for the
+	// current call and all remaining siblings so the message history stays
+	// valid, then compact and let the AI re-issue the calls it needs.
+	if !m.autoCompactPending {
+		outbound := m.buildStreamMessages(m.messages)
+		if count, cerr := ai.CountTokensWithTools(m.modelName, outbound, m.tools); cerr == nil {
+			m.contextUsage = count
+		}
+		if m.shouldAutoCompact() {
+			// Synthesise placeholder results for the call we just dequeued and
+			// all remaining pending calls so the history is consistent.
+			for _, unexec := range append([]ai.ToolCall{call}, m.pendingCalls...) {
+				if idx, ok := m.toolCallIdx[unexec.ID]; ok && idx >= 0 {
+					m.items[idx].toolStatus = toolStatusPending
+				}
+				m.messages = append(m.messages, ai.Message{
+					Role:       "tool",
+					ToolCallID: unexec.ID,
+					Content:    "(not executed — context compaction triggered)",
+				})
+			}
+			m.pendingCalls = nil
+			m.currentCall = nil
+			m.executingCall = nil
+			m.callingToolName = ""
+			m.callingToolTitle = ""
+			m.autoCompactPending = true
+			m.state = stateCompacting
+			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
+		}
+	}
 
 	// task_complete terminates the autopilot loop — intercept before normal dispatch.
 	if call.Name == "task_complete" {
@@ -5658,9 +5700,6 @@ func (m *Model) shouldAutoCompact() bool {
 	if m.contextUsage.Total == 0 {
 		return false
 	}
-	if !m.hasCompactableHistory() {
-		return false
-	}
 
 	// Use the cached tool-schema overhead (updated whenever m.tools changes via setTools).
 	toolTokens := m.toolTokensCache
@@ -5681,7 +5720,26 @@ func (m *Model) shouldAutoCompact() bool {
 	if m.contextUsage.Approx {
 		threshold = 0.50
 	}
-	return float64(historyTokens)/float64(available) >= threshold
+	overThreshold := float64(historyTokens)/float64(available) >= threshold
+	if !overThreshold {
+		return false
+	}
+
+	// Normally require at least 3 user turns so the summary is meaningful.
+	// But when a single turn with many tool calls saturates the context window,
+	// we still need to compact — so allow compaction with just 1 user message
+	// (i.e. any real conversation at all) once the threshold is already crossed.
+	if !m.hasCompactableHistory() {
+		// Fall back to: at least 1 user message exists (don't compact an empty
+		// or system-only conversation).
+		for _, msg := range m.messages {
+			if msg.Role == "user" {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 // toolResultCap returns the maximum number of characters to include from a
