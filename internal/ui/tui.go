@@ -5759,19 +5759,12 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 
 		summaryMessages := []ai.Message{
 			{
-				Role: "system",
-				Content: "You are a conversation summarizer. " +
-					"Write a concise but information-dense summary of the conversation transcript below. " +
-					"You MUST preserve: the main objective and current status, " +
-					"key decisions and rationale, ALL file paths created or modified (exact paths), " +
-					"ALL tool calls with their key arguments and outcomes, " +
-					"ALL unresolved errors and open items, and the last clear user intent. " +
-					"Write in past tense. Only verifiable facts — no opinion. " +
-					"Note: reasoning/thinking tokens are excluded from this transcript.",
+				Role:    "system",
+				Content: chat.CompactionSystemPrompt,
 			},
 			{
 				Role:    "user",
-				Content: "Summarize this conversation (incorporating the prior summary if present):\n\n" + transcript.String(),
+				Content: chat.CompactionUserMessage(transcript.String()),
 			},
 		}
 

@@ -270,18 +270,6 @@ func caseNoSpuriousConnect() *TestCase {
 	}
 }
 
-// compactionSystemPrompt is the summarizer system prompt used by doCompact,
-// reproduced here so modeltest can exercise it against a live model without
-// importing internal/ui.
-const compactionSystemPrompt = "You are a conversation summarizer. " +
-	"Write a concise but information-dense summary of the conversation transcript below. " +
-	"You MUST preserve: the main objective and current status, " +
-	"key decisions and rationale, ALL file paths created or modified (exact paths), " +
-	"ALL tool calls with their key arguments and outcomes, " +
-	"ALL unresolved errors and open items, and the last clear user intent. " +
-	"Write in past tense. Only verifiable facts — no opinion. " +
-	"Note: reasoning/thinking tokens are excluded from this transcript."
-
 // syntheticTranscriptForCompact is a realistic multi-turn transcript containing
 // a known file path and tool calls with arguments. Used to verify the model
 // preserves specific information when acting as a conversation summarizer.
@@ -316,11 +304,11 @@ func caseCompactSummaryQuality() *TestCase {
 	msgs := []ai.Message{
 		{
 			Role:    "system",
-			Content: compactionSystemPrompt,
+			Content: chat.CompactionSystemPrompt,
 		},
 		{
 			Role:    "user",
-			Content: "Summarize this conversation (incorporating the prior summary if present):\n\n" + syntheticTranscriptForCompact,
+			Content: chat.CompactionUserMessage(syntheticTranscriptForCompact),
 		},
 	}
 	return &TestCase{
@@ -347,11 +335,11 @@ func caseCompactNoRefusal() *TestCase {
 	msgs := []ai.Message{
 		{
 			Role:    "system",
-			Content: compactionSystemPrompt,
+			Content: chat.CompactionSystemPrompt,
 		},
 		{
 			Role:    "user",
-			Content: "Summarize this conversation (incorporating the prior summary if present):\n\n" + syntheticTranscriptForCompact,
+			Content: chat.CompactionUserMessage(syntheticTranscriptForCompact),
 		},
 	}
 	return &TestCase{
