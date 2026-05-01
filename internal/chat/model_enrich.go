@@ -2,23 +2,46 @@ package chat
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/icedream/werkler/internal/ai"
 )
 
+var rxCodeChar = regexp.MustCompile("(`+?)")
+
+func inlineCode(value string) string {
+	matches := rxCodeChar.FindAllString(value, -1)
+	var longest string
+	for _, m := range matches {
+		if len(m) > len(longest) {
+			longest = m
+		}
+	}
+	return longest + "`" + value + longest + "`"
+}
+
 // EnrichSystemPromptWorkspace appends a session-workspace section to systemPrompt.
 // The workspace directory is a per-session folder the AI can use for plan files,
 // notes, and other session-scoped scratch work.
 func EnrichSystemPromptWorkspace(systemPrompt, dir string) string {
-	return systemPrompt + "\n\n## Session workspace\nYour session workspace directory: `" + dir + "`\nWrite plan files (e.g. `plan.md`) and other working documents here. Do NOT write plans to memory — use this directory instead."
+	return systemPrompt + `
+
+## Session workspace
+Your session workspace directory: ` + inlineCode(dir) + `
+Write plan files (e.g. ` + inlineCode("plan.md") + `) and other working documents to session workspace.
+Do NOT write plans to memory — use this directory instead.`
 }
 
 // EnrichSystemPromptCWD appends a working-directory section to systemPrompt.
 // This tells the AI its starting directory so it can use "." in file and
 // process operations rather than guessing absolute paths.
 func EnrichSystemPromptCWD(systemPrompt, cwd string) string {
-	return systemPrompt + "\n\n## Working directory\nCurrent working directory: `" + cwd + "`\nUse `.` (or relative paths) in file operations and process_start calls to refer to this directory."
+	return systemPrompt + `
+
+## Working directory
+Current working directory: ` + inlineCode(cwd) + `
+Use ` + inlineCode(".") + ` (or relative paths) in file operations and process_start calls to refer to this directory.`
 }
 
 // EnrichSystemPrompt appends a model context section to systemPrompt when
