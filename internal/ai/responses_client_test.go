@@ -252,7 +252,7 @@ func TestCompleteStream_ToolCallFinishReason(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 
@@ -277,7 +277,7 @@ func TestCompleteStream_IncompleteBecomesLengthFinishReason(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 
@@ -303,7 +303,7 @@ func TestCompleteStream_UsageTokens(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 
@@ -330,7 +330,7 @@ func TestCompleteStream_APIErrorEvent(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 
@@ -366,7 +366,7 @@ func TestCompleteStream_InlineTypeField(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 
@@ -397,7 +397,7 @@ func TestCompleteStream_MultipleToolCallsOrdering(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 
