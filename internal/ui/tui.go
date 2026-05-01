@@ -5838,7 +5838,6 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 		}
 
 		// Determine how many recent turns to keep verbatim so the result fits.
-		// This is done in the goroutine to avoid blocking the TUI main loop.
 		keepTurns := compactionKeepTurns
 		if maxTokens > 0 {
 			available := maxTokens - toolTokens
@@ -5961,9 +5960,6 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 	oldMessages := m.messages
 
 	keepTurns := msg.keepTurns
-	if keepTurns <= 0 {
-		keepTurns = compactionKeepTurns
-	}
 
 	// Build the new history: single system message with the summary REPLACED
 	// (not appended) to prevent unbounded growth across successive compactions.
