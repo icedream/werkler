@@ -628,9 +628,6 @@ func resolvePath(p, baseDir string) string {
 	return filepath.Clean(p)
 }
 
-// maxFileReadBytes is the maximum file size returned by file_read without a range.
-const maxFileReadBytes = 1 << 20 // 1 MiB
-
 // canonicalizePath returns the canonical absolute path for permission checks.
 // For existing paths it resolves symlinks; for non-existent paths (new files)
 // it resolves the parent directory's symlinks and appends the basename.
@@ -2678,35 +2675,6 @@ func (m *Manager) handleConfirmPlan(ctx context.Context, args map[string]any) (s
 		return "approved: proceed with implementation", nil
 	}
 	return m.planConfirmer(ctx, summary)
-}
-
-func (m *Manager) handleGetTime(_ context.Context, args map[string]any) (string, error) {
-	now := time.Now()
-	loc := time.Local
-
-	if tz := stringArg(args, "timezone"); tz != "" {
-		var err error
-		loc, err = time.LoadLocation(tz)
-		if err != nil {
-			return fmt.Sprintf("Unknown timezone %q. Returning local time.\n\n%s",
-				tz, formatTimeResult(now, time.Local)), nil
-		}
-	}
-
-	return formatTimeResult(now, loc), nil
-}
-
-// formatTimeResult returns a multi-line time report for the given instant and location.
-func formatTimeResult(now time.Time, loc *time.Location) string {
-	local := now.In(loc)
-	utc := now.UTC()
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Local (%s): %s\n", local.Location(), local.Format("2006-01-02 15:04:05 MST (Monday)"))
-	if loc != time.UTC {
-		fmt.Fprintf(&sb, "UTC:           %s\n", utc.Format("2006-01-02 15:04:05"))
-	}
-	fmt.Fprintf(&sb, "Unix:          %d\n", now.Unix())
-	return strings.TrimRight(sb.String(), "\n")
 }
 
 func (m *Manager) handleCalculate(_ context.Context, args map[string]any) (string, error) {
