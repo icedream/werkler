@@ -831,7 +831,7 @@ Examples NOT requiring shell=true: "git", "grep", "uptime", "free", "ps" (with a
 		{
 			def: ai.ToolDefinition{
 				Name: "file_read",
-				Description: `Read the contents of a file.
+				Description: `Read the contents of a text file.
 Returns content with line numbers (format: "   1│<line>"), total line count, and the range returned.
 Line numbers are decorative — do NOT include them when writing or editing file content.
 For large files, use start_line and end_line to read sections (1-indexed, inclusive).
@@ -851,7 +851,7 @@ Returns an error for binary files; use process_start to handle those.`,
 		{
 			def: ai.ToolDefinition{
 				Name: "file_read_multi",
-				Description: `Read multiple file regions in one call. Returns each region labeled with a header line.
+				Description: `Read multiple text file regions in one call. Returns each region labeled with a header line.
 Each region may specify start_line and end_line (1-indexed, inclusive); omit both to read the full file.
 Partial failures are reported inline — other regions still return their content.
 Total output is capped at 2 MiB across all regions.`,
@@ -880,7 +880,7 @@ Total output is capped at 2 MiB across all regions.`,
 		{
 			def: ai.ToolDefinition{
 				Name:        "read_image",
-				Description: "Load a local image file so you can see its visual content. Supported formats: PNG, JPEG, GIF, WebP.",
+				Description: "Load a local image file so you can see its visual content. ONLY use for the following supported formats: PNG, JPEG, GIF, WebP.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -908,8 +908,8 @@ Total output is capped at 2 MiB across all regions.`,
 		{
 			def: ai.ToolDefinition{
 				Name: "file_write",
-				Description: `Create a new file or overwrite an existing file with the given content.
-This is the correct tool to use whenever you need to write a file.
+				Description: `Create a new file or overwrite an existing file with the given text content.
+This is the correct tool to use whenever you need to write a file whole.
 To create a new file including its parent directories, set create_parents to true.`,
 				InputSchema: map[string]any{
 					"type": "object",
