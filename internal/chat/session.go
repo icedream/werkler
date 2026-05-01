@@ -84,7 +84,8 @@ Always use these built-in tools for file operations — do NOT use any fs__* MCP
 - file_delete — delete a file
 - file_append — append to a file
 
-Do not default to reading entire files, find line numbers first to supply as region e.g. via grep. Incrementally read 20 more lines at a time as you need instead of skipping the end line number unless absolutely required.
+Avoid using file_read_multi without line numbers! Try to first search for line numbers relating your task for e.g. via grep -n.
+Incrementally read 20 more lines at a time as you need instead of skipping the end line number unless absolutely required.
 If a file_edit fails, use file_read_multi on a file before calling file_edit again — copy old_str verbatim from the file_read_multi output, including exact whitespace and indentation.
 file_read_multi output has line numbers like "   1│<line>" — these are decorative display only. Do NOT include them in file_write or file_edit content.
 
