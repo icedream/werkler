@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -157,26 +156,6 @@ Call task_complete(summary) when all work is done. Call ask_user only if you are
 // processOutputLineCap is the maximum number of lines kept in a process output
 // display item.  Lines beyond this are counted but not displayed.
 const processOutputLineCap = 50
-
-// compactionKeepTurns return the number of complete user turns to keep verbatim
-// after context compaction. doCompact may reduce this further if the kept
-// turns themselves would overflow the context window.
-func compactionKeepTurns(contextSize int) int {
-	turns := 1
-
-	// Below 32k just default to 1
-	if contextSize <= 32*1024 {
-		return turns
-	}
-
-	// < 96k -> 1 turn
-	// 96k+ -> 2 turns
-	// 168k+ -> 3 turns
-	// 296k+ -> 4 turns
-	limit := math.Log(float64(contextSize))*1.75 - 18
-
-	return int(math.Floor(math.Max(1, limit)))
-}
 
 type displayItem struct {
 	kind           string
@@ -5851,57 +5830,39 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 			return compactDoneMsg{err: fmt.Errorf("summarization returned empty response")}
 		}
 
-		// keepTurns determines how many recent turns to keep verbatim so the result fits.
-		// We'll default it to a reasonable default for 32k token limit.
-		keepTurns := compactionKeepTurns(32000)
+		// keepTurns determines how many recent turns to keep verbatim
+		keepTurns := 2
+
+		// Count exact tokens for the summary (user message part only).
+		// CountTokens includes per-message overhead, so we add 3 for the user message wrapper.
+		countMessages := []ai.Message{
+			{Role: "system", Content: chat.CompactionSystemPrompt},
+			{Role: "user", Content: s},
+		}
+		tokenCount, _ := ai.CountTokens(modelName, countMessages)
+		sTok := tokenCount.Total + 3 // +3 for per-message overhead
+
 		// newContextTokens is the post-compaction token estimate (messages + tool
-		// overhead). Zero means unknown — applyCompaction will schedule a recount.
-		var newContextTokens int
+		// overhead)
+		newContextTokens := sTok + toolTokens
+		var warning string
+
+		// If we have a clear maxTokens hint, warn if we're running full still
 		if maxTokens > 0 {
-			keepTurns = compactionKeepTurns(keepTurns)
-			// Reserve ~100 tokens for the compaction system prompt and summary overhead
-			// so that the re-built history fits within the context window after compaction.
-			const systemPromptBuffer = 100
-			available := maxTokens - toolTokens - systemPromptBuffer
-			if available <= 0 {
-				available = maxTokens - toolTokens
-			}
 			const threshold = 0.65
-			// Loop down to 1 inclusive so we also verify whether 1 turn fits.
-			for keepTurns >= 1 {
-				lastTurns := extractLastTurns(snap, keepTurns)
-				candidate := make([]ai.Message, 0, 2+len(lastTurns))
-				if len(snap) > 0 && snap[0].Role == "system" {
-					sysMsg := snap[0]
-					sysMsg.Content = replaceSummaryBlock(sysMsg.Content, s)
-					candidate = append(candidate, sysMsg)
-				}
-				candidate = append(candidate, lastTurns...)
-				count, err := ai.CountTokens(modelName, candidate)
-				if err != nil || float64(count.Total)/float64(available) < threshold {
-					// count.Total is message-only; add tool-schema overhead to get
-					// the full context usage that applyCompaction can apply directly.
-					if err == nil {
-						newContextTokens = count.Total + toolTokens
-					}
-					break // fits
-				}
-				keepTurns--
-			}
-			if keepTurns < 1 {
-				// Even 1 turn doesn't fit — keep 1 turn regardless and surface an
-				// advisory warning (not an error; compaction should still apply).
-				return compactDoneMsg{
-					summary:   s,
-					keepTurns: 1,
-					warning: "Context is very full even after compaction — " +
-						"consider switching to a model with a larger context window.",
-					totalTokens: newContextTokens,
-				}
+			if int(float32(maxTokens)*threshold) < newContextTokens {
+				warning = "Context is very full even after compaction — " +
+					"consider switching to a model with a larger context window."
+				keepTurns = 1
 			}
 		}
 
-		return compactDoneMsg{summary: s, keepTurns: keepTurns, totalTokens: newContextTokens}
+		return compactDoneMsg{
+			summary:     s,
+			keepTurns:   keepTurns,
+			totalTokens: newContextTokens,
+			warning:     warning,
+		}
 	}
 }
 
