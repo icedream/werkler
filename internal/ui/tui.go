@@ -4989,28 +4989,20 @@ func (m *Model) buildStreamMessages(base []ai.Message) []ai.Message {
 		}
 	}
 	if len(configuredServers) > 0 {
-		var sb strings.Builder
-		sb.WriteString("\n\n## Configured MCP servers (not yet connected)\n")
-		sb.WriteString("These servers are available but not yet connected. " +
-			"When the user's current request requires tools from one of these servers, " +
-			"call `connect_server` for it **immediately** — do not ask for permission, do not explain what you are about to do, just call it. " +
-			"Do NOT connect servers whose tools are not needed for the current task:\n")
-		for _, srv := range configuredServers {
-			sb.WriteString("- `")
-			sb.WriteString(sanitizeInlineText(srv.Name))
-			sb.WriteString("`")
-			switch {
-			case srv.Hint != "":
-				sb.WriteString(": ")
-				sb.WriteString(sanitizeInlineText(srv.Hint))
-			case srv.URL != "":
-				sb.WriteString(" (")
-				sb.WriteString(sanitizeInlineText(srv.URL))
-				sb.WriteString(")")
+		// Map server names to hints and URLs for use by the shared generator
+		serverNames := make([]string, len(configuredServers))
+		serverHints := map[string]string{}
+		serverURLs := map[string]string{}
+		for i, srv := range configuredServers {
+			serverNames[i] = srv.Name
+			if srv.Hint != "" {
+				serverHints[srv.Name] = srv.Hint
 			}
-			sb.WriteString("\n")
+			if srv.URL != "" {
+				serverURLs[srv.Name] = srv.URL
+			}
 		}
-		msgs[0].Content += sb.String()
+		msgs[0].Content += chat.MCPServerSection(serverNames, serverHints, serverURLs, sanitizeInlineText)
 	}
 	if m.autopilot {
 		msgs[0].Content = msgs[0].Content + "\n\n" + autopilotSystemNote

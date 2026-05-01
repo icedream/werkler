@@ -9,21 +9,9 @@ import (
 )
 
 // configuredServersSection builds the system-prompt section werkler injects
-// for lazy-connect MCP servers, replicating buildStreamMessages logic.
+// for lazy-connect MCP servers, using the shared logic from internal/chat.
 func configuredServersSection(servers []string) string {
-	var sb strings.Builder
-	sb.WriteString("## Configured MCP servers (not yet connected)\n")
-	sb.WriteString("These servers are available but not yet connected. ")
-	sb.WriteString("When the user's current request requires tools from one of these servers, ")
-	sb.WriteString("call `connect_server` for it **immediately** — do not ask for permission, ")
-	sb.WriteString("do not explain what you are about to do, just call it. ")
-	sb.WriteString("Do NOT connect servers whose tools are not needed for the current task.\n")
-	for _, name := range servers {
-		sb.WriteString("- `")
-		sb.WriteString(name)
-		sb.WriteString("`\n")
-	}
-	return sb.String()
+	return chat.MCPServerSection(servers, map[string]string{}, map[string]string{}, func(s string) string { return s })
 }
 
 // connectServerTool builds the connect_server tool definition with the given
