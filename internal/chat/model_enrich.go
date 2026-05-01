@@ -58,7 +58,7 @@ func EnrichSystemPrompt(systemPrompt string, info ai.ModelInfo) string {
 
 ## Model Context
 Context window: %d tokens. Manage conversation length accordingly.
-Use as few words/tokens for especially internal thoughts and quick communications with the user as possible.`,
+Use fewer tokens for anything that isn't actual code or documentation. Use any tools or skills available to you for efficient token usage.`,
 		info.Context.MaxTokens)
 	return sb.String()
 }
