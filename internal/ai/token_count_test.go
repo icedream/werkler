@@ -131,3 +131,82 @@ func TestTokenCount_UsageFraction(t *testing.T) {
 		t.Errorf("overflow UsageFraction should be 1.0, got %f", over.UsageFraction(128000))
 	}
 }
+
+func TestCountTokensWithTools_GreaterThanWithout(t *testing.T) {
+	msgs := []Message{
+		{Role: "user", Content: "Hello!"},
+	}
+	tools := []ToolDefinition{
+		{
+			Name:        "process_start",
+			Description: "Start a subprocess.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string"},
+				},
+			},
+		},
+	}
+
+	base, err := CountTokens("gpt-4o", msgs)
+	if err != nil {
+		t.Fatalf("CountTokens: %v", err)
+	}
+	withTools, err := CountTokensWithTools("gpt-4o", msgs, tools)
+	if err != nil {
+		t.Fatalf("CountTokensWithTools: %v", err)
+	}
+	if withTools.Total <= base.Total {
+		t.Errorf("expected CountTokensWithTools (%d) > CountTokens (%d)", withTools.Total, base.Total)
+	}
+}
+
+func TestCountTokensWithTools_NilMessages_ReturnsToolOverhead(t *testing.T) {
+	tools := []ToolDefinition{
+		{
+			Name:        "file_read",
+			Description: "Read a file from disk.",
+		},
+	}
+	count, err := CountTokensWithTools("gpt-4o", nil, tools)
+	if err != nil {
+		t.Fatalf("CountTokensWithTools: %v", err)
+	}
+	// Should return at least the reply-priming constant (3) plus some tokens for the tool schema.
+	if count.Total <= 3 {
+		t.Errorf("expected tool overhead > 3, got %d", count.Total)
+	}
+}
+
+func TestCountTokensWithTools_InputSchema_Contributes(t *testing.T) {
+	toolWithoutSchema := ToolDefinition{
+		Name:        "my_tool",
+		Description: "Does something.",
+	}
+	toolWithSchema := ToolDefinition{
+		Name:        "my_tool",
+		Description: "Does something.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"very_long_parameter_name": map[string]any{
+					"type":        "string",
+					"description": "A parameter with a deliberately verbose description to add tokens.",
+				},
+			},
+		},
+	}
+
+	without, err := CountTokensWithTools("gpt-4o", nil, []ToolDefinition{toolWithoutSchema})
+	if err != nil {
+		t.Fatalf("CountTokensWithTools (no schema): %v", err)
+	}
+	with, err := CountTokensWithTools("gpt-4o", nil, []ToolDefinition{toolWithSchema})
+	if err != nil {
+		t.Fatalf("CountTokensWithTools (with schema): %v", err)
+	}
+	if with.Total <= without.Total {
+		t.Errorf("InputSchema should add tokens: with=%d, without=%d", with.Total, without.Total)
+	}
+}

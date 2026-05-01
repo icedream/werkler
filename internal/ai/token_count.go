@@ -85,6 +85,39 @@ func CountTokens(modelName string, messages []Message) (TokenCount, error) {
 	return TokenCount{Total: total, Approx: approx}, nil
 }
 
+// CountTokensWithTools estimates the number of input tokens for both messages
+// and tool-definition schemas (name, description, input schema JSON). Use this
+// when building the full request payload so that tool-schema overhead is
+// reflected in the context-window fill meter.
+//
+// To measure only tool-schema overhead (no messages), pass nil for messages.
+// The returned count includes the 3-token reply-priming constant from
+// CountTokens; subtract 3 if you only want the marginal tool cost.
+func CountTokensWithTools(modelName string, messages []Message, tools []ToolDefinition) (TokenCount, error) {
+	count, err := CountTokens(modelName, messages)
+	if err != nil {
+		return count, err
+	}
+	if len(tools) == 0 {
+		return count, nil
+	}
+	enc, _, err := encodingForModel(modelName)
+	if err != nil {
+		// Return the message-only count rather than an error — tool schema
+		// counting is best-effort.
+		return count, nil
+	}
+	for _, t := range tools {
+		count.Total += len(enc.Encode(t.Name, nil, nil))
+		count.Total += len(enc.Encode(t.Description, nil, nil))
+		if t.InputSchema != nil {
+			raw, _ := json.Marshal(t.InputSchema)
+			count.Total += len(enc.Encode(string(raw), nil, nil))
+		}
+	}
+	return count, nil
+}
+
 // encodingForModel returns the tiktoken encoding for a model name, falling
 // back to cl100k_base for unknown models.
 func encodingForModel(modelName string) (*tiktoken.Tiktoken, bool, error) {

@@ -157,6 +157,11 @@ Call task_complete(summary) when all work is done. Call ask_user only if you are
 // display item.  Lines beyond this are counted but not displayed.
 const processOutputLineCap = 50
 
+// compactionKeepTurns is the number of complete user turns to keep verbatim
+// after context compaction. doCompact may reduce this further if the kept
+// turns themselves would overflow the context window.
+const compactionKeepTurns = 3
+
 type displayItem struct {
 	kind           string
 	content        string
@@ -222,8 +227,10 @@ type tokenCountMsg struct {
 // compactDoneMsg is returned by doCompact when the AI summary is complete or
 // an error has occurred.
 type compactDoneMsg struct {
-	summary string
-	err     error
+	summary   string
+	keepTurns int    // number of recent turns to retain verbatim; 0 = use compactionKeepTurns default
+	warning   string // non-fatal advisory shown after compaction (e.g. context still very full)
+	err       error
 }
 
 // registryLoadedMsg carries a page of servers from the MCP registry.
@@ -789,7 +796,7 @@ func init() {
 			},
 			action: func(m *Model) []tea.Cmd {
 				m.state = stateCompacting
-				return []tea.Cmd{doCompact(m.newOpCtx(), m.client, m.messages)}
+				return []tea.Cmd{doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)}
 			},
 		},
 		{
@@ -1033,10 +1040,11 @@ type Model struct {
 	showTokenSpeed bool      // toggle: show live tokens/sec
 	lastTokenSpeed float64   // summary: last turn's tokens/sec
 
-	ctx     context.Context
-	client  ai.StreamCompleter
-	session *chat.Session
-	tools   []ai.ToolDefinition
+	ctx             context.Context
+	client          ai.StreamCompleter
+	session         *chat.Session
+	tools           []ai.ToolDefinition
+	toolTokensCache int // schema-only token overhead for m.tools; updated by setTools()
 
 	// modelManager is optionally set when the client also implements ModelManager.
 	// When nil, the model picker feature is disabled.
@@ -1751,7 +1759,7 @@ func (m *Model) applySkillToggle() {
 		// m.allToolDefs from the full unfiltered list so the /tools picker
 		// still shows all tools regardless of skill changes.
 		if filtered, err := m.session.Tools(m.ctx); err == nil {
-			m.tools = filtered
+			m.setTools(filtered)
 		}
 		if all, err := m.session.AllTools(m.ctx); err == nil {
 			m.allToolDefs = all
@@ -2360,7 +2368,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							// whether to compact, so the decision is current rather
 							// than one turn stale.
 							outbound := m.buildStreamMessages(m.messages)
-							if count, cerr := ai.CountTokens(m.modelName, outbound); cerr == nil {
+							if count, cerr := ai.CountTokensWithTools(m.modelName, outbound, m.tools); cerr == nil {
 								m.contextUsage = count
 							}
 							if cmd := m.recountContext(); cmd != nil {
@@ -2369,7 +2377,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							if m.shouldAutoCompact() {
 								m.autoCompactPending = true
 								m.state = stateCompacting
-								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages))
+								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens))
 							} else {
 								m.setThinking()
 								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
@@ -2528,7 +2536,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.Type {
 			case tea.KeyEsc, tea.KeyCtrlC:
 				// Refresh m.tools from the (possibly updated) disabled set and go back.
-				m.tools = m.filteredFromAllDefs()
+				m.setTools(m.filteredFromAllDefs())
 				m.setIdle()
 				m.updateCompletion()
 			case tea.KeyEnter:
@@ -3189,7 +3197,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.items = append(m.items, displayItem{kind: itemError, content: "loading MCP tools: " + msg.err.Error()})
 		} else {
-			m.tools = msg.tools
+			m.setTools(msg.tools)
 			m.allToolDefs = msg.tools
 		}
 		m.updateCompletion()
@@ -3302,7 +3310,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 			cmds = append(cmds, m.input.Focus())
 		} else {
-			cmds = append(cmds, m.applyCompaction(msg.summary)...)
+			cmds = append(cmds, m.applyCompaction(msg)...)
+			// Show non-fatal advisory (e.g. context still very full after compaction).
+			if msg.warning != "" {
+				m.items = append(m.items, displayItem{
+					kind:    itemInfo,
+					content: "⚠ " + msg.warning,
+				})
+				needRebuild = true
+			}
 		}
 
 	case modelsLoadedMsg:
@@ -4083,7 +4099,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err != nil {
 			m.items = append(m.items, displayItem{kind: itemError, content: "refreshing tools after OAuth: " + err.Error()})
 		} else {
-			m.tools = newTools
+			m.setTools(newTools)
 		}
 		// Update info item to show success.
 		if m.oauthInfoIdx >= 0 {
@@ -4547,6 +4563,18 @@ func (m *Model) setThinking() {
 func (m *Model) setIdle() {
 	m.state = stateIdle
 	m.thinkingStart = time.Time{}
+}
+
+// setTools updates m.tools and recomputes m.toolTokensCache so that callers
+// can read the cached overhead instead of re-encoding tool schemas on every
+// shouldAutoCompact / doCompact call.
+func (m *Model) setTools(tools []ai.ToolDefinition) {
+	m.tools = tools
+	if count, err := ai.CountTokensWithTools(m.modelName, nil, tools); err == nil {
+		m.toolTokensCache = count.Total
+	} else {
+		m.toolTokensCache = 0
+	}
 }
 
 // openModelPicker switches to the model picker, remembering returnTo so that
@@ -5076,7 +5104,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
 			m.state = stateCompacting
-			return doCompact(m.newOpCtx(), m.client, m.messages)
+			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
 		}
 		m.setThinking()
 		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools)
@@ -5101,7 +5129,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
 			m.state = stateCompacting
-			return doCompact(m.newOpCtx(), m.client, m.messages)
+			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
 		}
 		m.setThinking()
 		m.turnRoundtrips++
@@ -5589,21 +5617,6 @@ func doGetModelInfo(ctx context.Context, getter ai.ModelInfoGetter) tea.Cmd {
 	}
 }
 
-// doCountTokens counts the input tokens for messages asynchronously and returns
-// a tokenCountMsg. Errors are silently swallowed (count will be zero).
-func doCountTokens(modelName string, messages []ai.Message) tea.Cmd {
-	// Snapshot the slice so the goroutine doesn't race with the main model.
-	snap := make([]ai.Message, len(messages))
-	copy(snap, messages)
-	return func() tea.Msg {
-		count, err := ai.CountTokens(modelName, snap)
-		if err != nil {
-			return tokenCountMsg{}
-		}
-		return tokenCountMsg{count: count}
-	}
-}
-
 // recountContext schedules an async token count for the outbound message slice
 // (including ephemeral system-prompt injections) so the display and compaction
 // logic reflect the actual payload size, not just the raw history.
@@ -5611,7 +5624,20 @@ func (m *Model) recountContext() tea.Cmd {
 	if len(m.messages) == 0 {
 		return nil
 	}
-	return doCountTokens(m.modelName, m.buildStreamMessages(m.messages))
+	msgs := m.buildStreamMessages(m.messages)
+	tools := m.tools
+	snap := make([]ai.Message, len(msgs))
+	copy(snap, msgs)
+	toolSnap := make([]ai.ToolDefinition, len(tools))
+	copy(toolSnap, tools)
+	modelName := m.modelName
+	return func() tea.Msg {
+		count, err := ai.CountTokensWithTools(modelName, snap, toolSnap)
+		if err != nil {
+			return tokenCountMsg{}
+		}
+		return tokenCountMsg{count: count}
+	}
 }
 
 // hasCompactableHistory returns true when the conversation has enough real turns
@@ -5643,25 +5669,62 @@ func (m *Model) shouldAutoCompact() bool {
 	if !m.hasCompactableHistory() {
 		return false
 	}
-	const autoCompactThreshold = 0.70
+
+	// Use the cached tool-schema overhead (updated whenever m.tools changes via setTools).
+	toolTokens := m.toolTokensCache
+	available := maxTok - toolTokens
+	if available <= 0 {
+		return false // tool schemas alone exceed context — nothing we can do
+	}
+
+	historyTokens := m.contextUsage.Total - toolTokens
+	if historyTokens <= 0 {
+		return false
+	}
+
+	const autoCompactThreshold = 0.65
 	// For approximate counts (unknown tokenizer) use a lower threshold to
 	// compensate for potential undercounting.
 	threshold := autoCompactThreshold
 	if m.contextUsage.Approx {
-		threshold = 0.55
+		threshold = 0.50
 	}
-	return float64(m.contextUsage.Total)/float64(maxTok) >= threshold
+	return float64(historyTokens)/float64(available) >= threshold
+}
+
+// toolResultCap returns the maximum number of characters to include from a
+// tool result in the compaction transcript. Applies a recency bias: the most
+// recent third of messages gets more space than older entries.
+func toolResultCap(msgIndex, total int) int {
+	switch {
+	case total == 0 || msgIndex >= total*2/3:
+		return 1500 // most recent third — most relevant
+	case msgIndex >= total/3:
+		return 600 // middle third
+	default:
+		return 200 // oldest third — summarise aggressively
+	}
 }
 
 // doCompact sends the current message history to the AI as a summarization
 // request and returns a compactDoneMsg with the resulting summary text.
-func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Message) tea.Cmd {
+// modelName, toolTokens and maxTokens are used to trim the kept-turn count
+// inside the goroutine so the resulting message set fits inside the context.
+func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Message, modelName string, toolTokens, maxTokens int) tea.Cmd {
 	// Build the transcript from a snapshot, so the goroutine doesn't race.
 	snap := make([]ai.Message, len(messages))
 	copy(snap, messages)
 	return func() tea.Msg {
 		var transcript strings.Builder
-		for _, msg := range snap {
+
+		// Prepend any prior summary so the new one incorporates it.
+		if prior := extractPriorSummary(snap); prior != "" {
+			transcript.WriteString("## Prior summary (from earlier compaction — incorporate into new summary)\n\n")
+			transcript.WriteString(prior)
+			transcript.WriteString("\n\n---\n\n## New transcript\n\n")
+		}
+
+		for i, msg := range snap {
 			if msg.Role == "system" {
 				continue
 			}
@@ -5675,12 +5738,18 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 					transcript.WriteString(msg.Content)
 				}
 				for _, tc := range msg.ToolCalls {
-					fmt.Fprintf(&transcript, "Assistant called tool %q", tc.Name)
+					raw, _ := json.Marshal(tc.Arguments)
+					args := string(raw)
+					if len(args) > 300 {
+						args = args[:300] + "…"
+					}
+					fmt.Fprintf(&transcript, "Assistant called tool %q args: %s", tc.Name, args)
 				}
 			case "tool":
 				result := msg.Content
-				if len(result) > 300 {
-					result = result[:300] + "…"
+				cap := toolResultCap(i, len(snap))
+				if len(result) > cap {
+					result = result[:cap] + "…"
 				}
 				transcript.WriteString("Tool result: ")
 				transcript.WriteString(result)
@@ -5692,14 +5761,17 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 			{
 				Role: "system",
 				Content: "You are a conversation summarizer. " +
-					"Write a concise but complete summary of the conversation transcript below. " +
-					"Preserve: the main objective, key decisions, files created or modified " +
-					"(with exact paths), tool calls and their outcomes, unresolved errors or items. " +
-					"Write in past tense. Do not add commentary — just the facts.",
+					"Write a concise but information-dense summary of the conversation transcript below. " +
+					"You MUST preserve: the main objective and current status, " +
+					"key decisions and rationale, ALL file paths created or modified (exact paths), " +
+					"ALL tool calls with their key arguments and outcomes, " +
+					"ALL unresolved errors and open items, and the last clear user intent. " +
+					"Write in past tense. Only verifiable facts — no opinion. " +
+					"Note: reasoning/thinking tokens are excluded from this transcript.",
 			},
 			{
 				Role:    "user",
-				Content: "Summarize this conversation:\n\n" + transcript.String(),
+				Content: "Summarize this conversation (incorporating the prior summary if present):\n\n" + transcript.String(),
 			},
 		}
 
@@ -5721,8 +5793,81 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 		if s == "" {
 			return compactDoneMsg{err: fmt.Errorf("summarization returned empty response")}
 		}
-		return compactDoneMsg{summary: s}
+
+		// Determine how many recent turns to keep verbatim so the result fits.
+		// This is done in the goroutine to avoid blocking the TUI main loop.
+		keepTurns := compactionKeepTurns
+		if maxTokens > 0 {
+			available := maxTokens - toolTokens
+			if available <= 0 {
+				available = maxTokens
+			}
+			const threshold = 0.65
+			// Loop down to 1 inclusive so we also verify whether 1 turn fits.
+			for keepTurns >= 1 {
+				lastTurns := extractLastTurns(snap, keepTurns)
+				candidate := make([]ai.Message, 0, 2+len(lastTurns))
+				if len(snap) > 0 && snap[0].Role == "system" {
+					sysMsg := snap[0]
+					sysMsg.Content = replaceSummaryBlock(sysMsg.Content, s)
+					candidate = append(candidate, sysMsg)
+				}
+				candidate = append(candidate, lastTurns...)
+				count, err := ai.CountTokens(modelName, candidate)
+				if err != nil || float64(count.Total)/float64(available) < threshold {
+					break // fits
+				}
+				keepTurns--
+			}
+			if keepTurns < 1 {
+				// Even 1 turn doesn't fit — keep 1 turn regardless and surface an
+				// advisory warning (not an error; compaction should still apply).
+				return compactDoneMsg{
+					summary:   s,
+					keepTurns: 1,
+					warning: "Context is very full even after compaction — " +
+						"consider switching to a model with a larger context window.",
+				}
+			}
+		}
+		return compactDoneMsg{summary: s, keepTurns: keepTurns}
 	}
+}
+
+// extractPriorSummary returns the body of the "## Summary of previous
+// conversation" block embedded in the system message, or "" if none exists.
+// The marker line itself is not included in the returned string.
+func extractPriorSummary(messages []ai.Message) string {
+	if len(messages) == 0 || messages[0].Role != "system" {
+		return ""
+	}
+	const marker = "## Summary of previous conversation\n\n"
+	idx := strings.Index(messages[0].Content, marker)
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(messages[0].Content[idx+len(marker):])
+}
+
+// replaceSummaryBlock replaces the existing "## Summary of previous
+// conversation" block in systemContent with newSummary, or appends a new
+// block if none is present. This prevents the system message from growing
+// unboundedly across successive compactions.
+//
+// Two marker forms are handled:
+//   - "\n\n## Summary…" — normal case where the system message has other content before it.
+//   - "## Summary…" at position 0 — when the system message consists solely of the summary
+//     (created by applyCompaction when there was no prior system message).
+func replaceSummaryBlock(systemContent, newSummary string) string {
+	const heading = "## Summary of previous conversation\n\n"
+	const withLeading = "\n\n" + heading
+	if idx := strings.Index(systemContent, withLeading); idx >= 0 {
+		return systemContent[:idx] + withLeading + newSummary
+	}
+	if strings.HasPrefix(systemContent, heading) {
+		return heading + newSummary
+	}
+	return systemContent + withLeading + newSummary
 }
 
 // extractLastTurns returns the last n complete user turns (and everything
@@ -5740,31 +5885,51 @@ func extractLastTurns(messages []ai.Message, n int) []ai.Message {
 	if len(userIdxs) > n {
 		cutAt = userIdxs[len(userIdxs)-n]
 	}
-	// Return non-system messages from cutAt onward.
+	// Guard: cutAt should always land on a user message by construction; if a
+	// future refactor breaks that invariant, scan forward to the next user message.
+	if cutAt < len(messages) {
+		if got := messages[cutAt].Role; got != "user" && got != "system" {
+			for cutAt < len(messages) && messages[cutAt].Role != "user" {
+				cutAt++
+			}
+		}
+	}
+	// Return non-system messages from cutAt onward, stripping Reasoning to save
+	// session-file size (reasoning content is never sent to the API anyway).
 	var out []ai.Message
 	for _, msg := range messages[cutAt:] {
-		if msg.Role != "system" {
-			out = append(out, msg)
+		if msg.Role == "system" {
+			continue
 		}
+		if msg.Role == "assistant" {
+			msg.Reasoning = "" // Not sent to API; strip to save session file size.
+		}
+		out = append(out, msg)
 	}
 	return out
 }
 
 // applyCompaction replaces the message history with the system message plus a
-// summary system message plus the last 2 complete user turns, then rebuilds
-// display items and schedules a recount.
-func (m *Model) applyCompaction(summary string) []tea.Cmd {
+// summary block plus the last compactionKeepTurns complete user turns (or
+// fewer if msg.keepTurns specifies), then rebuilds display items and schedules
+// a recount.
+func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
+	summary := msg.summary
 	oldMessages := m.messages
 
-	// Build the new history: single system message (original + summary appended)
-	// plus the last 2 complete user turns. Merging into one system message ensures
-	// compatibility with providers (e.g. GitHub Copilot) that reject multiple
-	// role:"system" messages in a single request.
+	keepTurns := msg.keepTurns
+	if keepTurns <= 0 {
+		keepTurns = compactionKeepTurns
+	}
+
+	// Build the new history: single system message with the summary REPLACED
+	// (not appended) to prevent unbounded growth across successive compactions.
+	// Merge into one system message for compatibility with providers that reject
+	// multiple role:"system" messages (e.g. GitHub Copilot).
 	newMessages := make([]ai.Message, 0, 8)
-	summaryBlock := "\n\n## Summary of previous conversation\n\n" + summary
 	if len(oldMessages) > 0 && oldMessages[0].Role == "system" {
 		systemMsg := oldMessages[0]
-		systemMsg.Content += summaryBlock
+		systemMsg.Content = replaceSummaryBlock(systemMsg.Content, summary)
 		newMessages = append(newMessages, systemMsg)
 	} else {
 		newMessages = append(newMessages, ai.Message{
@@ -5772,7 +5937,7 @@ func (m *Model) applyCompaction(summary string) []tea.Cmd {
 			Content: "## Summary of previous conversation\n\n" + summary,
 		})
 	}
-	newMessages = append(newMessages, extractLastTurns(oldMessages, 2)...)
+	newMessages = append(newMessages, extractLastTurns(oldMessages, keepTurns)...)
 	m.messages = newMessages
 
 	// Rebuild display from the new history.
