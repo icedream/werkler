@@ -831,7 +831,7 @@ Examples NOT requiring shell=true: "git", "grep", "uptime", "free", "ps" (with a
 				Description: `Read text file regions, multiple in one call possible. Returns each region labeled with a header line.
 Each region may specify start_line and end_line (1-indexed, inclusive); omit both to read the full file.
 Partial failures are reported inline — other regions still return their content.
-Total output is capped at 2 MiB across all regions.`,
+Total output is capped at 1 KiB across all regions.`,
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -1925,7 +1925,7 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 // --- File tool handlers ---
 
 // maxFileReadMultiBytes is the aggregate output cap for file_read_multi.
-const maxFileReadMultiBytes = 2 << 20 // 2 MiB
+const maxFileReadMultiBytes = 1 << 10 // 1 KiB
 
 func (m *Manager) handleFileReadMulti(ctx context.Context, args map[string]any) (string, error) {
 	rawRegions, _ := args["regions"].([]any)
