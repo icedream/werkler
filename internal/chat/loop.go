@@ -28,7 +28,6 @@ var alwaysApprovedTools = map[string]bool{
 	"memory_write":   true,
 	"memory_delete":  true,
 	"memory_promote": true,
-	"get_time":       true,
 	"calculate":      true,
 	"sleep":          true,
 }

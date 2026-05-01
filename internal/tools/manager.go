@@ -1329,28 +1329,7 @@ target_directory accepts a relative path (e.g. ".." or "../..") or an absolute p
 		}
 	}
 
-	// get_time, calculate, and sleep are always registered.
-	builtins = append(builtins,
-		builtin{
-			def: ai.ToolDefinition{
-				Name: "get_time",
-				Description: `Return the current date and time. Use this whenever you need to know the current time,
-calculate time differences, or reason about schedules and deadlines.
-An optional IANA timezone name (e.g. "America/New_York", "Europe/Berlin", "UTC") can be supplied;
-when omitted the system local time is returned alongside UTC.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"timezone": map[string]any{
-							"type":        "string",
-							"description": "IANA timezone name (e.g. \"America/New_York\"). Omit for local + UTC.",
-						},
-					},
-				},
-			},
-			handle: m.handleGetTime,
-		},
-	)
+	// calculate, and sleep are always registered.
 	builtins = append(builtins,
 		builtin{
 			def: ai.ToolDefinition{

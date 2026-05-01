@@ -5259,7 +5259,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		call.Name == "todo_add_many" ||
 		call.Name == "memory_list" || call.Name == "memory_read" || call.Name == "memory_write" ||
 		call.Name == "connect_server" ||
-		call.Name == "get_time" || call.Name == "calculate" || call.Name == "sleep" {
+		call.Name == "calculate" || call.Name == "sleep" {
 		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
@@ -6368,8 +6368,6 @@ func toolFriendlyName(name string) string {
 		return "Write memory"
 	case "memory_delete":
 		return "Delete memory"
-	case "get_time":
-		return "Get time"
 	case "calculate":
 		return "Calculate"
 	case "sleep":
