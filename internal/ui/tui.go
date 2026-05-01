@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -6393,7 +6394,7 @@ func toolCallDisplayArgs(toolName string, args map[string]any) string {
 			if rawArgs, ok := args["args"].([]any); ok {
 				for _, a := range rawArgs {
 					if s, ok := a.(string); ok {
-						parts = append(parts, s)
+						parts = append(parts, strconv.Quote(s))
 					}
 				}
 			}
