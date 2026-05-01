@@ -580,3 +580,11 @@ func TestInputPlaceholder_States(t *testing.T) {
 	assert.Contains(t, inputPlaceholder(stateCallingTool), "Queue")
 	assert.Contains(t, inputPlaceholder(stateAwaitingApproval), "y")
 }
+
+// --- compactionKeepTurns ---
+
+func TestCompactionKeepTurns(t *testing.T) {
+	for i := 8000; i < 384000; i += 8000 {
+		t.Logf("Context size %d -> %d turns", i, compactionKeepTurns(i))
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -157,10 +158,25 @@ Call task_complete(summary) when all work is done. Call ask_user only if you are
 // display item.  Lines beyond this are counted but not displayed.
 const processOutputLineCap = 50
 
-// compactionKeepTurns is the number of complete user turns to keep verbatim
+// compactionKeepTurns return the number of complete user turns to keep verbatim
 // after context compaction. doCompact may reduce this further if the kept
 // turns themselves would overflow the context window.
-const compactionKeepTurns = 3
+func compactionKeepTurns(contextSize int) int {
+	turns := 1
+
+	// Below 32k just default to 1
+	if contextSize <= 32*1024 {
+		return turns
+	}
+
+	// < 96k -> 1 turn
+	// 96k+ -> 2 turns
+	// 168k+ -> 3 turns
+	// 296k+ -> 4 turns
+	limit := math.Log(float64(contextSize))*1.75 - 18
+
+	return int(math.Floor(math.Max(1, limit)))
+}
 
 type displayItem struct {
 	kind           string
@@ -794,7 +810,7 @@ func init() {
 			description: "Summarize the conversation to free up context window space",
 			action: func(m *Model) []tea.Cmd {
 				m.state = stateCompacting
-				return []tea.Cmd{doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens, m.contextUsage.Total)}
+				return []tea.Cmd{doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)}
 			},
 		},
 		{
@@ -2375,7 +2391,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							if m.shouldAutoCompact() {
 								m.autoCompactPending = true
 								m.state = stateCompacting
-								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens, m.contextUsage.Total))
+								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens))
 							} else {
 								m.setThinking()
 								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
@@ -5094,7 +5110,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
 			m.state = stateCompacting
-			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens, m.contextUsage.Total)
+			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
 		}
 		m.setThinking()
 		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools)
@@ -5125,7 +5141,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
 			m.state = stateCompacting
-			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens, m.contextUsage.Total)
+			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
 		}
 		m.setThinking()
 		m.turnRoundtrips++
@@ -5171,7 +5187,7 @@ func (m *Model) processNextCall() tea.Cmd {
 			m.callingToolTitle = ""
 			m.autoCompactPending = true
 			m.state = stateCompacting
-			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens, m.contextUsage.Total)
+			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
 		}
 	}
 
@@ -5758,12 +5774,7 @@ func toolResultCap(msgIndex, total int) int {
 // request and returns a compactDoneMsg with the resulting summary text.
 // modelName, toolTokens and maxTokens are used to trim the kept-turn count
 // inside the goroutine so the resulting message set fits inside the context.
-func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Message, modelName string, toolTokens, maxTokens, totalTokens int) tea.Cmd {
-	// totalTokens is the pre-computed token count from the caller (m.contextUsage.Total).
-	// It is passed through to compactDoneMsg so applyCompaction can reuse it and
-	// avoid scheduling a redundant recountContext() call immediately after compaction.
-	// A zero value means the count is unknown (callers before the first recount).
-	//
+func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Message, modelName string, toolTokens, maxTokens int) tea.Cmd {
 	// Build the transcript from a snapshot, so the goroutine doesn't race.
 	snap := make([]ai.Message, len(messages))
 	copy(snap, messages)
@@ -5840,9 +5851,14 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 			return compactDoneMsg{err: fmt.Errorf("summarization returned empty response")}
 		}
 
-		// Determine how many recent turns to keep verbatim so the result fits.
-		keepTurns := compactionKeepTurns
+		// keepTurns determines how many recent turns to keep verbatim so the result fits.
+		// We'll default it to a reasonable default for 32k token limit.
+		keepTurns := compactionKeepTurns(32000)
+		// newContextTokens is the post-compaction token estimate (messages + tool
+		// overhead). Zero means unknown — applyCompaction will schedule a recount.
+		var newContextTokens int
 		if maxTokens > 0 {
+			keepTurns = compactionKeepTurns(keepTurns)
 			// Reserve ~100 tokens for the compaction system prompt and summary overhead
 			// so that the re-built history fits within the context window after compaction.
 			const systemPromptBuffer = 100
@@ -5863,6 +5879,11 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 				candidate = append(candidate, lastTurns...)
 				count, err := ai.CountTokens(modelName, candidate)
 				if err != nil || float64(count.Total)/float64(available) < threshold {
+					// count.Total is message-only; add tool-schema overhead to get
+					// the full context usage that applyCompaction can apply directly.
+					if err == nil {
+						newContextTokens = count.Total + toolTokens
+					}
 					break // fits
 				}
 				keepTurns--
@@ -5875,11 +5896,12 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 					keepTurns: 1,
 					warning: "Context is very full even after compaction — " +
 						"consider switching to a model with a larger context window.",
-					totalTokens: totalTokens,
+					totalTokens: newContextTokens,
 				}
 			}
 		}
-		return compactDoneMsg{summary: s, keepTurns: keepTurns, totalTokens: totalTokens}
+
+		return compactDoneMsg{summary: s, keepTurns: keepTurns, totalTokens: newContextTokens}
 	}
 }
 
@@ -5998,9 +6020,9 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 	m.rebuildContent()
 
 	var cmds []tea.Cmd
-	// If the compaction goroutine carried a pre-computed token count, apply it
-	// directly so we avoid scheduling a redundant async recount immediately
-	// after compaction (the new history is much smaller than the old one).
+	// If the compaction goroutine computed a post-compaction token count, apply
+	// it directly to avoid a redundant async recount (the count reflects the
+	// reduced history). Zero means it was not computed; fall back to a recount.
 	if msg.totalTokens > 0 {
 		m.contextUsage = ai.TokenCount{Total: msg.totalTokens}
 	} else {
