@@ -30,7 +30,13 @@ func EnrichSystemPrompt(systemPrompt string, info ai.ModelInfo) string {
 	}
 	var sb strings.Builder
 	sb.WriteString(systemPrompt)
-	fmt.Fprintf(&sb, "\n\n## Model Context\nContext window: %d tokens. Manage conversation length accordingly.", info.Context.MaxTokens)
+	fmt.Fprintf(&sb,
+		`
+
+## Model Context
+Context window: %d tokens. Manage conversation length accordingly.
+Use as few words/tokens for especially internal thoughts and quick communications with the user as possible.`,
+		info.Context.MaxTokens)
 	return sb.String()
 }
 
