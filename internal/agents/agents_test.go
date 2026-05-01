@@ -86,7 +86,7 @@ func TestSaveAndLoad(t *testing.T) {
 
 func TestSaveAndLoad_RestrictedTools(t *testing.T) {
 	dir := t.TempDir()
-	tools := []string{"file_read", "file_list"}
+	tools := []string{"file_read_multi", "file_list"}
 	a := Agent{
 		Name:         "restricted",
 		Description:  "A restricted agent",

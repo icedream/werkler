@@ -830,28 +830,8 @@ Examples NOT requiring shell=true: "git", "grep", "uptime", "free", "ps" (with a
 		// --- File tools ---
 		{
 			def: ai.ToolDefinition{
-				Name: "file_read",
-				Description: `Read the contents of a text file.
-Returns content with line numbers (format: "   1│<line>"), total line count, and the range returned.
-Line numbers are decorative — do NOT include them when writing or editing file content.
-For large files, use start_line and end_line to read sections (1-indexed, inclusive).
-Returns an error for binary files; use process_start to handle those.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path":       map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
-						"start_line": map[string]any{"type": "number", "description": "First line to return (1-indexed, default 1)"},
-						"end_line":   map[string]any{"type": "number", "description": "Last line to return (1-indexed, default: end of file or 1 MiB limit)"},
-					},
-					"required": []string{"path"},
-				},
-			},
-			handle: m.handleFileRead,
-		},
-		{
-			def: ai.ToolDefinition{
 				Name: "file_read_multi",
-				Description: `Read multiple text file regions in one call. Returns each region labeled with a header line.
+				Description: `Read text file regions, multiple in one call possible. Returns each region labeled with a header line.
 Each region may specify start_line and end_line (1-indexed, inclusive); omit both to read the full file.
 Partial failures are reported inline — other regions still return their content.
 Total output is capped at 2 MiB across all regions.`,
@@ -1947,84 +1927,6 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 
 // --- File tool handlers ---
 
-func (m *Manager) handleFileRead(ctx context.Context, args map[string]any) (string, error) {
-	rawPath := stringArg(args, "path")
-	if rawPath == "" {
-		return "", fmt.Errorf("file_read: path is required")
-	}
-	path := canonicalizePath(rawPath)
-
-	if err := m.checkSingleRead(ctx, path); err != nil {
-		return "", err
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("file_read: %w", err)
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("file_read: %s is a directory; use file_list to list directories", path)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("file_read: %w", err)
-	}
-
-	if !utf8.Valid(data) {
-		return "", fmt.Errorf("file_read: %s appears to be a binary file; use process_start to handle binary files", path)
-	}
-
-	lines := strings.Split(string(data), "\n")
-	totalLines := len(lines)
-
-	startLine := int(float64Arg(args, "start_line", 1))
-	endLine := int(float64Arg(args, "end_line", float64(totalLines)))
-	if startLine < 1 {
-		startLine = 1
-	}
-	if endLine > totalLines {
-		endLine = totalLines
-	}
-	if startLine > endLine {
-		return "", fmt.Errorf("file_read: start_line (%d) > end_line (%d)", startLine, endLine)
-	}
-
-	selected := lines[startLine-1 : endLine]
-
-	// Enforce size limit when reading without a range (full file).
-	if _, hasStart := args["start_line"]; !hasStart {
-		if _, hasEnd := args["end_line"]; !hasEnd {
-			if len(data) > maxFileReadBytes {
-				// Truncate to fit within maxFileReadBytes; find the last safe line.
-				size := 0
-				for i, l := range selected {
-					size += len(l) + 1
-					if size > maxFileReadBytes {
-						selected = selected[:i]
-						break
-					}
-				}
-			}
-		}
-	}
-
-	// Format with line numbers. Use a │ separator that is visually distinct
-	// from file content so models don't copy the line-number prefix verbatim.
-	var sb strings.Builder
-	for i, l := range selected {
-		fmt.Fprintf(&sb, "%4d│%s\n", startLine+i, l)
-	}
-
-	return jsonResult(map[string]any{
-		"content":     sb.String(),
-		"total_lines": totalLines,
-		"start_line":  startLine,
-		"end_line":    startLine + len(selected) - 1,
-		"truncated":   startLine+len(selected)-1 < totalLines && len(data) > maxFileReadBytes,
-	}), nil
-}
-
 // maxFileReadMultiBytes is the aggregate output cap for file_read_multi.
 const maxFileReadMultiBytes = 2 << 20 // 2 MiB
 
@@ -2564,7 +2466,7 @@ Do NOT comment on style, formatting, naming conventions, or other minor matters.
 RESEARCH REQUIREMENT: Before writing your review you MUST use your tools to verify the plan
 against the actual codebase. Do not trust the description alone — read the real files.
 Specifically:
-- Use file_read to read every source file that the plan touches or references.
+- Use file_read_multi to read every source file that the plan touches or references.
 - Use run_command (shell=true) with grep/rg to find related functions, types, and patterns.
 - Use file_list to discover files when paths are not given explicitly.
 - Check that types, field names, function signatures, and interfaces cited in the plan actually
@@ -2576,9 +2478,9 @@ IMPORTANT: Your every response must be either a tool call or your complete final
 Never output "I will now...", "Let me read...", or any other intermediate narration — that would
 be treated as your final answer. Call tools to gather context, then produce the full review.`,
 		allowedTools: map[string]bool{
-			"file_read":   true,
-			"file_list":   true,
-			"run_command": true,
+			"file_read_multi": true,
+			"file_list":       true,
+			"run_command":     true,
 		},
 		maxSteps:  20,
 		completer: c,
@@ -2607,8 +2509,8 @@ IMPORTANT: Your every response must be either a tool call or your complete final
 Never output "I will now...", "Let me read...", or any other intermediate narration — that would
 be treated as your final answer.`,
 		allowedTools: map[string]bool{
-			"file_read": true,
-			"file_list": true,
+			"file_read_multi": true,
+			"file_list":       true,
 		},
 		maxSteps:  10,
 		completer: c,

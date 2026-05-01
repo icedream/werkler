@@ -6344,8 +6344,8 @@ func formatArgsCompact(args map[string]any) string {
 // their base name (the part after "__") by converting snake_case to Title Case.
 func toolFriendlyName(name string) string {
 	switch name {
-	case "file_read":
-		return "Read file"
+	case "file_read_multi":
+		return "Read files"
 	case "file_write":
 		return "Write file"
 	case "file_edit":
@@ -6421,7 +6421,7 @@ func renderToolName(name string) string {
 // toolCallDisplayArgs returns a compact display string for tool call arguments.
 func toolCallDisplayArgs(toolName string, args map[string]any) string {
 	switch toolName {
-	case "file_edit", "file_write", "file_delete", "file_read":
+	case "file_edit", "file_write", "file_delete":
 		if path, ok := args["path"].(string); ok && path != "" {
 			return shortenHomePath(path)
 		}

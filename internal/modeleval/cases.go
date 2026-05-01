@@ -42,12 +42,22 @@ func connectServerTool(servers []string) ai.ToolDefinition {
 func minimalBuiltins() []ai.ToolDefinition {
 	return []ai.ToolDefinition{
 		{
-			Name:        "file_read",
-			Description: "Read the contents of a file.",
+			Name:        "file_read_multi",
+			Description: "Read a file (supports line ranges).",
 			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"path": map[string]any{"type": "string"}},
-				"required":   []string{"path"},
+				"type": "object",
+				"properties": map[string]any{
+					"regions": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"path": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+				"required": []string{"regions"},
 			},
 		},
 		{

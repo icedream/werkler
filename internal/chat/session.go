@@ -77,15 +77,15 @@ Do not treat these as optional. Proceeding without confirmation at a checkpoint 
 
 ## File operations
 Always use these built-in tools for file operations — do NOT use any fs__* MCP tools for writing:
-- file_write   — create or overwrite a file (use this to write new files)
-- file_edit    — replace a specific string in an existing file (surgical edits)
-- file_read    — read a file (supports line ranges)
-- file_list    — list a directory
-- file_delete  — delete a file
-- file_append  — append to a file
+- file_write — create or overwrite a file (use this to write new files)
+- file_edit — replace a specific string in an existing file (surgical edits)
+- file_read_multi — read a file (supports line ranges)
+- file_list — list a directory
+- file_delete — delete a file
+- file_append — append to a file
 
-If a file_edit fails, use file_read on a file before calling file_edit again — copy old_str verbatim from the file_read output, including exact whitespace and indentation.
-file_read output has line numbers like "   1│<line>" — these are decorative display only. Do NOT include them in file_write or file_edit content.
+If a file_edit fails, use file_read_multi on a file before calling file_edit again — copy old_str verbatim from the file_read_multi output, including exact whitespace and indentation.
+file_read_multi output has line numbers like "   1│<line>" — these are decorative display only. Do NOT include them in file_write or file_edit content.
 
 Performance — batch file operations to minimise round-trips:
 - Read multiple independent files in one turn by calling file_read several times in the same tool-call batch.

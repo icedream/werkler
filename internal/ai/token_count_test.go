@@ -165,8 +165,8 @@ func TestCountTokensWithTools_GreaterThanWithout(t *testing.T) {
 func TestCountTokensWithTools_NilMessages_ReturnsToolOverhead(t *testing.T) {
 	tools := []ToolDefinition{
 		{
-			Name:        "file_read",
-			Description: "Read a file from disk.",
+			Name:        "file_read_multi",
+			Description: "Read a file (supports line ranges).",
 		},
 	}
 	count, err := CountTokensWithTools("gpt-4o", nil, tools)

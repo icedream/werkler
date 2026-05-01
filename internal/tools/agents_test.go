@@ -15,7 +15,7 @@ func TestIsInfraToolName(t *testing.T) {
 			t.Errorf("expected %q to be an infra tool", name)
 		}
 	}
-	notInfra := []string{"file_read", "file_write", "process_start", "calculate"}
+	notInfra := []string{"file_read_multi", "file_write", "process_start", "calculate"}
 	for _, name := range notInfra {
 		if IsInfraToolName(name) {
 			t.Errorf("expected %q NOT to be an infra tool", name)
@@ -27,8 +27,8 @@ func TestIsInfraToolName(t *testing.T) {
 func TestSetToolFilter_NilMeansUnrestricted(t *testing.T) {
 	m := newTestManager()
 	m.SetToolFilter(nil)
-	if !m.isAllowed("file_read") {
-		t.Error("expected file_read to be allowed with nil filter")
+	if !m.isAllowed("file_read_multi") {
+		t.Error("expected file_read_multi to be allowed with nil filter")
 	}
 	if !m.isAllowed("use_agent") {
 		t.Error("expected use_agent (infra) to always be allowed")
@@ -38,10 +38,10 @@ func TestSetToolFilter_NilMeansUnrestricted(t *testing.T) {
 // TestSetToolFilter_AllowlistFilters verifies non-allowlisted tools are blocked.
 func TestSetToolFilter_AllowlistFilters(t *testing.T) {
 	m := newTestManager()
-	m.SetToolFilter([]string{"file_read", "file_list"})
+	m.SetToolFilter([]string{"file_read_multi", "file_list"})
 
-	if !m.isAllowed("file_read") {
-		t.Error("file_read should be allowed")
+	if !m.isAllowed("file_read_multi") {
+		t.Error("file_read_multi should be allowed")
 	}
 	if !m.isAllowed("file_list") {
 		t.Error("file_list should be allowed")
@@ -63,8 +63,8 @@ func TestSetToolFilter_EmptyMeansNoTools(t *testing.T) {
 	m := newTestManager()
 	m.SetToolFilter([]string{})
 
-	if m.isAllowed("file_read") {
-		t.Error("file_read should NOT be allowed with empty filter")
+	if m.isAllowed("file_read_multi") {
+		t.Error("file_read_multi should NOT be allowed with empty filter")
 	}
 	// Infra tools still allowed.
 	if !m.isAllowed("use_agent") {
