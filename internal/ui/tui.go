@@ -4000,9 +4000,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// not-executed and let the AI respond via a new stream.
 				if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
 					m.items[idx].toolStatus = toolStatusFailed
-					if msg.toolName == "file_edit" {
+					switch msg.toolName {
+					case "file_edit":
 						m.items[idx].toolNote = fileEditErrorNote(msg.err)
-					} else if msg.toolName == "file_write" {
+					case "file_write":
 						m.items[idx].toolNote = fileWriteErrorNote(msg.err)
 					}
 				}
