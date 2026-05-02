@@ -105,7 +105,7 @@ func TestSaveAndLoad_RestrictedTools(t *testing.T) {
 		t.Fatalf("expected 1 agent, got %d", len(loaded))
 	}
 	tl := loaded[0].ToolList()
-	if len(tl) != 2 || tl[0] != "file_read" || tl[1] != "file_list" {
+	if len(tl) != 2 || tl[0] != "file_read_multi" || tl[1] != "file_list" {
 		t.Fatalf("unexpected tool list: %v", tl)
 	}
 }
