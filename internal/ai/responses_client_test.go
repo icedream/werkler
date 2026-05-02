@@ -1,7 +1,6 @@
 package ai
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -38,7 +37,7 @@ func TestToResponsesItems_SystemBecomesInstructions(t *testing.T) {
 		{Role: "system", Content: "You are helpful."},
 		{Role: "user", Content: "Hello"},
 	}
-	instructions, items := toResponsesItems(msgs)
+	instructions, items := toResponsesItems(t.Context(), msgs)
 	assert.Equal(t, "You are helpful.", instructions)
 	require.Len(t, items, 1)
 	assert.Equal(t, "message", items[0].Type)
@@ -51,7 +50,7 @@ func TestToResponsesItems_MultipleSystemsMerged(t *testing.T) {
 		{Role: "system", Content: "Second."},
 		{Role: "user", Content: "Hi"},
 	}
-	instructions, items := toResponsesItems(msgs)
+	instructions, items := toResponsesItems(t.Context(), msgs)
 	assert.Equal(t, "First.\n\nSecond.", instructions)
 	require.Len(t, items, 1)
 }
@@ -66,7 +65,7 @@ func TestToResponsesItems_AssistantTextAndToolCall(t *testing.T) {
 			},
 		},
 	}
-	_, items := toResponsesItems(msgs)
+	_, items := toResponsesItems(t.Context(), msgs)
 	// Expect one message item (text) + one function_call item.
 	require.Len(t, items, 2)
 	assert.Equal(t, "message", items[0].Type)
@@ -80,7 +79,7 @@ func TestToResponsesItems_ToolResultBecomesOutput(t *testing.T) {
 	msgs := []Message{
 		{Role: "tool", Content: "file contents here", ToolCallID: "call_abc"},
 	}
-	_, items := toResponsesItems(msgs)
+	_, items := toResponsesItems(t.Context(), msgs)
 	require.Len(t, items, 1)
 	assert.Equal(t, "function_call_output", items[0].Type)
 	assert.Equal(t, "call_abc", items[0].CallID)
@@ -95,7 +94,7 @@ func TestToResponsesItems_UserWithImageURL(t *testing.T) {
 			Parts:   []ImagePart{{URL: "https://example.com/img.png"}},
 		},
 	}
-	_, items := toResponsesItems(msgs)
+	_, items := toResponsesItems(t.Context(), msgs)
 	require.Len(t, items, 1)
 	var parts []respContentPart
 	require.NoError(t, json.Unmarshal(items[0].Content, &parts))
@@ -113,7 +112,7 @@ func TestToResponsesItems_UserWithBase64Image(t *testing.T) {
 			Parts: []ImagePart{{Data: []byte{0x89, 0x50}, MIMEType: "image/png"}},
 		},
 	}
-	_, items := toResponsesItems(msgs)
+	_, items := toResponsesItems(t.Context(), msgs)
 	require.Len(t, items, 1)
 	var parts []respContentPart
 	require.NoError(t, json.Unmarshal(items[0].Content, &parts))
@@ -156,7 +155,7 @@ func TestCompleteStream_SimpleTextResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	msg, err := newTestResponsesClient(srv).Complete(context.Background(), []Message{
+	msg, err := newTestResponsesClient(srv).Complete(t.Context(), []Message{
 		{Role: "user", Content: "Say hello"},
 	}, nil)
 
@@ -184,7 +183,7 @@ func TestCompleteStream_DeltasAccumulatedIntoContent(t *testing.T) {
 	defer srv.Close()
 
 	cl := newTestResponsesClient(srv)
-	ch := cl.CompleteStream(context.Background(), []Message{{Role: "user", Content: "count"}}, nil)
+	ch := cl.CompleteStream(t.Context(), []Message{{Role: "user", Content: "count"}}, nil)
 
 	var streamedDeltas []string
 	var finalMsg Message
@@ -224,7 +223,7 @@ func TestCompleteStream_ToolCallReconstruction(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	msg, err := newTestResponsesClient(srv).Complete(context.Background(), []Message{
+	msg, err := newTestResponsesClient(srv).Complete(t.Context(), []Message{
 		{Role: "user", Content: "read /etc/hosts"},
 	}, nil)
 
@@ -256,7 +255,7 @@ func TestCompleteStream_ToolCallFinishReason(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := newTestResponsesClient(srv).CompleteStream(context.Background(), []Message{
+	ch := newTestResponsesClient(srv).CompleteStream(t.Context(), []Message{
 		{Role: "user", Content: "call something"},
 	}, nil)
 
@@ -281,7 +280,7 @@ func TestCompleteStream_IncompleteBecomesLengthFinishReason(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := newTestResponsesClient(srv).CompleteStream(context.Background(), []Message{
+	ch := newTestResponsesClient(srv).CompleteStream(t.Context(), []Message{
 		{Role: "user", Content: "write me a novel"},
 	}, nil)
 
@@ -307,7 +306,7 @@ func TestCompleteStream_UsageTokens(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch := newTestResponsesClient(srv).CompleteStream(context.Background(), []Message{
+	ch := newTestResponsesClient(srv).CompleteStream(t.Context(), []Message{
 		{Role: "user", Content: "hi"},
 	}, nil)
 
@@ -334,7 +333,7 @@ func TestCompleteStream_APIErrorEvent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newTestResponsesClient(srv).Complete(context.Background(), []Message{
+	_, err := newTestResponsesClient(srv).Complete(t.Context(), []Message{
 		{Role: "user", Content: "hello"},
 	}, nil)
 
@@ -348,7 +347,7 @@ func TestCompleteStream_HTTP4xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newTestResponsesClient(srv).Complete(context.Background(), []Message{
+	_, err := newTestResponsesClient(srv).Complete(t.Context(), []Message{
 		{Role: "user", Content: "hello"},
 	}, nil)
 
@@ -370,7 +369,7 @@ func TestCompleteStream_InlineTypeField(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	msg, err := newTestResponsesClient(srv).Complete(context.Background(), []Message{
+	msg, err := newTestResponsesClient(srv).Complete(t.Context(), []Message{
 		{Role: "user", Content: "test"},
 	}, nil)
 
@@ -401,7 +400,7 @@ func TestCompleteStream_MultipleToolCallsOrdering(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	msg, err := newTestResponsesClient(srv).Complete(context.Background(), []Message{
+	msg, err := newTestResponsesClient(srv).Complete(t.Context(), []Message{
 		{Role: "user", Content: "do both"},
 	}, nil)
 

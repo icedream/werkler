@@ -127,6 +127,7 @@ type StreamChunk struct {
 	RateLimits     RateLimits // populated on Done; zero when provider doesn't report limits
 	FinishReason   string     // "stop", "length", "tool_calls", etc.; populated on Done
 	Usage          Usage      // token usage; populated on Done when provider reports it
+	ResponseID     string     // opaque server-assigned response ID (Responses API); used by IncrementalClient for previous_response_id
 }
 
 // Usage holds token consumption statistics for a single AI turn.
@@ -508,6 +509,13 @@ func toOpenAIMessages(msgs []Message) []openai.ChatCompletionMessage {
 			Role:       m.Role,
 			Content:    m.Content,
 			ToolCallID: m.ToolCallID,
+		}
+		// The go-openai library serialises Content with omitempty, so an empty
+		// string is dropped from the JSON entirely. Many servers (including
+		// llama.cpp) reject tool messages that lack a content field outright.
+		// Use a single space so the field is always present without adding noise.
+		if m.Role == "tool" && msg.Content == "" {
+			msg.Content = " "
 		}
 		// If the message carries image parts, switch to MultiContent.
 		if len(m.Parts) > 0 {

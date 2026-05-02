@@ -1,7 +1,6 @@
 package process
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +57,7 @@ func TestProcessWriteReadClean(t *testing.T) {
 
 func TestManagerStart_EchoReadsOutput(t *testing.T) {
 	mgr := New(nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	handle, err := mgr.Start(ctx, "echo", []string{"hello process"}, "", nil, false)
 	if err != nil {
@@ -82,7 +81,7 @@ func TestManagerStart_EchoReadsOutput(t *testing.T) {
 
 func TestManagerStart_CatSendRead(t *testing.T) {
 	mgr := New(nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	handle, err := mgr.Start(ctx, "cat", nil, "", nil, false)
 	if err != nil {
@@ -105,7 +104,7 @@ func TestManagerStart_CatSendRead(t *testing.T) {
 
 func TestManagerSendKey_ValidKey(t *testing.T) {
 	mgr := New(nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	handle, err := mgr.Start(ctx, "cat", nil, "", nil, false)
 	if err != nil {
@@ -124,7 +123,7 @@ func TestManagerSendKey_ValidKey(t *testing.T) {
 
 func TestManagerSendKey_InvalidKey(t *testing.T) {
 	mgr := New(nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	handle, err := mgr.Start(ctx, "cat", nil, "", nil, false)
 	if err != nil {
@@ -140,7 +139,7 @@ func TestManagerSendKey_InvalidKey(t *testing.T) {
 
 func TestManagerStop_ForceKill(t *testing.T) {
 	mgr := New(nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// sleep sleeps indefinitely until killed.
 	handle, err := mgr.Start(ctx, "sleep", []string{"60"}, "", nil, false)
@@ -176,7 +175,7 @@ func TestManagerUnknownHandle(t *testing.T) {
 
 func TestManagerList(t *testing.T) {
 	mgr := New(nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	handle, err := mgr.Start(ctx, "sleep", []string{"60"}, "", nil, false)
 	if err != nil {
@@ -207,7 +206,7 @@ func TestManagerOutputNotification(t *testing.T) {
 	mgr := New(func(handle, raw, clean string) {
 		notified <- clean
 	})
-	ctx := context.Background()
+	ctx := t.Context()
 
 	handle, err := mgr.Start(ctx, "echo", []string{"notify me"}, "", nil, false)
 	if err != nil {
@@ -228,7 +227,7 @@ func TestManagerOutputNotification(t *testing.T) {
 
 func TestManagerPTY_Smoke(t *testing.T) {
 	mgr := New(nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	handle, err := mgr.Start(ctx, "echo", []string{"pty test"}, "", nil, true)
 	if err != nil {
@@ -246,7 +245,7 @@ func TestManagerPTY_Smoke(t *testing.T) {
 
 func TestManagerReadNewOutput_Incremental(t *testing.T) {
 	mgr := New(nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	handle, err := mgr.Start(ctx, "cat", nil, "", nil, false)
 	if err != nil {

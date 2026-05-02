@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"testing"
 
 	"github.com/icedream/werkler/internal/agents"
@@ -102,7 +101,7 @@ func TestHandleUseAgent_ActivatesCallback(t *testing.T) {
 	}
 	m.SetAgents(testAgents)
 
-	result, err := m.handleUseAgent(context.Background(), map[string]any{"name": "go-reviewer"})
+	result, err := m.handleUseAgent(t.Context(), map[string]any{"name": "go-reviewer"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +118,7 @@ func TestHandleUseAgent_UnknownAgent(t *testing.T) {
 	m := newTestManager()
 	m.SetAgents([]agents.Agent{})
 
-	result, err := m.handleUseAgent(context.Background(), map[string]any{"name": "unknown"})
+	result, err := m.handleUseAgent(t.Context(), map[string]any{"name": "unknown"})
 	if err != nil {
 		t.Fatalf("unexpected hard error: %v", err)
 	}

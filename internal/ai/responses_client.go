@@ -16,12 +16,33 @@ import (
 
 // Request body for POST /responses.
 type respRequest struct {
-	Model        string          `json:"model"`
-	Instructions string          `json:"instructions,omitempty"`
-	Input        json.RawMessage `json:"input"`
-	Tools        []respTool      `json:"tools,omitempty"`
-	Stream       bool            `json:"stream,omitempty"`
-	Reasoning    *respReasoning  `json:"reasoning,omitempty"`
+	Model              string          `json:"model"`
+	Instructions       string          `json:"instructions,omitempty"`
+	Input              json.RawMessage `json:"input"`
+	Tools              []respTool      `json:"tools,omitempty"`
+	Stream             bool            `json:"stream,omitempty"`
+	Reasoning          *respReasoning  `json:"reasoning,omitempty"`
+	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	// Store=true asks the Responses API to persist this response so it can be
+	// referenced by future requests via previous_response_id.  We set it on
+	// initial requests (no previous_response_id) so that subsequent tool-result
+	// continuations can omit the full conversation history.
+	Store *bool `json:"store,omitempty"`
+}
+
+// contextKeyPreviousResponseID is the context key for previous_response_id.
+type contextKeyPreviousResponseID struct{}
+
+// WithPreviousResponseID returns a derived context that carries the Responses API
+// previous_response_id. When set, CompleteStream references that response and only
+// sends new input items (e.g. tool outputs), not the full history.
+func WithPreviousResponseID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, contextKeyPreviousResponseID{}, id)
+}
+
+func previousResponseIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(contextKeyPreviousResponseID{}).(string)
+	return v
 }
 
 type respReasoning struct {
@@ -76,6 +97,7 @@ type respOutputItemDoneEvent struct {
 
 type respCompletedEvent struct {
 	Response struct {
+		ID     string `json:"id"`
 		Status string `json:"status"`
 		Output []struct {
 			Type string `json:"type"`
@@ -219,7 +241,7 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 			}
 		}
 
-		instructions, inputItems := toResponsesItems(messages)
+		instructions, inputItems := toResponsesItems(ctx, messages)
 
 		inputRaw, err := json.Marshal(inputItems)
 		if err != nil {
@@ -251,6 +273,17 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 				reqBody.Reasoning = &respReasoning{Effort: effort}
 			}
 		}
+		if previousID := previousResponseIDFromCtx(ctx); previousID != "" {
+			reqBody.PreviousResponseID = previousID
+		}
+		// Always request storage so every response in the chain can be referenced
+		// by the next request via previous_response_id.  Without store:true on
+		// follow-up requests the chain breaks after the first tool call because
+		// R2 is never persisted and cannot be used as previous_response_id for R3.
+		// Servers that don't support storage (most self-hosted ones) safely ignore
+		// this field.
+		storeTrue := true
+		reqBody.Store = &storeTrue
 
 		bodyBytes, err := json.Marshal(reqBody)
 		if err != nil {
@@ -292,6 +325,45 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 		toolAccumMap := map[string]*accumToolCall{}
 		toolAccumOrder := 0
 		var textBuf strings.Builder
+		// responseID is captured as early as possible (response.created) so it is
+		// available even when the stream terminates via [DONE] without a
+		// response.completed event.
+		var responseID string
+
+		// buildDoneChunk constructs the final Done StreamChunk from accumulated state.
+		buildDoneChunk := func(status string) StreamChunk {
+			var finishReason string
+			switch {
+			case status == "incomplete":
+				finishReason = "length"
+			case len(toolAccumMap) > 0:
+				finishReason = "tool_calls"
+			default:
+				finishReason = "stop"
+			}
+			msg := Message{Role: "assistant", Content: textBuf.String()}
+			type indexedCall struct {
+				idx int
+				acc *accumToolCall
+			}
+			ordered := make([]indexedCall, 0, len(toolAccumMap))
+			for _, acc := range toolAccumMap {
+				ordered = append(ordered, indexedCall{acc.idx, acc})
+			}
+			slices.SortFunc(ordered, func(a, b indexedCall) int { return cmp.Compare(a.idx, b.idx) })
+			for _, ic := range ordered {
+				var args map[string]any
+				if s := ic.acc.args; s != "" {
+					_ = json.Unmarshal([]byte(s), &args)
+				}
+				msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+					ID:        ic.acc.callID,
+					Name:      ic.acc.name,
+					Arguments: args,
+				})
+			}
+			return StreamChunk{Done: true, Msg: msg, FinishReason: finishReason, ResponseID: responseID}
+		}
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		// Increase scanner buffer to handle large SSE events (tool args, long deltas).
@@ -323,6 +395,9 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 
 			if data == "[DONE]" {
+				// Stream ended via [DONE]; emit Done chunk with accumulated state.
+				// This handles servers that omit the response.completed event.
+				send(buildDoneChunk(""))
 				return
 			}
 
@@ -338,6 +413,19 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 			}
 
 			switch evType {
+			case "response.created", "response.in_progress":
+				// Capture response ID as early as possible — it is present in
+				// response.created and ensures we have it even if the stream ends
+				// via [DONE] without a response.completed event.
+				var ev struct {
+					Response struct {
+						ID string `json:"id"`
+					} `json:"response"`
+				}
+				if jerr := json.Unmarshal([]byte(data), &ev); jerr == nil && ev.Response.ID != "" {
+					responseID = ev.Response.ID
+				}
+
 			case "response.output_text.delta":
 				var ev respOutputTextDeltaEvent
 				if jerr := json.Unmarshal([]byte(data), &ev); jerr == nil && ev.Delta != "" {
@@ -365,7 +453,10 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 					}
 				}
 
-			case "response.completed":
+			// response.completed is the standard end-of-stream event.
+			// response.done and response.incomplete are variants used by some
+			// servers / older API versions — treat them identically.
+			case "response.completed", "response.done", "response.incomplete":
 				var ev respCompletedEvent
 				if jerr := json.Unmarshal([]byte(data), &ev); jerr != nil {
 					send(StreamChunk{Err: fmt.Errorf("responses parse completed event: %w", jerr)})
@@ -377,14 +468,10 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 					return
 				}
 
-				var finishReason string
-				switch {
-				case ev.Response.Status == "incomplete":
-					finishReason = "length"
-				case len(toolAccumMap) > 0:
-					finishReason = "tool_calls"
-				default:
-					finishReason = "stop"
+				// response.completed carries the authoritative ID; override what
+				// we captured from response.created if the server provides it.
+				if ev.Response.ID != "" {
+					responseID = ev.Response.ID
 				}
 
 				usage := Usage{
@@ -392,35 +479,9 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 					CompletionTokens: ev.Response.Usage.OutputTokens,
 					TotalTokens:      ev.Response.Usage.InputTokens + ev.Response.Usage.OutputTokens,
 				}
-
-				// Build tool calls sorted by accumulation order.
-				type indexedCall struct {
-					idx int
-					acc *accumToolCall
-				}
-				ordered := make([]indexedCall, 0, len(toolAccumMap))
-				for _, acc := range toolAccumMap {
-					ordered = append(ordered, indexedCall{acc.idx, acc})
-				}
-				slices.SortFunc(ordered, func(a, b indexedCall) int { return cmp.Compare(a.idx, b.idx) })
-
-				msg := Message{Role: "assistant", Content: textBuf.String()}
-				for _, ic := range ordered {
-					var args map[string]any
-					if s := ic.acc.args; s != "" {
-						if merr := json.Unmarshal([]byte(s), &args); merr != nil {
-							send(StreamChunk{Err: fmt.Errorf("responses parse tool args for %q: %w", ic.acc.name, merr)})
-							return
-						}
-					}
-					msg.ToolCalls = append(msg.ToolCalls, ToolCall{
-						ID:        ic.acc.callID,
-						Name:      ic.acc.name,
-						Arguments: args,
-					})
-				}
-
-				send(StreamChunk{Done: true, Msg: msg, FinishReason: finishReason, Usage: usage})
+				chunk := buildDoneChunk(ev.Response.Status)
+				chunk.Usage = usage
+				send(chunk)
 				return
 
 			case "response.failed", "error":
@@ -459,8 +520,12 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 
 // toResponsesItems converts messages into Responses API input items.
 // System messages are returned as instructions; all others become input items.
-func toResponsesItems(messages []Message) (instructions string, items []respInputItem) {
+// When using previous_response_id the caller (CompleteStreamIncremental) has
+// already stripped everything except the new input items before calling
+// CompleteStream, so no filtering is needed here.
+func toResponsesItems(_ context.Context, messages []Message) (instructions string, items []respInputItem) {
 	var instrParts []string
+
 	for _, m := range messages {
 		switch m.Role {
 		case "system":
@@ -524,10 +589,16 @@ func toResponsesItems(messages []Message) (instructions string, items []respInpu
 				})
 			}
 		case "tool":
+			output := m.Content
+			// The Output field uses omitempty, so an empty string would be dropped
+			// from JSON entirely, causing servers to reject the item as unrecognisable — use a single space instead.
+			if output == "" {
+				output = " "
+			}
 			items = append(items, respInputItem{
 				Type:   "function_call_output",
 				CallID: m.ToolCallID,
-				Output: m.Content,
+				Output: output,
 			})
 		}
 	}

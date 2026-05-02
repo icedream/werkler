@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -15,7 +14,7 @@ import (
 func callRunCommand(t *testing.T, args map[string]any) map[string]any {
 	t.Helper()
 	m := newTestManager()
-	result, err := m.handleRunCommand(context.Background(), args)
+	result, err := m.handleRunCommand(t.Context(), args)
 	require.NoError(t, err)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal([]byte(result), &out))

@@ -1,7 +1,6 @@
 package copilot
 
 import (
-	"context"
 	"net/http"
 	"os"
 	"strings"
@@ -29,7 +28,7 @@ func githubTokenOrSkip(t *testing.T) string {
 
 func TestCopilotMuxClient_ListModels_And_Completion(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	accessToken := githubTokenOrSkip(t)
 	transport := ai.NewReasoningAliasTransport(NewTransport(accessToken))
@@ -62,7 +61,7 @@ func TestCopilotMuxClient_ListModels_And_Completion(t *testing.T) {
 
 func TestCopilotMuxClient_BackendSwitch(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	accessToken := githubTokenOrSkip(t)
 	transport := ai.NewReasoningAliasTransport(NewTransport(accessToken))

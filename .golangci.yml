@@ -10,6 +10,11 @@ linters:
     - staticcheck
     - unused
     - gocritic
+    - usetesting
+  settings:
+    usetesting:
+      context-background: true
+      context-todo: true
 formatters:
   enable:
     - gofmt

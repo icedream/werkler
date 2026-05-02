@@ -218,6 +218,7 @@ type imageLoadErrMsg struct {
 // tokenCountMsg carries the result of an async token-count operation.
 type tokenCountMsg struct {
 	count ai.TokenCount
+	gen   int // recountGen at dispatch time; stale if < m.recountGen
 }
 
 // compactDoneMsg is returned by doCompact when the AI summary is complete or
@@ -1051,6 +1052,23 @@ type Model struct {
 	// Conversation history (managed only in Update, never in tea.Cmd goroutines).
 	messages []ai.Message
 
+	// Incremental mode for context reuse across tool calls.
+	// When true, doStream uses CompleteStreamIncremental instead of full-context
+	// doStartStream, sending only new messages (tool results / user turns) via
+	// previous_response_id after the first response.
+	incrementalModeEnabled bool
+	incrementalClient      *ai.IncrementalClient
+
+	// turnSystemMsg caches the fully-built system message content (timestamp,
+	// memory, MCP server list, autopilot note) for the duration of the current
+	// turn.  It is cleared whenever a new user message starts a fresh turn so
+	// the first API call of the turn always gets a fresh timestamp/memory, but
+	// every *continuation* call within the same turn (e.g. sending a tool result
+	// back to the model) reuses the identical string.  This keeps the KV-cache
+	// prefix byte-for-byte stable so local servers (e.g. llama.cpp) can skip
+	// re-encoding the already-cached tokens and only process the new ones.
+	turnSystemMsg string
+
 	// Agent state machine.
 	state                 tuiState
 	pendingCalls          []ai.ToolCall
@@ -1121,6 +1139,14 @@ type Model struct {
 	// highest confirmed seq, preventing stale goroutines from rolling back state.
 	saveSeq              int
 	lastConfirmedSaveSeq int
+
+	// recountGen is incremented whenever contextUsage is set synchronously
+	// (e.g. in processNextCall or applyCompaction).  Each recountContext()
+	// goroutine captures the generation at dispatch time and the tokenCountMsg
+	// handler discards results that are older than the current generation,
+	// preventing a stale pre-compaction count from overwriting the correct
+	// post-compaction value.
+	recountGen int
 
 	// persistToolApproval, if non-nil, saves a tool name to auto_approve_tools.
 	persistToolApproval func(toolName string) error
@@ -1404,42 +1430,44 @@ func initialModel(
 	cwd, _ := os.Getwd()
 
 	return Model{
-		ctx:                   ctx,
-		client:                client,
-		session:               session,
-		tools:                 tools,
-		send:                  send,
-		modelManager:          mm,
-		messages:              chat.NewConversation(),
-		state:                 stateIdle,
-		streamingItemIdx:      -1,
-		reasoningItemIdx:      -1,
-		thinkReasoningItemIdx: -1,
-		oauthInfoIdx:          -1,
-		askUserSelectedIdx:    -1,
-		askUserItemIdx:        -1,
-		historyIdx:            -1,
-		toolCallIdx:           make(map[string]int),
-		viewport:              viewport.New(0, 0),
-		modelPicker:           picker,
-		sessionPicker:         sessPicker,
-		toolPicker:            toolPickerM,
-		skillPicker:           skillPickerM,
-		modePicker:            modePickerM,
-		agentWizardToolPicker: agentToolPickerM,
-		agentWizardExcluded:   make(map[string]bool),
-		disabledSkills:        make(map[string]bool),
-		collapsedHandles:      make(map[string]bool),
-		sidebarWidth:          defaultSidebarWidth,
-		input:                 ti,
-		spinner:               sp,
-		modelName:             modelName,
-		serverNames:           serverNames,
-		glamourStyle:          glamourStyle,
-		mouseEnabled:          true,
-		sessionCWD:            cwd,
-		showReasoning:         true,
-		showTokenSpeed:        false,
+		ctx:                    ctx,
+		client:                 client,
+		session:                session,
+		tools:                  tools,
+		send:                   send,
+		modelManager:           mm,
+		messages:               chat.NewConversation(),
+		incrementalModeEnabled: true,
+		incrementalClient:      ai.NewIncrementalClient(client),
+		state:                  stateIdle,
+		streamingItemIdx:       -1,
+		reasoningItemIdx:       -1,
+		thinkReasoningItemIdx:  -1,
+		oauthInfoIdx:           -1,
+		askUserSelectedIdx:     -1,
+		askUserItemIdx:         -1,
+		historyIdx:             -1,
+		toolCallIdx:            make(map[string]int),
+		viewport:               viewport.New(0, 0),
+		modelPicker:            picker,
+		sessionPicker:          sessPicker,
+		toolPicker:             toolPickerM,
+		skillPicker:            skillPickerM,
+		modePicker:             modePickerM,
+		agentWizardToolPicker:  agentToolPickerM,
+		agentWizardExcluded:    make(map[string]bool),
+		disabledSkills:         make(map[string]bool),
+		collapsedHandles:       make(map[string]bool),
+		sidebarWidth:           defaultSidebarWidth,
+		input:                  ti,
+		spinner:                sp,
+		modelName:              modelName,
+		serverNames:            serverNames,
+		glamourStyle:           glamourStyle,
+		mouseEnabled:           true,
+		sessionCWD:             cwd,
+		showReasoning:          true,
+		showTokenSpeed:         false,
 	}
 }
 
@@ -2210,13 +2238,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.items = append(m.items, displayItem{kind: itemInfo, content: "⚡ Autopilot resumed."})
 						needRebuild = true
 						m.turnRoundtrips = 0
+						m.turnSystemMsg = ""
 						m.emptyResponseRetries = 0
 						m.setThinking()
-						cmds = append(cmds, doStartStream(
-							m.newOpCtx(), m.client,
-							m.buildStreamMessages(m.autopilotMessagesForStream()),
-							m.tools,
-						))
+						cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.autopilotMessagesForStream()), m.tools))
 					case strings.HasPrefix(text, "/image "):
 						// /image <path-or-url> — load image and stage it as pending.
 						arg := strings.TrimSpace(strings.TrimPrefix(text, "/image "))
@@ -2357,12 +2382,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 							m.resumeHint = nil // dismiss hint once user starts chatting
 							m.turnRoundtrips = 0
+							m.turnSystemMsg = ""
 							m.emptyResponseRetries = 0
 							// Synchronously count the outbound payload before deciding
 							// whether to compact, so the decision is current rather
 							// than one turn stale.
 							outbound := m.buildStreamMessages(m.messages)
 							if count, cerr := ai.CountTokensWithTools(m.modelName, outbound, m.tools); cerr == nil {
+								m.recountGen++
 								m.contextUsage = count
 							}
 							if cmd := m.recountContext(); cmd != nil {
@@ -2374,7 +2401,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens))
 							} else {
 								m.setThinking()
-								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
+								cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools))
 							}
 						}
 					}
@@ -3220,7 +3247,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tokenCountMsg:
-		if msg.count.Total > 0 {
+		// Discard stale results — a synchronous update (processNextCall,
+		// applyCompaction) has already superseded this goroutine's snapshot.
+		if msg.gen == m.recountGen && msg.count.Total > 0 {
 			m.contextUsage = msg.count
 		}
 
@@ -3769,7 +3798,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Record items watermark so auto-connect can roll back the display.
 					m.itemsBeforeRetry = len(m.items)
 					m.setThinking()
-					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, nudgeMsgs, m.tools))
+					cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), nudgeMsgs, m.tools))
 					needRebuild = true
 					break
 				}
@@ -3787,7 +3816,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, ai.Message{Role: "user", Content: "Continue."})
 					m.turnRoundtrips++
 					m.setThinking()
-					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
+					cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools))
 					needRebuild = true
 					break
 				}
@@ -3841,13 +3870,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, m.processQueueOrIdle())
 					} else {
 						m.turnRoundtrips = 0
+						m.turnSystemMsg = ""
 						m.emptyResponseRetries = 0
 						m.setThinking()
-						cmds = append(cmds, doStartStream(
-							m.newOpCtx(), m.client,
-							m.buildStreamMessages(m.autopilotMessagesForStream()),
-							m.tools,
-						))
+						cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.autopilotMessagesForStream()), m.tools))
 					}
 					break
 				}
@@ -4572,6 +4598,9 @@ func (m *Model) setTools(tools []ai.ToolDefinition) {
 	} else {
 		m.toolTokensCache = 0
 	}
+	// Tool list changed — the system message may include MCP server info that is
+	// now stale.  Clear the cache so the next API call rebuilds it fresh.
+	m.turnSystemMsg = ""
 }
 
 // openModelPicker switches to the model picker, remembering returnTo so that
@@ -4972,13 +5001,26 @@ func (m *Model) buildStreamMessages(base []ai.Message) []ai.Message {
 	if len(base) == 0 {
 		return base
 	}
+	// Always copy the slice so callers can't mutate m.messages through it.
+	msgs := make([]ai.Message, len(base))
+	copy(msgs, base)
+
+	if m.turnSystemMsg != "" {
+		// Re-use the system message built at the start of this turn so that
+		// every continuation call (tool results, retries) sends the exact same
+		// token prefix.  This allows local servers with a KV cache (llama.cpp,
+		// vllm, …) to skip re-processing the unchanged prefix and only handle
+		// the new tokens, making tool-call round-trips as fast as possible.
+		msgs[0].Content = m.turnSystemMsg
+		return msgs
+	}
+
+	// First call of this turn: build the full system message with all dynamic
+	// content, then cache it for all subsequent calls in the same turn.
 	var configuredServers []config.MCPServerConfig
 	if m.mcpManager != nil {
 		configuredServers = m.mcpManager.ConfiguredServers()
 	}
-	// Always copy: current time is injected on every request so it stays fresh.
-	msgs := make([]ai.Message, len(base))
-	copy(msgs, base)
 	msgs[0].Content += "\n\nCurrent date/time: " + time.Now().Format("2006-01-02 15:04:05 MST (Monday)")
 	if m.memoryStore != nil {
 		if sec := m.memoryStore.BuildInjectionSection(); sec != "" {
@@ -5004,6 +5046,9 @@ func (m *Model) buildStreamMessages(base []ai.Message) []ai.Message {
 	if m.autopilot {
 		msgs[0].Content = msgs[0].Content + "\n\n" + autopilotSystemNote
 	}
+
+	// Cache for the rest of this turn.
+	m.turnSystemMsg = msgs[0].Content
 	return msgs
 }
 
@@ -5089,6 +5134,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 			m.items = append(m.items, displayItem{kind: itemUser, content: userContent})
 		}
 		m.turnRoundtrips = 0
+		m.turnSystemMsg = ""
 		m.emptyResponseRetries = 0
 		if m.shouldAutoCompact() {
 			m.autoCompactPending = true
@@ -5096,7 +5142,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
 		}
 		m.setThinking()
-		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools)
+		return m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools)
 	}
 	m.setIdle()
 	m.cancelOp = nil
@@ -5119,6 +5165,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		// accumulated tool results from this batch, not a stale pre-batch count.
 		outbound := m.buildStreamMessages(m.messages)
 		if count, cerr := ai.CountTokensWithTools(m.modelName, outbound, m.tools); cerr == nil {
+			m.recountGen++
 			m.contextUsage = count
 		}
 		if m.shouldAutoCompact() {
@@ -5128,7 +5175,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		}
 		m.setThinking()
 		m.turnRoundtrips++
-		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools)
+		return m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools)
 	}
 
 	call := m.pendingCalls[0]
@@ -5148,6 +5195,7 @@ func (m *Model) processNextCall() tea.Cmd {
 	if !m.autoCompactPending {
 		outbound := m.buildStreamMessages(m.messages)
 		if count, cerr := ai.CountTokensWithTools(m.modelName, outbound, m.tools); cerr == nil {
+			m.recountGen++
 			m.contextUsage = count
 		}
 		if m.shouldAutoCompact() {
@@ -5353,6 +5401,22 @@ func doStartStream(ctx context.Context, client ai.StreamCompleter, messages []ai
 		ch := client.CompleteStream(ctx, snapshot, tools)
 		return readNextChunk(ch)()
 	}
+}
+
+// doStream picks the incremental path (using previous_response_id to send only new
+// messages) when the incremental client is enabled, falling back to the full-context
+// doStartStream otherwise.  All callers should prefer this over calling doStartStream
+// directly so the incremental optimisation is applied consistently.
+func (m *Model) doStream(ctx context.Context, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
+	if m.incrementalModeEnabled && m.incrementalClient != nil {
+		// Snapshot messages so the goroutine inside CompleteStreamIncremental is
+		// not affected by future appends to m.messages.
+		snapshot := make([]ai.Message, len(messages))
+		copy(snapshot, messages)
+		ch := m.incrementalClient.CompleteStreamIncremental(ctx, snapshot, tools)
+		return readNextChunk(ch)
+	}
+	return doStartStream(ctx, m.client, messages, tools)
 }
 
 // recentContextMessages returns the last n user/assistant messages from msgs,
@@ -5662,12 +5726,13 @@ func (m *Model) recountContext() tea.Cmd {
 	toolSnap := make([]ai.ToolDefinition, len(tools))
 	copy(toolSnap, tools)
 	modelName := m.modelName
+	gen := m.recountGen // capture current generation
 	return func() tea.Msg {
 		count, err := ai.CountTokensWithTools(modelName, snap, toolSnap)
 		if err != nil {
-			return tokenCountMsg{}
+			return tokenCountMsg{gen: gen}
 		}
-		return tokenCountMsg{count: count}
+		return tokenCountMsg{count: count, gen: gen}
 	}
 }
 
@@ -5837,26 +5902,48 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 		// keepTurns determines how many recent turns to keep verbatim
 		keepTurns := 2
 
-		// Count exact tokens for the summary (user message part only).
-		countMessages := []ai.Message{
-			{Role: "system", Content: chat.CompactionSystemPrompt},
-			{Role: "user", Content: s},
+		// Compute the new system message exactly as applyCompaction will produce it.
+		// This is the original system message with the summary block replaced —
+		// NOT just the summary text.  Using only the summary tokens was the source
+		// of the persistent compaction-loop bug: the original system-prompt tokens
+		// (often 10 k+) were never counted, so estimateTotal was always far too low
+		// and keepTurns was never reduced.
+		var newSysContent string
+		if len(snap) > 0 && snap[0].Role == "system" {
+			newSysContent = replaceSummaryBlock(snap[0].Content, s)
+		} else {
+			newSysContent = "## Summary of previous conversation\n\n" + s
 		}
-		tokenCount, _ := ai.CountTokens(modelName, countMessages)
-		sTok := tokenCount.Total
+		newSysTok, _ := ai.CountTokens(modelName, []ai.Message{{Role: "system", Content: newSysContent}})
+		baseTok := newSysTok.Total + toolTokens
 
-		// newContextTokens is the post-compaction token estimate (messages + tool
-		// overhead)
-		newContextTokens := sTok + toolTokens
+		// estimateTotal computes the full post-compaction token count for a given
+		// keepTurns: actual new system message + verbatim recent turns + tool overhead.
+		estimateTotal := func(k int) int {
+			est := baseTok
+			if k > 0 {
+				if tc, err := ai.CountTokens(modelName, extractLastTurns(snap, k)); err == nil {
+					est += tc.Total
+				}
+			}
+			return est
+		}
+
+		newContextTokens := estimateTotal(keepTurns)
 		var warning string
 
-		// If we have a clear maxTokens hint, warn if we're running full still
+		// If we have a clear maxTokens hint, progressively reduce keepTurns until
+		// the estimate fits within the threshold.
 		if maxTokens > 0 {
 			const threshold = 0.65
-			if int(float32(maxTokens)*threshold) < newContextTokens {
-				warning = "Context is very full even after compaction — " +
-					"consider switching to a model with a larger context window."
-				keepTurns = 1
+			limit := int(float32(maxTokens) * threshold)
+			for newContextTokens > limit && keepTurns > 0 {
+				if warning == "" {
+					warning = "Context is very full even after compaction — " +
+						"consider switching to a model with a larger context window."
+				}
+				keepTurns--
+				newContextTokens = estimateTotal(keepTurns)
 			}
 		}
 
@@ -5909,6 +5996,9 @@ func replaceSummaryBlock(systemContent, newSummary string) string {
 // between/after them) from messages, excluding any system messages.
 // If there are fewer than n user turns, all non-system messages are returned.
 func extractLastTurns(messages []ai.Message, n int) []ai.Message {
+	if n <= 0 {
+		return nil
+	}
 	// Collect indices of user messages.
 	var userIdxs []int
 	for i, msg := range messages {
@@ -5984,24 +6074,37 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 	m.rebuildContent()
 
 	var cmds []tea.Cmd
-	// If the compaction goroutine computed a post-compaction token count, apply
-	// it directly to avoid a redundant async recount (the count reflects the
-	// reduced history). Zero means it was not computed; fall back to a recount.
-	if msg.totalTokens > 0 {
-		m.contextUsage = ai.TokenCount{Total: msg.totalTokens}
-	} else {
-		if cmd := m.recountContext(); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
+	// Always count from the actual newMessages (including extractLastTurns)
+	// rather than trusting msg.totalTokens, which previously only counted
+	// summary+toolTokens and omitted the verbatim kept-turn tokens.  An
+	// inaccurate count here caused shouldAutoCompact to re-fire immediately
+	// because processNextCall would re-measure the real size and see it was
+	// still above the threshold.
+	if count, cerr := ai.CountTokensWithTools(m.modelName, m.messages, m.tools); cerr == nil {
+		m.recountGen++
+		m.contextUsage = count
+	} else if cmd := m.recountContext(); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 
 	if m.autoCompactPending {
 		// Auto-compact: restart the AI turn that was interrupted.
+		// History was rewritten, so the previous response ID and cached system
+		// message are both stale.
+		if m.incrementalClient != nil {
+			m.incrementalClient.SetLastResponseID("")
+		}
+		m.turnSystemMsg = ""
 		m.autoCompactPending = false
 		m.turnRoundtrips++
 		m.setThinking()
-		cmds = append(cmds, doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools))
+		cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools))
 	} else {
+		// Manual compact: also reset since history changed.
+		if m.incrementalClient != nil {
+			m.incrementalClient.SetLastResponseID("")
+		}
+		m.turnSystemMsg = ""
 		m.setIdle()
 		cmds = append(cmds, m.input.Focus())
 	}

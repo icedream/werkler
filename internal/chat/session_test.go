@@ -96,7 +96,7 @@ func TestCallTool_Success(t *testing.T) {
 		Return("file contents", nil)
 
 	s := chat.NewSession(tm, nil, nil)
-	result, err := s.CallTool(context.Background(), ai.ToolCall{
+	result, err := s.CallTool(t.Context(), ai.ToolCall{
 		ID:        "c1",
 		Name:      "fs__read",
 		Arguments: map[string]any{"path": "/tmp"},
@@ -113,7 +113,7 @@ func TestCallTool_ToolError_EmbeddedAsString(t *testing.T) {
 		Return("", errors.New("permission denied"))
 
 	s := chat.NewSession(tm, nil, nil)
-	result, err := s.CallTool(context.Background(), ai.ToolCall{
+	result, err := s.CallTool(t.Context(), ai.ToolCall{
 		ID:   "c1",
 		Name: "bad_tool",
 	})
@@ -124,7 +124,7 @@ func TestCallTool_ToolError_EmbeddedAsString(t *testing.T) {
 
 func TestCallTool_ContextCancel_ReturnsGoError(t *testing.T) {
 	// When the context is cancelled, a Go error must be returned (not embedded).
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // already cancelled
 
 	tm := &mockToolManager{}
@@ -229,7 +229,7 @@ func TestTools_FiltersDisabledTools(t *testing.T) {
 	s := chat.NewSession(tm, nil, nil)
 	s.SetToolEnabled("fs__write", false)
 
-	tools, err := s.Tools(context.Background())
+	tools, err := s.Tools(t.Context())
 	require.NoError(t, err)
 	names := make([]string, len(tools))
 	for i, t := range tools {
@@ -248,7 +248,7 @@ func TestTools_AllEnabledReturnsAll(t *testing.T) {
 	tm.On("Tools", mock.Anything).Return(allTools, nil)
 
 	s := chat.NewSession(tm, nil, nil)
-	tools, err := s.Tools(context.Background())
+	tools, err := s.Tools(t.Context())
 	require.NoError(t, err)
 	assert.Len(t, tools, 2)
 }
@@ -260,7 +260,7 @@ func TestCallTool_RejectsDisabledTool(t *testing.T) {
 	s := chat.NewSession(tm, nil, nil)
 	s.SetToolEnabled("danger__tool", false)
 
-	result, err := s.CallTool(context.Background(), ai.ToolCall{
+	result, err := s.CallTool(t.Context(), ai.ToolCall{
 		ID:   "x",
 		Name: "danger__tool",
 	})
@@ -281,7 +281,7 @@ func TestAllTools_IgnoresDisabledFilter(t *testing.T) {
 	s.SetToolEnabled("fs__write", false)
 
 	// AllTools should return all tools regardless of disabled state.
-	tools, err := s.AllTools(context.Background())
+	tools, err := s.AllTools(t.Context())
 	require.NoError(t, err)
 	assert.Len(t, tools, 2)
 }
