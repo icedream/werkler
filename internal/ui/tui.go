@@ -2211,9 +2211,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						needRebuild = true
 						m.turnRoundtrips = 0
 						m.emptyResponseRetries = 0
-						m.setThinking()
 						cmds = append(cmds, doStartStream(
 							m.newOpCtx(), m.client,
+							m.modelName,
+							m.buildStreamMessages(m.autopilotMessagesForStream()),
+							m.tools,
+						))
+						cmds = append(cmds, doStartStream(
+							m.newOpCtx(), m.client,
+							m.modelName,
 							m.buildStreamMessages(m.autopilotMessagesForStream()),
 							m.tools,
 						))
@@ -2374,7 +2380,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens))
 							} else {
 								m.setThinking()
-								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
+								cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.modelName, m.messages, m.tools))
 							}
 						}
 					}
@@ -3769,7 +3775,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Record items watermark so auto-connect can roll back the display.
 					m.itemsBeforeRetry = len(m.items)
 					m.setThinking()
-					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, nudgeMsgs, m.tools))
+					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.modelName, nudgeMsgs, m.tools,))
 					needRebuild = true
 					break
 				}
@@ -3787,7 +3793,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, ai.Message{Role: "user", Content: "Continue."})
 					m.turnRoundtrips++
 					m.setThinking()
-					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
+					cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.modelName, m.messages, m.tools))
 					needRebuild = true
 					break
 				}
@@ -3842,9 +3848,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.turnRoundtrips = 0
 						m.emptyResponseRetries = 0
-						m.setThinking()
 						cmds = append(cmds, doStartStream(
 							m.newOpCtx(), m.client,
+							m.modelName,
+							m.buildStreamMessages(m.autopilotMessagesForStream()),
+							m.tools,
+						))
+						cmds = append(cmds, doStartStream(
+							m.newOpCtx(), m.client,
+							m.modelName,
 							m.buildStreamMessages(m.autopilotMessagesForStream()),
 							m.tools,
 						))
@@ -5096,7 +5108,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
 		}
 		m.setThinking()
-		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools)
+		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.modelName, m.messages, m.tools)
 	}
 	m.setIdle()
 	m.cancelOp = nil
@@ -5128,7 +5140,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		}
 		m.setThinking()
 		m.turnRoundtrips++
-		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools)
+		return doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.modelName, m.messages, m.tools)
 	}
 
 	call := m.pendingCalls[0]
@@ -5346,9 +5358,11 @@ func doLoadImage(src string) tea.Cmd {
 }
 
 // the first chunk as a streamChunkMsg (carrying the channel for further reads).
-func doStartStream(ctx context.Context, client ai.StreamCompleter, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
-	snapshot := make([]ai.Message, len(messages))
-	copy(snapshot, messages)
+func doStartStream(ctx context.Context, client ai.StreamCompleter, modelName string, messages []ai.Message, tools []ai.ToolDefinition) tea.Cmd {
+	// Trim context for streaming to avoid sending full history each turn
+	trimmedMsgs := trimContextForStreaming(messages, modelName, 0)
+	snapshot := make([]ai.Message, len(trimmedMsgs))
+	copy(snapshot, trimmedMsgs)
 	return func() tea.Msg {
 		ch := client.CompleteStream(ctx, snapshot, tools)
 		return readNextChunk(ch)()
@@ -5369,6 +5383,64 @@ func recentContextMessages(msgs []ai.Message, n int) []ai.Message {
 		filtered = filtered[len(filtered)-n:]
 	}
 	return filtered
+}
+
+// trimContextForStreaming trims conversation history to fit within token budget.
+// It keeps:
+// - The system message (with summary from compaction)
+// - The last N user/assistant turns (for context)
+// - Recent tool calls and results (needed for continuity)
+// Returns a trimmed slice that can be safely sent to the API.
+func trimContextForStreaming(messages []ai.Message, modelName string, maxTokens int) []ai.Message {
+	const keepTurns = 6 // Number of recent user/assistant turns to keep
+
+	// Count tokens in current messages + system prompt
+	tokenCount, _ := ai.CountTokens(modelName, messages)
+
+	// If under budget, return as-is (no trimming needed)
+	if maxTokens <= 0 || tokenCount.Total <= maxTokens {
+		return messages
+	}
+
+	// Trim from oldest messages, keeping system message + recent turns
+	var trimmed []ai.Message
+
+	// Always keep the system message
+	if len(messages) > 0 && messages[0].Role == "system" {
+		trimmed = append(trimmed, messages[0])
+	} else {
+		// Fallback: no system message found, return as-is
+		return messages
+	}
+
+	// Collect indices of user messages
+	var userIdx []int
+	for i, msg := range messages {
+		if msg.Role == "user" {
+			userIdx = append(userIdx, i)
+		}
+	}
+
+	// Find where to cut (keep last N user messages)
+	var cutAt int
+	if len(userIdx) > keepTurns {
+		cutAt = userIdx[len(userIdx)-keepTurns]
+	}
+
+	// Include messages from cutAt onwards, but skip old system messages
+	// and keep recent tool calls/results that are after cutAt
+	var recentMessages []ai.Message
+	for _, msg := range messages[cutAt:] {
+		if msg.Role == "system" {
+			continue // Skip old system messages
+		}
+		recentMessages = append(recentMessages, msg)
+	}
+
+	// Append trimmed messages
+	trimmed = append(trimmed, recentMessages...)
+
+	return trimmed
 }
 
 // doThinkTool starts a focused sub-completion for the think tool and returns
@@ -6000,7 +6072,7 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 		m.autoCompactPending = false
 		m.turnRoundtrips++
 		m.setThinking()
-		cmds = append(cmds, doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.buildStreamMessages(m.messages), m.tools))
+		cmds = append(cmds, doStartStream(m.applyReasoningCtx(m.newOpCtx()), m.client, m.modelName, m.messages, m.tools))
 	} else {
 		m.setIdle()
 		cmds = append(cmds, m.input.Focus())
