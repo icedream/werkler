@@ -5837,13 +5837,12 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 		keepTurns := 2
 
 		// Count exact tokens for the summary (user message part only).
-		// CountTokens includes per-message overhead, so we add 3 for the user message wrapper.
 		countMessages := []ai.Message{
 			{Role: "system", Content: chat.CompactionSystemPrompt},
 			{Role: "user", Content: s},
 		}
 		tokenCount, _ := ai.CountTokens(modelName, countMessages)
-		sTok := tokenCount.Total + 3 // +3 for per-message overhead
+		sTok := tokenCount.Total
 
 		// newContextTokens is the post-compaction token estimate (messages + tool
 		// overhead)
