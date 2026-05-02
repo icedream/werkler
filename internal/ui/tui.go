@@ -4002,6 +4002,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.items[idx].toolStatus = toolStatusFailed
 					if msg.toolName == "file_edit" {
 						m.items[idx].toolNote = fileEditErrorNote(msg.err)
+					} else if msg.toolName == "file_write" {
+						m.items[idx].toolNote = fileWriteErrorNote(msg.err)
 					}
 				}
 				m.messages = append(m.messages, ai.Message{
@@ -6512,6 +6514,24 @@ func fileEditErrorNote(err error) string {
 	msg := err.Error()
 	// Strip "file_edit: " prefix.
 	msg = strings.TrimPrefix(msg, "file_edit: ")
+	// Truncate verbose recovery hints after " — ".
+	if i := strings.Index(msg, " — "); i > 0 {
+		msg = msg[:i]
+	}
+	if len(msg) > 100 {
+		msg = msg[:100] + "…"
+	}
+	return msg
+}
+
+// fileWriteErrorNote returns a short, user-readable summary of a file_write error.
+func fileWriteErrorNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	// Strip "file_write: " prefix.
+	msg = strings.TrimPrefix(msg, "file_write: ")
 	// Truncate verbose recovery hints after " — ".
 	if i := strings.Index(msg, " — "); i > 0 {
 		msg = msg[:i]
