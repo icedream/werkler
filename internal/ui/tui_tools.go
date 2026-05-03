@@ -673,41 +673,55 @@ func renderStreamingGeneric(rawArgs string, width int) string {
 // While only new_str is available it shows +lines (same as file_write);
 // once both old_str and new_str are present it shows the full unified diff
 // matching the final completed tool bubble style.
+// renderStreamingFileEdit renders a live diff as old_str/new_str tokens arrive.
+// Handles both the single-hunk form (top-level old_str/new_str) and the
+// multi-hunk form (edits array) since the model may use either.
 func renderStreamingFileEdit(rawArgs string, width int) string {
 	closed := closePartialJSON(rawArgs)
 	var parsed struct {
-		Path  string `json:"path"`
-		Edits []struct {
+		Path   string `json:"path"`
+		OldStr string `json:"old_str"` // single-hunk form
+		NewStr string `json:"new_str"` // single-hunk form
+		Edits  []struct {
 			OldStr string `json:"old_str"`
 			NewStr string `json:"new_str"`
-		} `json:"edits"`
+		} `json:"edits"` // multi-hunk form
 	}
 	if err := json.Unmarshal([]byte(closed), &parsed); err != nil ||
-		(parsed.Path == "" && len(parsed.Edits) == 0) {
+		(parsed.Path == "" && parsed.OldStr == "" && parsed.NewStr == "" && len(parsed.Edits) == 0) {
 		return toolDimStyle.Render("  ▋")
 	}
+
+	// Normalise: treat single-hunk fields as a one-element edit slice so the
+	// rendering loop handles both forms uniformly.
+	type editPair struct{ OldStr, NewStr string }
+	var edits []editPair
+	if len(parsed.Edits) > 0 {
+		for _, e := range parsed.Edits {
+			edits = append(edits, editPair{e.OldStr, e.NewStr})
+		}
+	} else {
+		edits = []editPair{{parsed.OldStr, parsed.NewStr}}
+	}
+
 	var sb strings.Builder
 	if parsed.Path != "" {
 		sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  path  %q", parsed.Path)))
 		sb.WriteString("\n")
 	}
-	for _, edit := range parsed.Edits {
+	for _, edit := range edits {
 		switch {
 		case edit.OldStr != "" && edit.NewStr != "":
-			// Both sides available — show the live unified diff.
 			if diff := tools.ComputeUnifiedDiff(edit.OldStr, edit.NewStr, parsed.Path); diff != "" {
 				sb.WriteString(renderDiff(diff, width))
 				sb.WriteString("\n")
 			}
 		case edit.OldStr != "":
-			// Only old_str so far — show as − lines (the content being replaced).
-			// new_str hasn't arrived yet; once it does the case above takes over.
 			for _, l := range strings.Split(edit.OldStr, "\n") {
 				sb.WriteString(diffRemovedStyle.Render("-" + l))
 				sb.WriteString("\n")
 			}
 		case edit.NewStr != "":
-			// new_str without old_str — show as + lines.
 			for _, l := range strings.Split(edit.NewStr, "\n") {
 				sb.WriteString(diffAddedStyle.Render("+" + l))
 				sb.WriteString("\n")

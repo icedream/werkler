@@ -908,7 +908,11 @@ Multi-hunk form (use when making several changes to the same file in one call):
 In both forms: the match must be exact (including whitespace). Returns an error
 if old_str appears zero times (not found) or more than once (ambiguous — include
 more surrounding context).
-On success, returns the line number(s) where replacements were made.`,
+On success, returns the line number(s) where replacements were made.
+
+Field generation order (important for live diff rendering):
+  Generate fields in this order: path first, then old_str, then new_str.
+  For multi-hunk edits: path first, then each edit's old_str before new_str.`,
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
