@@ -489,3 +489,174 @@ func formatExpandedArgs(rawArgs string, width int) string {
 	}
 	return sb.String()
 }
+
+// closePartialJSON adds the minimum closing characters needed to make a
+// partial JSON string syntactically valid.  It handles nested braces/brackets
+// and tracks whether a string literal is still open.
+func closePartialJSON(s string) string {
+	var stack []byte
+	inString := false
+	escaped := false
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch c {
+		case '{':
+			stack = append(stack, '}')
+		case '[':
+			stack = append(stack, ']')
+		case '}', ']':
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+
+	var buf strings.Builder
+	buf.WriteString(s)
+	if inString {
+		buf.WriteByte('"')
+	}
+	for i := len(stack) - 1; i >= 0; i-- {
+		buf.WriteByte(stack[i])
+	}
+	return buf.String()
+}
+
+// jsonKeysInOrder returns the top-level object keys from a JSON string in
+// document order.  json.Unmarshal into map[string]any loses order so we
+// scan the raw text instead.
+func jsonKeysInOrder(s string) []string {
+	var keys []string
+	inString := false
+	escaped := false
+	depth := 0
+	keyStart := -1
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			if !inString {
+				inString = true
+				if depth == 1 {
+					keyStart = i + 1
+				}
+			} else {
+				inString = false
+				if depth == 1 && keyStart >= 0 {
+					// Only a key if followed by ':'
+					j := i + 1
+					for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
+						j++
+					}
+					if j < len(s) && s[j] == ':' {
+						keys = append(keys, s[keyStart:i])
+					}
+					keyStart = -1
+				}
+			}
+			continue
+		}
+		if !inString {
+			switch c {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				if depth > 0 {
+					depth--
+				}
+			}
+		}
+	}
+	return keys
+}
+
+// renderStreamingArgs renders a potentially-partial JSON argument string in a
+// human-readable field-per-line format while streaming is still in progress.
+// It closes the partial JSON, parses it, and renders each field with the last
+// field marked with a block cursor to indicate ongoing streaming.
+func renderStreamingArgs(rawArgs string, width int) string {
+	if rawArgs == "" {
+		return toolDimStyle.Render("  ▋")
+	}
+
+	closed := closePartialJSON(rawArgs)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(closed), &parsed); err != nil || len(parsed) == 0 {
+		// Not yet a recognisable structure — show raw tail with cursor.
+		display := rawArgs
+		if width > 6 && len(display) > width-4 {
+			display = "…" + display[len(display)-(width-6):]
+		}
+		return toolDimStyle.Render("  " + display + "▋")
+	}
+
+	keys := jsonKeysInOrder(rawArgs)
+	if len(keys) == 0 {
+		return toolDimStyle.Render("  " + rawArgs + "▋")
+	}
+
+	var sb strings.Builder
+	for i, key := range keys {
+		val, ok := parsed[key]
+		if !ok {
+			continue
+		}
+		var valStr string
+		switch v := val.(type) {
+		case string:
+			valStr = `"` + v + `"`
+		case nil:
+			valStr = "null"
+		default:
+			b, _ := json.Marshal(v)
+			valStr = string(b)
+		}
+
+		isLast := i == len(keys)-1
+		cursor := ""
+		if isLast {
+			cursor = "▋"
+		}
+
+		// Truncate value to fit terminal width.
+		maxVal := width - 18
+		if maxVal < 12 {
+			maxVal = 12
+		}
+		if len(valStr) > maxVal {
+			if len(valStr) > 0 && valStr[0] == '"' {
+				valStr = valStr[:maxVal-2] + `…"`
+			} else {
+				valStr = valStr[:maxVal-1] + "…"
+			}
+		}
+
+		sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  %-14s %s%s", key, valStr, cursor)))
+		sb.WriteString("\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}

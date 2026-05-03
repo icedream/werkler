@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -579,4 +580,44 @@ func TestInputPlaceholder_States(t *testing.T) {
 	assert.Contains(t, inputPlaceholder(stateStreaming), "Queue")
 	assert.Contains(t, inputPlaceholder(stateCallingTool), "Queue")
 	assert.Contains(t, inputPlaceholder(stateAwaitingApproval), "y")
+}
+
+func TestClosePartialJSON(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string // what the closed version must unmarshal to
+	}{
+		{`{"path": "/ho`, `{"path": "/ho"}`},
+		{`{"path": "/home", "content": "hel`, `{"path": "/home", "content": "hel"}`},
+		{`{"a": 1, "b": [1, 2`, `{"a": 1, "b": [1, 2]}`},
+		{`{"k": "v"}`, `{"k": "v"}`}, // already complete
+	}
+	for _, c := range cases {
+		got := closePartialJSON(c.in)
+		var m1, m2 map[string]any
+		if err := json.Unmarshal([]byte(got), &m1); err != nil {
+			t.Errorf("closePartialJSON(%q) = %q: not valid JSON: %v", c.in, got, err)
+		}
+		_ = json.Unmarshal([]byte(c.want), &m2)
+		// Values of last key may differ (partial string) — just check keys present.
+		for k := range m2 {
+			if _, ok := m1[k]; !ok {
+				t.Errorf("closePartialJSON(%q): missing key %q in result %q", c.in, k, got)
+			}
+		}
+	}
+}
+
+func TestJSONKeysInOrder(t *testing.T) {
+	raw := `{"path": "/foo", "content": "bar", "mode": 0644}`
+	keys := jsonKeysInOrder(raw)
+	want := []string{"path", "content", "mode"}
+	if len(keys) != len(want) {
+		t.Fatalf("got keys %v, want %v", keys, want)
+	}
+	for i, k := range keys {
+		if k != want[i] {
+			t.Errorf("keys[%d] = %q, want %q", i, k, want[i])
+		}
+	}
 }

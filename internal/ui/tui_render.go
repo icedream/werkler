@@ -648,12 +648,10 @@ func (m Model) renderItem(item displayItem) string {
 		if item.handle != "" && !m.collapsedHandles[item.handle] && item.toolRawArgs != "" {
 			var argsDisplay string
 			if item.toolStatus == toolStatusPending {
-				// Streaming: show incremental raw JSON with a block cursor.
-				raw := item.toolRawArgs
-				if m.width > 4 && len(raw) > m.width-4 {
-					raw = "…" + raw[len(raw)-(m.width-6):]
-				}
-				argsDisplay = toolDimStyle.Render("  " + raw + "█")
+				// Streaming: partially parse the incremental JSON and render
+				// it field-by-field so it looks structured even before the
+				// response is complete.
+				argsDisplay = renderStreamingArgs(item.toolRawArgs, m.width)
 			} else {
 				argsDisplay = formatExpandedArgs(item.toolRawArgs, m.width)
 			}
