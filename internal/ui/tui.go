@@ -125,15 +125,16 @@ func inputPlaceholder(state tuiState) string {
 // --- Display item kinds and statuses ---
 
 const (
-	itemUser          = "user"
-	itemAssistant     = "assistant"
-	itemReasoning     = "reasoning" // thinking/reasoning content from reasoning models
-	itemMarkdown      = "markdown"  // rendered markdown (e.g. /help output)
-	itemToolCall      = "tool_call"
-	itemError         = "error"
-	itemInfo          = "info"        // neutral status/system messages
-	itemProcessOutput = "proc_output" // live process output streamed into viewport
-	itemAskUser       = "ask_user"    // ask_user tool waiting for a response
+	itemUser           = "user"
+	itemAssistant      = "assistant"
+	itemReasoning      = "reasoning" // thinking/reasoning content from reasoning models
+	itemMarkdown       = "markdown"  // rendered markdown (e.g. /help output)
+	itemToolCall       = "tool_call"
+	itemError          = "error"
+	itemInfo           = "info"            // neutral status/system messages
+	itemProcessOutput  = "proc_output"     // live process output streamed into viewport
+	itemCompactSummary = "compact_summary" // expandable compaction summary
+	itemAskUser        = "ask_user"        // ask_user tool waiting for a response
 )
 
 const (
@@ -184,6 +185,27 @@ type thinkChunkMsg struct {
 	callID string
 	ch     <-chan ai.StreamChunk
 	chunk  ai.StreamChunk
+}
+
+// compactStartMsg is returned by the doCompact goroutine once the summarisation
+// stream has been opened.  The Update handler adds the live summary item to the
+// chat log and starts reading chunks.
+type compactStartMsg struct {
+	ch         <-chan ai.StreamChunk
+	snap       []ai.Message // snapshot of messages passed to doCompact
+	modelName  string
+	toolTokens int
+	maxTokens  int
+}
+
+// compactChunkMsg carries one streaming delta from the summarisation LLM call.
+type compactChunkMsg struct {
+	ch         <-chan ai.StreamChunk
+	chunk      ai.StreamChunk
+	snap       []ai.Message
+	modelName  string
+	toolTokens int
+	maxTokens  int
 }
 
 type toolResultMsg struct {
@@ -1080,6 +1102,13 @@ type Model struct {
 	thinkReasoningItemIdx int             // index into items of the in-progress think-tool reasoning item; -1 if none
 	thinkTextAccum        strings.Builder // accumulates text output during a think sub-completion
 
+	// Compaction summary streaming state.
+	compactSummaryItemIdx int // index of the live compact_summary item; -1 when idle
+	compactSummaryAccum   strings.Builder
+	compactSummaryFinal   string        // finalized summary text; consumed by applyCompaction
+	compactSummaryPrevTok int           // contextUsage.Total before compaction started
+	compactSavedItems     []displayItem // compact-summary display items snapshotted in Done tick
+
 	// Path approval state (stateAwaitingPathApproval).
 	pendingPathApprovals  []chat.PathAccessRequest // remaining paths needing approval
 	currentPathRequest    chat.PathAccessRequest   // request currently shown in the dialog
@@ -1443,6 +1472,7 @@ func initialModel(
 		streamingItemIdx:       -1,
 		reasoningItemIdx:       -1,
 		thinkReasoningItemIdx:  -1,
+		compactSummaryItemIdx:  -1,
 		oauthInfoIdx:           -1,
 		askUserSelectedIdx:     -1,
 		askUserItemIdx:         -1,
@@ -2212,23 +2242,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateIdle:
 			switch msg.Type {
 			case tea.KeyEnter:
+				// When the completion popup is open: exact command name runs the
+				// action, a command followed by args closes the popup and falls
+				// through to text dispatch, and a partial prefix fills the input.
+				handled := false
 				if m.showCompletion {
-					// Execute exact match or fill partial match.
 					filtered := m.filteredCmds()
 					if len(filtered) > 0 {
 						selected := filtered[m.completionIdx]
-						if m.input.Value() == "/"+selected.name {
+						inputVal := m.input.Value()
+						cmdFull := "/" + selected.name
+						switch {
+						case inputVal == cmdFull:
 							// Exact match — run the command.
 							cmds = append(cmds, m.runCompletion(selected)...)
 							m.updateCompletion()
-						} else {
-							// Partial match — fill the input without executing.
-							m.input.SetValue("/" + selected.name)
+							handled = true
+						case !strings.HasPrefix(inputVal, cmdFull+" "):
+							// Partial prefix — fill the input without executing.
+							m.input.SetValue(cmdFull)
 							m.input.CursorEnd()
 							m.updateCompletion()
+							handled = true
+						default:
+							// Input is "/cmd args" — close popup WITHOUT calling
+							// m.updateCompletion(), which would immediately re-open the
+							// popup (filteredCmds still matches "/expand" in "/expand all")
+							// causing the user to need a second Enter press.
+							m.showCompletion = false
+							m.syncViewportHeight()
 						}
 					}
-				} else {
+				}
+				if !handled {
 					text := strings.TrimSpace(m.input.Value())
 					switch {
 					case text == "" && m.autopilotPaused:
@@ -2951,17 +2997,38 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth, stateCompacting:
 			switch msg.Type {
 			case tea.KeyEnter:
-				// If the completion popup is showing and a safe-while-busy command is
-				// selected, execute it immediately rather than queuing it as a prompt.
-				if m.showCompletion {
-					filtered := m.filteredCmds()
-					if m.completionIdx < len(filtered) {
-						cmds = append(cmds, m.runCompletion(filtered[m.completionIdx])...)
-						break
-					}
-				}
 				text := strings.TrimSpace(m.input.Value())
-				if strings.HasPrefix(text, "/image ") {
+				// Handle slash commands with arguments immediately — before the
+				// completion-popup path (which only runs the no-arg action) and
+				// before the queueing path (which would send them to the AI).
+				switch {
+				case strings.HasPrefix(text, "/expand "):
+					arg := strings.TrimSpace(strings.TrimPrefix(text, "/expand "))
+					m.input.Reset()
+					m.showCompletion = false
+					m.updateCompletion()
+					if arg == "all" {
+						for h := range m.collapsedHandles {
+							m.collapsedHandles[h] = false
+						}
+					} else if arg != "" {
+						m.collapsedHandles[arg] = false
+					}
+					needRebuild = true
+				case strings.HasPrefix(text, "/collapse "):
+					arg := strings.TrimSpace(strings.TrimPrefix(text, "/collapse "))
+					m.input.Reset()
+					m.showCompletion = false
+					m.updateCompletion()
+					if arg == "all" {
+						for h := range m.collapsedHandles {
+							m.collapsedHandles[h] = true
+						}
+					} else if arg != "" {
+						m.collapsedHandles[arg] = true
+					}
+					needRebuild = true
+				case strings.HasPrefix(text, "/image "):
 					arg := strings.TrimSpace(strings.TrimPrefix(text, "/image "))
 					m.input.Reset()
 					m.showCompletion = false
@@ -2970,18 +3037,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, doLoadImage(arg))
 					}
 					needRebuild = true
-				} else if text != "" {
-					m.input.Reset()
-					m.showCompletion = false
-					m.appendInputHistory(text)
-					parts := m.pendingImages
-					m.pendingImages = nil
-					// Do NOT add to m.items here — the message should appear in the
-					// chat log at the moment it is actually sent to the AI, not while
-					// the AI is still processing a previous turn. The queue counter in
-					// the status bar provides feedback that the message was received.
-					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, parts: parts, displayed: false})
-					needRebuild = true
+				default:
+					// If the completion popup is showing and a safe-while-busy command
+					// is selected (exact name, no args), run it immediately.
+					if m.showCompletion {
+						filtered := m.filteredCmds()
+						if m.completionIdx < len(filtered) {
+							cmds = append(cmds, m.runCompletion(filtered[m.completionIdx])...)
+							break
+						}
+					}
+					if text != "" {
+						m.input.Reset()
+						m.showCompletion = false
+						m.appendInputHistory(text)
+						parts := m.pendingImages
+						m.pendingImages = nil
+						// Do NOT add to m.items here — the message should appear in
+						// the chat log at the moment it is actually sent to the AI.
+						m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, parts: parts, displayed: false})
+						needRebuild = true
+					}
 				}
 			case tea.KeyTab:
 				if m.showCompletion {
@@ -3960,6 +4036,90 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, readNextThinkChunk(msg.callID, msg.ch))
 		}
 
+	case compactStartMsg:
+		// The summarisation stream just opened.  Add the live compact-summary item
+		// so the user can watch the summary being written in real time.
+		const compactHandle = "compact"
+		m.compactSummaryPrevTok = m.contextUsage.Total
+		m.compactSummaryItemIdx = len(m.items)
+		m.items = append(m.items, displayItem{
+			kind:    itemCompactSummary,
+			handle:  compactHandle,
+			content: "",
+		})
+		m.collapsedHandles[compactHandle] = true
+		m.compactSummaryAccum.Reset()
+		needRebuild = true
+		cmds = append(cmds, readNextCompactChunk(msg.ch, msg.snap, msg.modelName, msg.toolTokens, msg.maxTokens))
+
+	case compactChunkMsg:
+		chunk := msg.chunk
+		switch {
+		case chunk.Err != nil && !errors.Is(chunk.Err, io.EOF):
+			// Stream error — fall through to compactDoneMsg error path.
+			m.compactSummaryItemIdx = -1
+			m.compactSummaryAccum.Reset()
+			err := chunk.Err
+			cmds = append(cmds, func() tea.Msg { return compactDoneMsg{err: err} })
+		case chunk.Done || errors.Is(chunk.Err, io.EOF):
+			// Stream finished.  Finalise summary and hand off to compactDoneMsg.
+			// Use the delta accumulator as the primary source (it already holds
+			// all streamed text).  Fall back to chunk.Msg.Content only when no
+			// deltas were received (e.g. non-streaming model that sends the full
+			// response in the Done chunk).
+			s := strings.TrimSpace(m.compactSummaryAccum.String())
+			if s == "" && chunk.Done && chunk.Msg.Content != "" {
+				s = strings.TrimSpace(chunk.Msg.Content)
+			}
+			// Update the live item to show the final text.
+			if m.compactSummaryItemIdx >= 0 && m.compactSummaryItemIdx < len(m.items) {
+				if s != "" {
+					m.items[m.compactSummaryItemIdx].content = s
+				}
+			}
+			m.compactSummaryItemIdx = -1
+			m.compactSummaryAccum.Reset()
+			needRebuild = true
+			if s == "" {
+				cmds = append(cmds, func() tea.Msg {
+					return compactDoneMsg{err: fmt.Errorf("summarization returned empty response")}
+				})
+			} else {
+				// Snapshot the compact-summary display items NOW (same tick as the
+				// Done handler, while we know for certain they are in m.items and
+				// have their final content).  applyCompaction runs in the next tick
+				// and consumes these from m.compactSavedItems.
+				m.compactSummaryFinal = s
+				m.compactSavedItems = nil
+				for _, it := range m.items {
+					if it.kind == itemCompactSummary {
+						it.content = s // ensure final content
+						m.compactSavedItems = append(m.compactSavedItems, it)
+					}
+				}
+				keepTurns, totalTokens, warning := computeCompactionParams(
+					s, msg.snap, msg.modelName, msg.toolTokens, msg.maxTokens,
+				)
+				doneMsg := compactDoneMsg{
+					summary:     s,
+					keepTurns:   keepTurns,
+					totalTokens: totalTokens,
+					warning:     warning,
+				}
+				cmds = append(cmds, func() tea.Msg { return doneMsg })
+			}
+		default:
+			// Delta chunk — append to the live item.
+			if chunk.Delta != "" {
+				m.compactSummaryAccum.WriteString(chunk.Delta)
+				if m.compactSummaryItemIdx >= 0 && m.compactSummaryItemIdx < len(m.items) {
+					m.items[m.compactSummaryItemIdx].content = m.compactSummaryAccum.String()
+				}
+				needRebuild = true
+			}
+			cmds = append(cmds, readNextCompactChunk(msg.ch, msg.snap, msg.modelName, msg.toolTokens, msg.maxTokens))
+		}
+
 	case toolResultMsg:
 		// If a toolResultMsg arrives while we're still showing the ask_user prompt
 		// (e.g. ctx was cancelled), tear down the question display gracefully.
@@ -4842,6 +5002,39 @@ func (m Model) renderItem(item displayItem) string {
 		}
 		return sb.String()
 
+	case itemCompactSummary:
+		prefix := processHandleStyle.Render("📋 Context summary")
+		if item.toolNote != "" {
+			prefix += "  " + toolDimStyle.Render(item.toolNote)
+		}
+		var sb strings.Builder
+		sb.WriteString(prefix)
+		switch {
+		case item.content == "":
+			// Still streaming.
+			sb.WriteString(toolDimStyle.Render(" (summarizing…)"))
+		case m.collapsedHandles[item.handle]:
+			lines := strings.Split(item.content, "\n")
+			const maxShown = 2
+			shown := lines
+			if len(lines) > maxShown {
+				shown = lines[:maxShown]
+			}
+			sb.WriteString("\n")
+			sb.WriteString(strings.Join(shown, "\n"))
+			if len(lines) > maxShown {
+				sb.WriteString("\n")
+				sb.WriteString(toolDimStyle.Render(fmt.Sprintf(
+					"  … %d more lines (use /expand %s to show all)",
+					len(lines)-maxShown, item.handle,
+				)))
+			}
+		default:
+			sb.WriteString("\n")
+			sb.WriteString(renderMarkdown(m.renderer, item.content))
+		}
+		return sb.String()
+
 	case itemAskUser:
 		var sb strings.Builder
 		question := m.askUserQuestion
@@ -5482,6 +5675,16 @@ func readNextThinkChunk(callID string, ch <-chan ai.StreamChunk) tea.Cmd {
 	}
 }
 
+func readNextCompactChunk(ch <-chan ai.StreamChunk, snap []ai.Message, modelName string, toolTokens, maxTokens int) tea.Cmd {
+	return func() tea.Msg {
+		chunk, ok := <-ch
+		if !ok {
+			return compactChunkMsg{ch: ch, chunk: ai.StreamChunk{Done: true}, snap: snap, modelName: modelName, toolTokens: toolTokens, maxTokens: maxTokens}
+		}
+		return compactChunkMsg{ch: ch, chunk: chunk, snap: snap, modelName: modelName, toolTokens: toolTokens, maxTokens: maxTokens}
+	}
+}
+
 func doCallTool(ctx context.Context, toolMgr *tools.Manager, session *chat.Session, tc ai.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		if toolMgr != nil {
@@ -5822,6 +6025,47 @@ func toolResultCap(msgIndex, total int) int {
 // request and returns a compactDoneMsg with the resulting summary text.
 // modelName, toolTokens and maxTokens are used to trim the kept-turn count
 // inside the goroutine so the resulting message set fits inside the context.
+// computeCompactionParams derives keepTurns, totalTokens, and a warning string
+// from the generated summary and the original message snapshot.  It is called
+// after the summarisation stream finishes.
+func computeCompactionParams(s string, snap []ai.Message, modelName string, toolTokens, maxTokens int) (keepTurns, totalTokens int, warning string) {
+	keepTurns = 2
+
+	var newSysContent string
+	if len(snap) > 0 && snap[0].Role == "system" {
+		newSysContent = replaceSummaryBlock(snap[0].Content, s)
+	} else {
+		newSysContent = "## Summary of previous conversation\n\n" + s
+	}
+	newSysTok, _ := ai.CountTokens(modelName, []ai.Message{{Role: "system", Content: newSysContent}})
+	baseTok := newSysTok.Total + toolTokens
+
+	estimateTotal := func(k int) int {
+		est := baseTok
+		if k > 0 {
+			if tc, err := ai.CountTokens(modelName, extractLastTurns(snap, k)); err == nil {
+				est += tc.Total
+			}
+		}
+		return est
+	}
+
+	totalTokens = estimateTotal(keepTurns)
+	if maxTokens > 0 {
+		const threshold = 0.65
+		limit := int(float32(maxTokens) * threshold)
+		for totalTokens > limit && keepTurns > 0 {
+			if warning == "" {
+				warning = "Context is very full even after compaction — " +
+					"consider switching to a model with a larger context window."
+			}
+			keepTurns--
+			totalTokens = estimateTotal(keepTurns)
+		}
+	}
+	return
+}
+
 func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Message, modelName string, toolTokens, maxTokens int) tea.Cmd {
 	// Build the transcript from a snapshot, so the goroutine doesn't race.
 	snap := make([]ai.Message, len(messages))
@@ -5880,78 +6124,15 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 			},
 		}
 
+		// Start the stream and hand the channel back to the Update loop so the
+		// summary can be streamed live into the chat log.
 		ch := client.CompleteStream(ctx, summaryMessages, nil)
-		var summary strings.Builder
-		for chunk := range ch {
-			if chunk.Err != nil {
-				if errors.Is(chunk.Err, io.EOF) {
-					break
-				}
-				return compactDoneMsg{err: chunk.Err}
-			}
-			if chunk.Done {
-				break
-			}
-			summary.WriteString(chunk.Delta)
-		}
-		s := strings.TrimSpace(summary.String())
-		if s == "" {
-			return compactDoneMsg{err: fmt.Errorf("summarization returned empty response")}
-		}
-
-		// keepTurns determines how many recent turns to keep verbatim
-		keepTurns := 2
-
-		// Compute the new system message exactly as applyCompaction will produce it.
-		// This is the original system message with the summary block replaced —
-		// NOT just the summary text.  Using only the summary tokens was the source
-		// of the persistent compaction-loop bug: the original system-prompt tokens
-		// (often 10 k+) were never counted, so estimateTotal was always far too low
-		// and keepTurns was never reduced.
-		var newSysContent string
-		if len(snap) > 0 && snap[0].Role == "system" {
-			newSysContent = replaceSummaryBlock(snap[0].Content, s)
-		} else {
-			newSysContent = "## Summary of previous conversation\n\n" + s
-		}
-		newSysTok, _ := ai.CountTokens(modelName, []ai.Message{{Role: "system", Content: newSysContent}})
-		baseTok := newSysTok.Total + toolTokens
-
-		// estimateTotal computes the full post-compaction token count for a given
-		// keepTurns: actual new system message + verbatim recent turns + tool overhead.
-		estimateTotal := func(k int) int {
-			est := baseTok
-			if k > 0 {
-				if tc, err := ai.CountTokens(modelName, extractLastTurns(snap, k)); err == nil {
-					est += tc.Total
-				}
-			}
-			return est
-		}
-
-		newContextTokens := estimateTotal(keepTurns)
-		var warning string
-
-		// If we have a clear maxTokens hint, progressively reduce keepTurns until
-		// the estimate fits within the threshold.
-		if maxTokens > 0 {
-			const threshold = 0.65
-			limit := int(float32(maxTokens) * threshold)
-			for newContextTokens > limit && keepTurns > 0 {
-				if warning == "" {
-					warning = "Context is very full even after compaction — " +
-						"consider switching to a model with a larger context window."
-				}
-				keepTurns--
-				newContextTokens = estimateTotal(keepTurns)
-			}
-		}
-
-		return compactDoneMsg{
-			summary:     s,
-			keepTurns:   keepTurns,
-			totalTokens: newContextTokens,
-			warning:     warning,
+		return compactStartMsg{
+			ch:         ch,
+			snap:       snap,
+			modelName:  modelName,
+			toolTokens: toolTokens,
+			maxTokens:  maxTokens,
 		}
 	}
 }
@@ -6062,14 +6243,38 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 	newMessages = append(newMessages, extractLastTurns(oldMessages, keepTurns)...)
 	m.messages = newMessages
 
+	// Use the compact-summary items snapshotted in the Done tick (same Update
+	// as when the live item content was finalised).  Fall back to scanning
+	// m.items and then compactSummaryFinal for any edge cases.
+	savedSummaries := m.compactSavedItems
+	m.compactSavedItems = nil
+	if len(savedSummaries) == 0 {
+		for _, it := range m.items {
+			if it.kind == itemCompactSummary {
+				savedSummaries = append(savedSummaries, it)
+			}
+		}
+	}
+	if len(savedSummaries) == 0 && m.compactSummaryFinal != "" {
+		savedSummaries = append(savedSummaries, displayItem{
+			kind:    itemCompactSummary,
+			handle:  "compact",
+			content: m.compactSummaryFinal,
+		})
+	}
+	m.compactSummaryFinal = ""
+
 	// Rebuild display from the new history.
 	m.items = rebuildItemsFromMessages(m.messages)
 	m.toolCallIdx = make(map[string]int)
 	m.streamingItemIdx = -1
 	m.reasoningItemIdx = -1
-	// Add a compaction banner at the top of the visible history.
-	banner := displayItem{kind: itemInfo, content: "Context compacted — conversation summarized."}
-	m.items = append([]displayItem{banner}, m.items...)
+	// Append the compaction summary after the rebuilt history items so it
+	// appears as the last entry — like a new message at the bottom of the
+	// chat — rather than pinned to the top.
+	if len(savedSummaries) > 0 {
+		m.items = append(m.items, savedSummaries...)
+	}
 
 	m.rebuildContent()
 
@@ -6083,6 +6288,26 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 	if count, cerr := ai.CountTokensWithTools(m.modelName, m.messages, m.tools); cerr == nil {
 		m.recountGen++
 		m.contextUsage = count
+		// Back-fill the token-range annotation on the summary item now that we
+		// have the accurate post-compaction count.
+		if len(savedSummaries) > 0 && m.compactSummaryPrevTok > 0 {
+			retainedNote := ""
+			if keepTurns > 0 {
+				// Count individual messages kept so the user can see whether
+				// "2 turns" means 4 messages or 60 (e.g. lots of tool calls).
+				retained := extractLastTurns(oldMessages, keepTurns)
+				plural := "s"
+				if len(retained) == 1 {
+					plural = ""
+				}
+				retainedNote = fmt.Sprintf(", %d msg%s retained", len(retained), plural)
+			}
+			m.items[len(m.items)-1].toolNote = fmt.Sprintf("%s → %s tokens%s",
+				formatTokens(m.compactSummaryPrevTok),
+				formatTokens(count.Total),
+				retainedNote,
+			)
+		}
 	} else if cmd := m.recountContext(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
@@ -6651,6 +6876,14 @@ func formatUsage(tokenSpeed float64, u ai.Usage) string {
 	s := fmt.Sprintf("tokens — prompt: %d  completion: %d  total: %d  avg speed: %.2f tok/s",
 		u.PromptTokens, u.CompletionTokens, u.TotalTokens, tokenSpeed)
 	return s
+}
+
+// formatTokens renders a token count as a compact string (e.g. "65,432" or "65k").
+func formatTokens(n int) string {
+	if n >= 10_000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // --- Session helpers ---
