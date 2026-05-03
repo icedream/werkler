@@ -729,18 +729,10 @@ func renderStreamingFileWrite(rawArgs string, width int) string {
 		sb.WriteString("\n")
 	}
 	if parsed.Content != "" {
-		// Show first few lines of content with a diff-style + prefix.
-		lines := strings.SplitN(parsed.Content, "\n", 6)
-		shown := lines
-		if len(lines) > 5 {
-			shown = lines[:5]
-		}
-		for _, l := range shown {
+		// Show all lines during streaming — the bubble is uncollapsed while
+		// the tool is executing; line caps only apply in the collapsed/done state.
+		for _, l := range strings.Split(parsed.Content, "\n") {
 			sb.WriteString(diffAddedStyle.Render("+" + l))
-			sb.WriteString("\n")
-		}
-		if len(lines) > 5 {
-			sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  … %d more lines", len(lines)-5)))
 			sb.WriteString("\n")
 		}
 	}
