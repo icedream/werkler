@@ -77,15 +77,13 @@ type Model struct {
 	turnSystemMsg string
 
 	// Agent state machine.
-	state                 tuiState
-	pendingCalls          []ai.ToolCall
-	currentCall           *ai.ToolCall
-	callingToolName       string          // name of tool currently executing (stateCallingTool)
-	callingToolTitle      string          // AI-provided title for the current tool call (may be empty)
-	streamingItemIdx      int             // index into items of the in-progress assistant item; -1 if none
-	reasoningItemIdx      int             // index into items of the in-progress reasoning item; -1 if none
-	thinkReasoningItemIdx int             // index into items of the in-progress think-tool reasoning item; -1 if none
-	thinkTextAccum        strings.Builder // accumulates text output during a think sub-completion
+	state            tuiState
+	pendingCalls     []ai.ToolCall
+	currentCall      *ai.ToolCall
+	callingToolName  string // name of tool currently executing (stateCallingTool)
+	callingToolTitle string // AI-provided title for the current tool call (may be empty)
+	streamingItemIdx int    // index into items of the in-progress assistant item; -1 if none
+	reasoningItemIdx int    // index into items of the in-progress reasoning item; -1 if none
 
 	// Compaction summary streaming state.
 	compactSummaryItemIdx int // index of the live compact_summary item; -1 when idle
@@ -192,12 +190,6 @@ type Model struct {
 	// contextWindowOverride is set from SessionOptions when the config provides
 	// an explicit context window size to use when the provider doesn't report one.
 	contextWindowOverride int
-	// configuredReasoningEffort is the effort level from provider config, used
-	// when the AI enables reasoning via enable_reasoning or think.
-	configuredReasoningEffort string
-	// pendingReasoningEffort, when non-empty, is applied to the next AI stream
-	// and then cleared. Set by the AI's enable_reasoning tool call.
-	pendingReasoningEffort string
 	// disableReasoning mirrors SessionOptions.DisableReasoning; when true,
 	// reasoning tools are hidden and no effort is ever sent.
 	disableReasoning bool
@@ -456,7 +448,6 @@ func initialModel(
 		state:                  stateIdle,
 		streamingItemIdx:       -1,
 		reasoningItemIdx:       -1,
-		thinkReasoningItemIdx:  -1,
 		compactSummaryItemIdx:  -1,
 		oauthInfoIdx:           -1,
 		askUserSelectedIdx:     -1,
@@ -790,7 +781,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.turnSystemMsg = ""
 						m.emptyResponseRetries = 0
 						m.setThinking()
-						cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.autopilotMessagesForStream()), m.tools))
+						cmds = append(cmds, m.doStream(m.newOpCtx(), m.buildStreamMessages(m.autopilotMessagesForStream()), m.tools))
 					case strings.HasPrefix(text, "/image "):
 						// /image <path-or-url> — load image and stage it as pending.
 						arg := strings.TrimSpace(strings.TrimPrefix(text, "/image "))
@@ -950,7 +941,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens))
 							} else {
 								m.setThinking()
-								cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools))
+								cmds = append(cmds, m.doStream(m.newOpCtx(), m.buildStreamMessages(m.messages), m.tools))
 							}
 						}
 					}
@@ -2377,7 +2368,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Record items watermark so auto-connect can roll back the display.
 					m.itemsBeforeRetry = len(m.items)
 					m.setThinking()
-					cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), nudgeMsgs, m.tools))
+					cmds = append(cmds, m.doStream(m.newOpCtx(), nudgeMsgs, m.tools))
 					needRebuild = true
 					break
 				}
@@ -2395,7 +2386,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, ai.Message{Role: "user", Content: "Continue."})
 					m.turnRoundtrips++
 					m.setThinking()
-					cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools))
+					cmds = append(cmds, m.doStream(m.newOpCtx(), m.buildStreamMessages(m.messages), m.tools))
 					needRebuild = true
 					break
 				}
@@ -2452,7 +2443,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.turnSystemMsg = ""
 						m.emptyResponseRetries = 0
 						m.setThinking()
-						cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.autopilotMessagesForStream()), m.tools))
+						cmds = append(cmds, m.doStream(m.newOpCtx(), m.buildStreamMessages(m.autopilotMessagesForStream()), m.tools))
 					}
 					break
 				}
@@ -2503,40 +2494,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			needRebuild = true
 			cmds = append(cmds, readNextChunk(msg.ch))
-		}
-
-	case thinkChunkMsg:
-		chunk := msg.chunk
-		switch {
-		case chunk.Err != nil && !errors.Is(chunk.Err, io.EOF):
-			cmds = append(cmds, func() tea.Msg {
-				return toolResultMsg{callID: msg.callID, toolName: "think", err: chunk.Err}
-			})
-		case chunk.Done || errors.Is(chunk.Err, io.EOF):
-			// Sub-completion finished — deliver accumulated text as tool result.
-			if chunk.Done {
-				m.thinkTextAccum.WriteString(chunk.Msg.Content)
-			}
-			result := m.thinkTextAccum.String()
-			m.thinkTextAccum.Reset()
-			m.thinkReasoningItemIdx = -1
-			callID := msg.callID
-			cmds = append(cmds, func() tea.Msg {
-				return toolResultMsg{callID: callID, toolName: "think", result: result}
-			})
-		default:
-			if chunk.ReasoningDelta != "" {
-				// First reasoning delta — allocate the reasoning display item.
-				if m.thinkReasoningItemIdx < 0 {
-					m.thinkReasoningItemIdx = len(m.items)
-					m.items = append(m.items, displayItem{kind: itemReasoning, content: ""})
-				}
-				m.items[m.thinkReasoningItemIdx].content += chunk.ReasoningDelta
-				needRebuild = true
-			} else {
-				m.thinkTextAccum.WriteString(chunk.Delta)
-			}
-			cmds = append(cmds, readNextThinkChunk(msg.callID, msg.ch))
 		}
 
 	case compactStartMsg:
@@ -2870,10 +2827,6 @@ func RunTUI(
 		toolMgr.SetMCPManager(opts.MCPManager)
 	}
 
-	if opts.DisableReasoning {
-		toolMgr.SetReasoningDisabled(true)
-	}
-
 	// Fetch initially-available tools (includes connect_server when servers are registered).
 	sessionTools, err := session.Tools(ctx)
 	if err != nil {
@@ -2920,7 +2873,6 @@ func RunTUI(
 	m.configuredModes = opts.ConfiguredModes
 	m.implementationMode = opts.ImplementationMode
 	m.contextWindowOverride = opts.ContextWindowOverride
-	m.configuredReasoningEffort = opts.ReasoningEffort
 	m.disableReasoning = opts.DisableReasoning
 	if opts.ActiveMode.Name != "" {
 		m.activeMode = opts.ActiveMode

@@ -152,9 +152,8 @@ type Manager struct {
 	activeCallID  atomic.Value // stores string; set/cleared by doCallTool goroutine
 	// allowedTools is the active agent's tool allowlist. nil = unrestricted;
 	// non-nil = only these tools (plus infra tools) are visible and callable.
-	allowedTools      []string
-	reasoningDisabled bool // when true, enable_reasoning and think are excluded from Tools()
-	filterMu          sync.RWMutex
+	allowedTools []string
+	filterMu     sync.RWMutex
 }
 
 type builtin struct {
@@ -253,13 +252,6 @@ func (m *Manager) SetTaskTitleNotify(fn func(string)) { m.taskTitle = fn }
 // SetAgentActivateNotify sets an optional callback that is invoked when the AI
 // calls use_agent. The TUI uses this to trigger session-side agent activation.
 func (m *Manager) SetAgentActivateNotify(fn func(string)) { m.agentActivate = fn }
-
-// SetReasoningDisabled controls whether enable_reasoning and think tools
-// appear in the tool list. Must be called before the manager starts serving requests.
-func (m *Manager) SetReasoningDisabled(disabled bool) {
-	m.reasoningDisabled = disabled
-	m.builtins = m.makeBuiltins()
-}
 
 // SetReviewer provides an optional secondary AI model used by subagents
 // (rubber_duck_review and doc_review). Registers both subagents when c is
@@ -1423,72 +1415,6 @@ The return value tells you how to proceed:
 		},
 		handle: m.handleConfirmPlan,
 	})
-
-	if !m.reasoningDisabled {
-		builtins = append(builtins, builtin{
-			def: ai.ToolDefinition{
-				Name: "enable_reasoning",
-				Description: `Request enhanced reasoning for your next response. Call this as your SOLE action
-(no other tools, no response text) when the upcoming task genuinely requires deep analytical
-thinking: complex architectural decisions, subtle bug root-cause analysis, hard algorithmic
-tradeoffs, or multi-step reasoning where errors compound.
-
-werkler will immediately re-prompt you with reasoning enabled. After that single turn,
-reasoning returns to the default level.
-
-Do NOT use for routine coding, simple lookups, or tasks you can answer confidently without
-extra thinking — it adds latency for the user.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"effort": map[string]any{
-							"type":        "string",
-							"enum":        []string{"low", "medium", "high"},
-							"description": "Reasoning depth (default: use provider-configured level)",
-						},
-					},
-				},
-			},
-			handle: func(_ context.Context, _ map[string]any) (string, error) {
-				// Intercepted by the TUI before this handler is reached.
-				return "enable_reasoning requires interactive mode", nil
-			},
-		})
-		builtins = append(builtins, builtin{
-			def: ai.ToolDefinition{
-				Name: "think",
-				Description: `Reason carefully about a focused sub-question and return a thorough analysis.
-Use this when you need to think through a specific aspect of the problem while composing
-your response — for example, choosing the right algorithm, evaluating a design tradeoff,
-or verifying correctness of an approach.
-
-This tool invokes the model's native reasoning/thinking token pathway (at low effort
-by default, or the configured reasoning_effort level). Use it only when you genuinely
-need to think something through — not for routine lookups.
-
-Unlike enable_reasoning (which affects an entire response turn), think is a targeted
-sub-call: you ask a specific question, get back a careful analysis, and use it inline.
-The reasoning is not added to the conversation history.
-
-Use think for focused sub-questions; use enable_reasoning when the whole response
-needs deep reasoning.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"question": map[string]any{
-							"type":        "string",
-							"description": "The specific question to reason about",
-						},
-					},
-					"required": []string{"question"},
-				},
-			},
-			handle: func(_ context.Context, _ map[string]any) (string, error) {
-				// Intercepted by the TUI before this handler is reached.
-				return "think requires interactive mode", nil
-			},
-		})
-	}
 
 	return builtins
 }

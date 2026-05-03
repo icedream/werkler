@@ -711,7 +711,7 @@ func (m *Model) processQueueOrIdle() tea.Cmd {
 			return doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens)
 		}
 		m.setThinking()
-		return m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools)
+		return m.doStream(m.newOpCtx(), m.buildStreamMessages(m.messages), m.tools)
 	}
 	m.setIdle()
 	m.cancelOp = nil
@@ -744,7 +744,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		}
 		m.setThinking()
 		m.turnRoundtrips++
-		return m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools)
+		return m.doStream(m.newOpCtx(), m.buildStreamMessages(m.messages), m.tools)
 	}
 
 	call := m.pendingCalls[0]
@@ -815,57 +815,6 @@ func (m *Model) processNextCall() tea.Cmd {
 		return func() tea.Msg { return taskCompleteMsg{callID: call.ID, summary: summary} }
 	}
 
-	// enable_reasoning: set pending reasoning effort and auto-continue.
-	if call.Name == "enable_reasoning" {
-		effort, _ := call.Arguments["effort"].(string)
-		if effort == "" {
-			effort = m.configuredReasoningEffort
-		}
-		if effort == "" {
-			effort = "medium"
-		}
-		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
-			m.items[idx].toolStatus = toolStatusDone
-		}
-		m.currentCall = nil
-		callID := call.ID
-		if m.pendingReasoningEffort != "" {
-			return func() tea.Msg {
-				return toolResultMsg{
-					callID: callID, toolName: "enable_reasoning",
-					result: "Reasoning is already enabled for your next response.",
-				}
-			}
-		}
-		m.pendingReasoningEffort = effort
-		return func() tea.Msg {
-			return toolResultMsg{
-				callID: callID, toolName: "enable_reasoning",
-				result: fmt.Sprintf("Reasoning enabled (%s). Now produce your reasoning-backed response.", effort),
-			}
-		}
-	}
-
-	// think: dispatch a focused sub-completion with reasoning enabled.
-	if call.Name == "think" {
-		question, _ := call.Arguments["question"].(string)
-		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
-			m.items[idx].toolStatus = toolStatusRunning
-		}
-		m.setCallingTool(call)
-		m.currentCall = nil
-		m.executingCall = &callCopy
-		m.state = stateCallingTool
-		m.thinkReasoningItemIdx = -1
-		m.thinkTextAccum.Reset()
-		recent := recentContextMessages(m.messages, 6)
-		thinkEffort := m.configuredReasoningEffort
-		if thinkEffort == "" {
-			thinkEffort = "low"
-		}
-		return doThinkTool(m.newOpCtx(), call.ID, m.client, question, recent, thinkEffort)
-	}
-
 	// ask_user, confirm_plan, subagent tools, use_skill, use_agent, task_start, todo_*, memory_*, and connect_server
 	// are always dispatched immediately without an approval dialog.
 	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "confirm_plan" ||
@@ -904,21 +853,6 @@ func (m *Model) newOpCtx() context.Context {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancelOp = cancel
 	m.cancelPending = false
-	return ctx
-}
-
-// applyReasoningCtx annotates ctx with the pending reasoning effort (consumed
-// one-shot from m.pendingReasoningEffort). Call this just before starting a
-// new AI stream. Safe to call when reasoning is disabled — it is a no-op then.
-func (m *Model) applyReasoningCtx(ctx context.Context) context.Context {
-	if m.disableReasoning {
-		return ctx
-	}
-	if m.pendingReasoningEffort != "" {
-		effort := m.pendingReasoningEffort
-		m.pendingReasoningEffort = ""
-		return ai.WithReasoningEffortCtx(ctx, effort)
-	}
 	return ctx
 }
 

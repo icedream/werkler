@@ -192,10 +192,6 @@ func toolFriendlyName(name string) string {
 		return "Complete task"
 	case "ask_user":
 		return "Ask user"
-	case "enable_reasoning":
-		return "Enable reasoning"
-	case "think":
-		return "Think"
 	case "todo_add":
 		return "Add todo"
 	case "todo_update":

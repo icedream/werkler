@@ -235,7 +235,7 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 		m.autoCompactPending = false
 		m.turnRoundtrips++
 		m.setThinking()
-		cmds = append(cmds, m.doStream(m.applyReasoningCtx(m.newOpCtx()), m.buildStreamMessages(m.messages), m.tools))
+		cmds = append(cmds, m.doStream(m.newOpCtx(), m.buildStreamMessages(m.messages), m.tools))
 	} else {
 		// Manual compact: also reset since history changed.
 		if m.incrementalClient != nil {

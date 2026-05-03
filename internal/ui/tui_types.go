@@ -159,14 +159,6 @@ type streamChunkMsg struct {
 	chunk ai.StreamChunk
 }
 
-// thinkChunkMsg carries one StreamChunk from a think tool sub-completion,
-// together with the call ID and the channel for subsequent reads.
-type thinkChunkMsg struct {
-	callID string
-	ch     <-chan ai.StreamChunk
-	chunk  ai.StreamChunk
-}
-
 // compactStartMsg is returned by the doCompact goroutine once the summarisation
 // stream has been opened.  The Update handler adds the live summary item to the
 // chat log and starts reading chunks.
