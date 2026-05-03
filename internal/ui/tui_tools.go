@@ -461,3 +461,31 @@ func countDiffChangedLines(diff string) int {
 	}
 	return n
 }
+
+// formatExpandedArgs returns a pretty-printed, indented rendering of a tool
+// call's JSON arguments for the expanded tool-call bubble.
+func formatExpandedArgs(rawArgs string, width int) string {
+	if rawArgs == "" || rawArgs == "{}" || rawArgs == "null" {
+		return ""
+	}
+	var v any
+	if err := json.Unmarshal([]byte(rawArgs), &v); err != nil {
+		return toolDimStyle.Render("  " + rawArgs)
+	}
+	pretty, err := json.MarshalIndent(v, "  ", "  ")
+	if err != nil {
+		return toolDimStyle.Render("  " + rawArgs)
+	}
+	lines := strings.Split(string(pretty), "\n")
+	var sb strings.Builder
+	for i, l := range lines {
+		if width > 4 && len(l) > width-2 {
+			l = l[:width-5] + "…"
+		}
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(toolDimStyle.Render(l))
+	}
+	return sb.String()
+}

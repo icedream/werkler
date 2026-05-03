@@ -642,20 +642,27 @@ func (m Model) renderItem(item displayItem) string {
 				line += "\n" + noteIndent + ns.Render(note)
 			}
 		}
-		// Show expandable diff for file_edit / file_write / file_delete.
-		if item.toolDiff != "" && item.handle != "" {
-			if m.collapsedHandles[item.handle] {
-				changed := countDiffChangedLines(item.toolDiff)
-				plural := "s"
-				if changed == 1 {
-					plural = ""
-				}
-				line += "\n" + toolDimStyle.Render(fmt.Sprintf(
-					"  \u2195 %d line%s changed  (use /expand %s to show diff)",
-					changed, plural, item.handle))
-			} else {
-				line += "\n" + renderDiff(item.toolDiff, m.width)
+		// While executing (uncollapsed) show pretty-printed args; after completion
+		// the bubble collapses and shows the diff stub if available.
+		if item.handle != "" && !m.collapsedHandles[item.handle] && item.toolRawArgs != "" {
+			if expanded := formatExpandedArgs(item.toolRawArgs, m.width); expanded != "" {
+				line += "\n" + expanded
 			}
+		}
+		// Show expandable diff for file_edit / file_write / file_delete; only
+		// visible after the bubble has been collapsed (tool done).
+		if item.toolDiff != "" && item.handle != "" && m.collapsedHandles[item.handle] {
+			changed := countDiffChangedLines(item.toolDiff)
+			plural := "s"
+			if changed == 1 {
+				plural = ""
+			}
+			line += "\n" + toolDimStyle.Render(fmt.Sprintf(
+				"  \u2195 %d line%s changed  (use /expand %s to show diff)",
+				changed, plural, item.handle))
+		} else if item.toolDiff != "" && item.handle != "" && !m.collapsedHandles[item.handle] && item.toolRawArgs == "" {
+			// Re-expanded by user after collapse: show full diff.
+			line += "\n" + renderDiff(item.toolDiff, m.width)
 		}
 		return line
 

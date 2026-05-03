@@ -142,10 +142,11 @@ type displayItem struct {
 	kind           string
 	content        string
 	toolName       string
-	toolArgs       string // compact JSON args
+	toolArgs       string // compact one-liner args (shown collapsed)
+	toolRawArgs    string // raw JSON args for pretty-printed expanded display
 	toolStatus     int
-	handle         string // process handle (itemProcessOutput only)
-	toolNote       string // secondary annotation: intent title (process_start) or diff summary (file_edit)
+	handle         string // expand/collapse handle: callID for tool calls, process handle for output
+	toolNote       string // secondary annotation: intent title or diff summary
 	truncatedLines int    // lines dropped from the top of process output to stay within cap
 	toolDiff       string // unified diff for file_edit/write/delete; empty for other tools
 }

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -621,6 +622,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.pendingCallAfterPaths = nil
 							if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 								m.items[idx].toolStatus = toolStatusDenied
+								if h := m.items[idx].handle; h != "" {
+									m.collapsedHandles[h] = true
+								}
 							}
 							m.messages = append(m.messages, ai.Message{
 								Role:       "tool",
@@ -712,6 +716,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						call := *m.currentCall
 						if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 							m.items[idx].toolStatus = toolStatusDenied
+							if h := m.items[idx].handle; h != "" {
+								m.collapsedHandles[h] = true
+							}
 						}
 						m.messages = append(m.messages, ai.Message{
 							Role:       "tool",
@@ -2456,13 +2463,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.toolCallIdx[tc.ID] = -1
 					} else {
 						m.toolCallIdx[tc.ID] = len(m.items)
+						rawArgBytes, _ := json.Marshal(tc.Arguments)
 						m.items = append(m.items, displayItem{
-							kind:       itemToolCall,
-							toolName:   tc.Name,
-							toolArgs:   toolCallDisplayArgs(tc.Name, tc.Arguments),
-							toolNote:   toolCallIntent(tc.Name, tc.Arguments),
-							toolStatus: toolStatusPending,
+							kind:        itemToolCall,
+							toolName:    tc.Name,
+							toolArgs:    toolCallDisplayArgs(tc.Name, tc.Arguments),
+							toolRawArgs: string(rawArgBytes),
+							toolNote:    toolCallIntent(tc.Name, tc.Arguments),
+							toolStatus:  toolStatusPending,
+							handle:      tc.ID, // enables /expand <callID>
 						})
+						// Start expanded so the user sees full args while the tool runs.
+						// collapsedHandles[key]==false is the default (absent = expanded);
+						// we explicitly set false so /collapse all does not fight us.
+						m.collapsedHandles[tc.ID] = false
 					}
 				}
 				m.pendingCalls = append(m.pendingCalls, chunk.Msg.ToolCalls...)
@@ -2623,6 +2637,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// go idle without triggering a new stream.
 				if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
 					m.items[idx].toolStatus = toolStatusDenied
+					if h := m.items[idx].handle; h != "" {
+						m.collapsedHandles[h] = true
+					}
 				}
 				m.messages = append(m.messages, ai.Message{
 					Role:       "tool",
@@ -2632,6 +2649,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, pc := range m.pendingCalls {
 					if idx, ok := m.toolCallIdx[pc.ID]; ok && idx >= 0 {
 						m.items[idx].toolStatus = toolStatusDenied
+						if h := m.items[idx].handle; h != "" {
+							m.collapsedHandles[h] = true
+						}
 					}
 					m.messages = append(m.messages, ai.Message{
 						Role:       "tool",
@@ -2655,6 +2675,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// not-executed and let the AI respond via a new stream.
 				if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
 					m.items[idx].toolStatus = toolStatusFailed
+					if h := m.items[idx].handle; h != "" {
+						m.collapsedHandles[h] = true
+					}
 					switch msg.toolName {
 					case "file_edit":
 						m.items[idx].toolNote = fileEditErrorNote(msg.err)
@@ -2675,6 +2698,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					})
 					if idx, ok := m.toolCallIdx[pc.ID]; ok && idx >= 0 {
 						m.items[idx].toolStatus = toolStatusFailed
+						if h := m.items[idx].handle; h != "" {
+							m.collapsedHandles[h] = true
+						}
 					}
 				}
 				m.pendingCalls = nil
@@ -2689,6 +2715,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			debugLog("toolResult: ok tool=%q result=%q", msg.toolName, msg.result[:min(len(msg.result), 80)])
 			if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
 				m.items[idx].toolStatus = toolStatusDone
+				// Collapse the args now that the call is complete.
+				if h := m.items[idx].handle; h != "" {
+					m.collapsedHandles[h] = true
+				}
 				switch msg.toolName {
 				case "file_edit":
 					m.items[idx].toolNote = parseFileEditNote(msg.result)
