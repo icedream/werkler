@@ -486,6 +486,7 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 					}
 					if !send(StreamChunk{ToolCallChunks: []ToolCallChunk{{
 						Index:          toolAccumMap[evDelta.CallID].idx,
+						ID:             evDelta.CallID, // always include so TUI can do ID-based lookup
 						ArgumentsDelta: evDelta.Delta,
 					}}}) {
 						return

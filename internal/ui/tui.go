@@ -2500,9 +2500,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.streamedTokens = 0
 				}
 				for _, tcc := range chunk.ToolCallChunks {
+					// Create item on the first chunk (has both ID and Name).
+					// Use a separate if (not else-if) so that a first chunk which
+					// also carries an ArgumentsDelta is handled correctly below.
 					if tcc.ID != "" && tcc.Name != "" {
-						// First chunk: create the tool call item expanded (uncollapsed).
-						if tcc.Name != "task_start" {
+						if tcc.Name == "task_start" {
+							m.toolCallIdx[tcc.ID] = -1
+						} else if _, exists := m.toolCallIdx[tcc.ID]; !exists {
 							m.toolCallIdx[tcc.ID] = len(m.items)
 							m.items = append(m.items, displayItem{
 								kind:        itemToolCall,
@@ -2513,25 +2517,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								toolStatus:  toolStatusPending,
 								handle:      tcc.ID,
 							})
-							// collapsedHandles defaults to false (expanded) for unknown keys.
-						} else {
-							m.toolCallIdx[tcc.ID] = -1
 						}
-					} else if tcc.ArgumentsDelta != "" {
-						// Subsequent chunks: append argument text to the live item.
-						// Scan pending tool call items for the one at the matching
-						// output index (tcc.Index). We match by order of creation
-						// since the Responses API uses output_index, not call_id.
-						n := 0
-						for _, itemIdx := range m.toolCallIdx {
-							if itemIdx < 0 || itemIdx >= len(m.items) {
-								continue
-							}
-							if n == tcc.Index {
-								m.items[itemIdx].toolRawArgs += tcc.ArgumentsDelta
-								break
-							}
-							n++
+					}
+					// Append argument delta.  Every ToolCallChunk carries the call
+					// ID (acc.id for Chat Completions, call_id for Responses API),
+					// so we always look up by ID — never by index.  This is the only
+					// correct approach when multiple tool calls run in parallel.
+					if tcc.ArgumentsDelta != "" && tcc.ID != "" {
+						if itemIdx, ok := m.toolCallIdx[tcc.ID]; ok && itemIdx >= 0 && itemIdx < len(m.items) {
+							m.items[itemIdx].toolRawArgs += tcc.ArgumentsDelta
 						}
 					}
 				}

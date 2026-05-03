@@ -478,7 +478,7 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 					acc.args.WriteString(tc.Function.Arguments)
 					tcc = append(tcc, ToolCallChunk{
 						Index:          idx,
-						ID:             tc.ID,
+						ID:             acc.id, // always set: accumulated across deltas
 						Name:           tc.Function.Name,
 						ArgumentsDelta: tc.Function.Arguments,
 					})
