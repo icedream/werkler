@@ -1800,8 +1800,24 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 	combinedBuf := newCapBuffer(runCommandOutputCap)
 	combinedMu := &sync.Mutex{}
 
-	cmd.Stdout = &combinedWriter{stream: stdoutBuf, combined: combinedBuf, mu: combinedMu}
-	cmd.Stderr = &combinedWriter{stream: stderrBuf, combined: combinedBuf, mu: combinedMu}
+	// If a live-output channel is present in the context, tee each combined
+	// write to it line by line so the TUI can display output as it arrives.
+	var stdoutLive, stderrLive *liveLineWriter
+	if liveCh := liveOutputFromCtx(ctx); liveCh != nil {
+		stdoutLive = &liveLineWriter{
+			inner:  &combinedWriter{stream: stdoutBuf, combined: combinedBuf, mu: combinedMu},
+			liveCh: liveCh,
+		}
+		stderrLive = &liveLineWriter{
+			inner:  &combinedWriter{stream: stderrBuf, combined: combinedBuf, mu: combinedMu},
+			liveCh: liveCh,
+		}
+		cmd.Stdout = stdoutLive
+		cmd.Stderr = stderrLive
+	} else {
+		cmd.Stdout = &combinedWriter{stream: stdoutBuf, combined: combinedBuf, mu: combinedMu}
+		cmd.Stderr = &combinedWriter{stream: stderrBuf, combined: combinedBuf, mu: combinedMu}
+	}
 
 	if startErr := cmd.Start(); startErr != nil {
 		return jsonResult(map[string]any{"error": fmt.Sprintf("run_command: %s", startErr.Error())}), nil
@@ -1832,6 +1848,13 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 	select {
 	case result := <-done:
 		exitCode = result.exitCode
+		// Flush any partial line that had no trailing newline.
+		if stdoutLive != nil {
+			stdoutLive.flush()
+		}
+		if stderrLive != nil {
+			stderrLive.flush()
+		}
 	case <-time.After(timeout):
 		timedOut = true
 		// Kill the process group: SIGTERM first, then SIGKILL after 2s grace.

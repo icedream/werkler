@@ -503,7 +503,7 @@ func (m *Model) processNextPath() tea.Cmd {
 		m.setCallingTool(call)
 		m.executingCall = &call
 		m.state = stateCallingTool
-		return doCallTool(m.newOpCtx(), m.toolMgr, m.session, call)
+		return doCallToolStream(m.newOpCtx(), m.toolMgr, m.session, call)
 	}
 	return m.input.Focus()
 }
@@ -832,7 +832,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		m.currentCall = nil
 		m.executingCall = &callCopy
 		m.state = stateCallingTool
-		return doCallTool(m.newOpCtx(), m.toolMgr, m.session, call)
+		return doCallToolStream(m.newOpCtx(), m.toolMgr, m.session, call)
 	}
 
 	m.state = stateAwaitingApproval

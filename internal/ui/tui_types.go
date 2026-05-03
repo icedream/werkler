@@ -149,6 +149,7 @@ type displayItem struct {
 	toolNote       string // secondary annotation: intent title or diff summary
 	truncatedLines int    // lines dropped from the top of process output to stay within cap
 	toolDiff       string // unified diff for file_edit/write/delete; empty for other tools
+	toolLiveOutput string // live stdout/stderr while run_command is executing; cleared on done
 }
 
 // --- Tea messages ---

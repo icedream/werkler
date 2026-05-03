@@ -2650,6 +2650,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, readNextCompactChunk(msg.ch, msg.snap, msg.modelName, msg.toolTokens, msg.maxTokens))
 		}
 
+	case toolOutputChunkMsg:
+		needRebuild = true
+		if msg.event.Done {
+			// Tool finished — clear live output and route through toolResultMsg.
+			if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
+				m.items[idx].toolLiveOutput = ""
+			}
+			cmds = append(cmds, func() tea.Msg {
+				return toolResultMsg{
+					callID:   msg.callID,
+					toolName: msg.toolName,
+					result:   msg.event.Result,
+					diff:     msg.event.Diff,
+					parts:    msg.event.Parts,
+					err:      msg.event.Err,
+				}
+			})
+		} else {
+			// Output line — append to item and schedule next read.
+			if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
+				if m.items[idx].toolLiveOutput != "" {
+					m.items[idx].toolLiveOutput += "\n"
+				}
+				m.items[idx].toolLiveOutput += msg.event.Line
+			}
+			cmds = append(cmds, readNextToolOutputChunk(msg.ch, msg.callID, msg.toolName))
+		}
+
 	case toolResultMsg:
 		// If compaction is in progress, the tool was already given a placeholder
 		// result ("not executed") before doCompact was dispatched.  Accepting the

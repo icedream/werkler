@@ -677,6 +677,17 @@ func (m Model) renderItem(item displayItem) string {
 				"  \u2195 %d line%s changed  (use /expand %s to show diff)",
 				changed, plural, item.handle))
 		}
+		// Live stdout/stderr while run_command is executing (cleared on done).
+		if item.toolLiveOutput != "" && item.toolStatus == toolStatusRunning {
+			outLines := strings.Split(item.toolLiveOutput, "\n")
+			const maxLiveLines = 30
+			if len(outLines) > maxLiveLines {
+				outLines = outLines[len(outLines)-maxLiveLines:]
+			}
+			for _, l := range outLines {
+				line += "\n" + toolDimStyle.Render("  "+l)
+			}
+		}
 		return line
 
 	case itemError:

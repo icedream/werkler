@@ -75,6 +75,104 @@ func doCallTool(ctx context.Context, toolMgr *tools.Manager, session *chat.Sessi
 	}
 }
 
+// toolOutputEvent is one event from a live-streaming tool execution.
+type toolOutputEvent struct {
+	Line   string         // stdout/stderr line (Done=false)
+	Done   bool           // true when the tool has finished
+	Result string         // final result JSON (Done=true)
+	Diff   string         // file diff if any (Done=true)
+	Parts  []ai.ImagePart // content parts (Done=true)
+	Err    error          // execution error (Done=true)
+}
+
+// toolOutputChunkMsg carries one toolOutputEvent from the live-output channel.
+type toolOutputChunkMsg struct {
+	callID   string
+	toolName string
+	ch       <-chan toolOutputEvent
+	event    toolOutputEvent
+}
+
+// readNextToolOutputChunk returns a Cmd that reads one event from ch and
+// wraps it in a toolOutputChunkMsg.
+func readNextToolOutputChunk(ch <-chan toolOutputEvent, callID, toolName string) tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-ch
+		if !ok {
+			// Channel closed without a Done event — treat as clean completion.
+			event = toolOutputEvent{Done: true}
+		}
+		return toolOutputChunkMsg{callID: callID, toolName: toolName, ch: ch, event: event}
+	}
+}
+
+// doCallToolStream starts a tool with live stdout/stderr streaming for tools
+// that support it (currently run_command).  All other tools fall back to the
+// regular single-shot doCallTool path.
+func doCallToolStream(ctx context.Context, toolMgr *tools.Manager, session *chat.Session, tc ai.ToolCall) tea.Cmd {
+	if tc.Name != "run_command" {
+		return doCallTool(ctx, toolMgr, session, tc)
+	}
+
+	// rawLineCh receives individual output lines from the process via liveLineWriter.
+	// Large buffer so the process's Write calls never block even if the TUI is slow.
+	rawLineCh := make(chan string, 256)
+	ctx = tools.WithLiveOutput(ctx, rawLineCh)
+
+	// eventCh carries toolOutputEvents to the TUI (one per line, then one Done).
+	eventCh := make(chan toolOutputEvent, 256)
+
+	type resultT struct {
+		result string
+		diff   string
+		parts  []ai.ImagePart
+		err    error
+	}
+	resultCh := make(chan resultT, 1)
+
+	// Goroutine 1: run the tool.
+	// Explicitly close rawLineCh inside an inner func (not deferred from outer)
+	// so the forwarding goroutine can drain all lines before reading the result.
+	go func() {
+		if toolMgr != nil {
+			toolMgr.SetActiveCallID(tc.ID)
+			defer toolMgr.SetActiveCallID("")
+		}
+		var res resultT
+		func() {
+			defer close(rawLineCh)
+			r, parts, err := session.CallToolWithParts(ctx, tc)
+			var diff string
+			if err == nil {
+				var m map[string]any
+				if json.Unmarshal([]byte(r), &m) == nil {
+					diff, _ = m["diff"].(string)
+				}
+			}
+			res = resultT{r, diff, parts, err}
+		}()
+		resultCh <- res
+	}()
+
+	// Goroutine 2: forward lines to eventCh, then send the Done event.
+	go func() {
+		defer close(eventCh)
+		for line := range rawLineCh {
+			eventCh <- toolOutputEvent{Line: line}
+		}
+		res := <-resultCh
+		eventCh <- toolOutputEvent{
+			Done:   true,
+			Result: res.result,
+			Diff:   res.diff,
+			Parts:  res.parts,
+			Err:    res.err,
+		}
+	}()
+
+	return readNextToolOutputChunk(eventCh, tc.ID, tc.Name)
+}
+
 // doConnectOAuth runs pending OAuth server connections in a goroutine.
 // The send function is used to notify the TUI when an auth URL is ready to display.
 func doConnectOAuth(ctx context.Context, session *chat.Session, send func(tea.Msg)) tea.Cmd {
