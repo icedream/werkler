@@ -594,11 +594,26 @@ func jsonKeysInOrder(s string) []string {
 	return keys
 }
 
-// renderStreamingArgs renders a potentially-partial JSON argument string in a
-// human-readable field-per-line format while streaming is still in progress.
-// It closes the partial JSON, parses it, and renders each field with the last
-// field marked with a block cursor to indicate ongoing streaming.
-func renderStreamingArgs(rawArgs string, width int) string {
+// renderStreamingArgs renders partially-received tool call arguments in a
+// tool-aware format.  When the tool name is known a dedicated renderer is
+// used (e.g. file_edit shows a live diff); otherwise a generic field-per-line
+// view is shown with a block cursor on the last streaming field.
+func renderStreamingArgs(rawArgs, toolName string, width int) string {
+	switch toolName {
+	case "file_edit":
+		return renderStreamingFileEdit(rawArgs, width)
+	case "file_write":
+		return renderStreamingFileWrite(rawArgs, width)
+	case "file_delete":
+		return renderStreamingFilePath(rawArgs, width)
+	case "run_command", "process_start":
+		return renderStreamingCommand(rawArgs, width)
+	}
+	return renderStreamingGeneric(rawArgs, width)
+}
+
+// renderStreamingGeneric is the fallback: field-per-line with block cursor.
+func renderStreamingGeneric(rawArgs string, width int) string {
 	if rawArgs == "" {
 		return toolDimStyle.Render("  ▋")
 	}
@@ -659,4 +674,107 @@ func renderStreamingArgs(rawArgs string, width int) string {
 		sb.WriteString("\n")
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// renderStreamingFileEdit shows a live diff of old_str→new_str pairs as they
+// stream in, matching the final completed tool bubble style.
+func renderStreamingFileEdit(rawArgs string, width int) string {
+	closed := closePartialJSON(rawArgs)
+	var parsed struct {
+		Path  string `json:"path"`
+		Edits []struct {
+			OldStr string `json:"old_str"`
+			NewStr string `json:"new_str"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal([]byte(closed), &parsed); err != nil {
+		return renderStreamingGeneric(rawArgs, width)
+	}
+
+	var sb strings.Builder
+	if parsed.Path != "" {
+		sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  path  %q", parsed.Path)))
+		sb.WriteString("\n")
+	}
+	for _, edit := range parsed.Edits {
+		if edit.OldStr != "" || edit.NewStr != "" {
+			diff := tools.ComputeUnifiedDiff(edit.OldStr, edit.NewStr, parsed.Path)
+			if diff != "" {
+				sb.WriteString(renderDiff(diff, width))
+				sb.WriteString("\n")
+			}
+		}
+	}
+	result := strings.TrimRight(sb.String(), "\n")
+	if result == "" {
+		return renderStreamingGeneric(rawArgs, width)
+	}
+	return result + toolDimStyle.Render("▋")
+}
+
+// renderStreamingFileWrite shows the path and a live preview of the content.
+func renderStreamingFileWrite(rawArgs string, width int) string {
+	closed := closePartialJSON(rawArgs)
+	var parsed struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(closed), &parsed); err != nil {
+		return renderStreamingGeneric(rawArgs, width)
+	}
+
+	var sb strings.Builder
+	if parsed.Path != "" {
+		sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  path  %q", parsed.Path)))
+		sb.WriteString("\n")
+	}
+	if parsed.Content != "" {
+		// Show first few lines of content with a diff-style + prefix.
+		lines := strings.SplitN(parsed.Content, "\n", 6)
+		shown := lines
+		if len(lines) > 5 {
+			shown = lines[:5]
+		}
+		for _, l := range shown {
+			sb.WriteString(diffAddedStyle.Render("+" + l))
+			sb.WriteString("\n")
+		}
+		if len(lines) > 5 {
+			sb.WriteString(toolDimStyle.Render(fmt.Sprintf("  … %d more lines", len(lines)-5)))
+			sb.WriteString("\n")
+		}
+	}
+	result := strings.TrimRight(sb.String(), "\n")
+	if result == "" {
+		return renderStreamingGeneric(rawArgs, width)
+	}
+	return result + toolDimStyle.Render("▋")
+}
+
+// renderStreamingFilePath shows just the path (used for file_delete).
+func renderStreamingFilePath(rawArgs string, width int) string {
+	closed := closePartialJSON(rawArgs)
+	var parsed struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(closed), &parsed); err != nil || parsed.Path == "" {
+		return renderStreamingGeneric(rawArgs, width)
+	}
+	return toolDimStyle.Render(fmt.Sprintf("  path  %q▋", parsed.Path))
+}
+
+// renderStreamingCommand shows the command string as it streams in.
+func renderStreamingCommand(rawArgs string, width int) string {
+	closed := closePartialJSON(rawArgs)
+	var parsed struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(closed), &parsed); err != nil || parsed.Command == "" {
+		return renderStreamingGeneric(rawArgs, width)
+	}
+	cmd := parsed.Command
+	if width > 6 && len(cmd) > width-4 {
+		cmd = "…" + cmd[len(cmd)-(width-6):]
+	}
+	return toolDimStyle.Render("  $ " + cmd + "▋")
 }

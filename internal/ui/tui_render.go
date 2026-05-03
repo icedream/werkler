@@ -651,7 +651,7 @@ func (m Model) renderItem(item displayItem) string {
 				// Streaming: partially parse the incremental JSON and render
 				// it field-by-field so it looks structured even before the
 				// response is complete.
-				argsDisplay = renderStreamingArgs(item.toolRawArgs, m.width)
+				argsDisplay = renderStreamingArgs(item.toolRawArgs, item.toolName, m.width)
 			} else {
 				argsDisplay = formatExpandedArgs(item.toolRawArgs, m.width)
 			}

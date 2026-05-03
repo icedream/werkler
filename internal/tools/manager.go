@@ -2119,7 +2119,7 @@ func (m *Manager) handleFileWrite(ctx context.Context, args map[string]any) (str
 	return jsonResult(map[string]any{
 		"path":  path,
 		"bytes": len(content),
-		"diff":  computeUnifiedDiff(oldContent, content, path),
+		"diff":  ComputeUnifiedDiff(oldContent, content, path),
 	}), nil
 }
 
@@ -2213,7 +2213,7 @@ func (m *Manager) handleFileEdit(ctx context.Context, args map[string]any) (stri
 	}
 
 	newContent, _ := os.ReadFile(path)
-	diff := computeUnifiedDiff(string(data), string(newContent), path)
+	diff := ComputeUnifiedDiff(string(data), string(newContent), path)
 
 	if len(hunks) == 1 {
 		return jsonResult(map[string]any{
@@ -2291,7 +2291,7 @@ func (m *Manager) handleFileDelete(ctx context.Context, args map[string]any) (st
 	}
 	return jsonResult(map[string]any{
 		"deleted": deletePath,
-		"diff":    computeUnifiedDiff(string(oldBytes), "", deletePath),
+		"diff":    ComputeUnifiedDiff(string(oldBytes), "", deletePath),
 	}), nil
 }
 

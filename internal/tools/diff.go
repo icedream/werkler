@@ -12,7 +12,7 @@ const diffLineCap = 150
 // computeUnifiedDiff returns a unified diff string (--- a/path, +++ b/path,
 // @@ hunks) for the given old→new content transition.
 // Returns "" when old==new, either file is binary, or both are empty.
-func computeUnifiedDiff(oldContent, newContent, path string) string {
+func ComputeUnifiedDiff(oldContent, newContent, path string) string {
 	if oldContent == newContent {
 		return ""
 	}

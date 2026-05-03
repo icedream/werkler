@@ -2500,6 +2500,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.streamedTokens = 0
 				}
 				for _, tcc := range chunk.ToolCallChunks {
+					m.streamedTokens += countTokens(tcc.ArgumentsDelta) + countTokens(tcc.Name)
 					// Create item on the first chunk (has both ID and Name).
 					// Use a separate if (not else-if) so that a first chunk which
 					// also carries an ArgumentsDelta is handled correctly below.
