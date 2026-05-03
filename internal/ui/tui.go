@@ -2458,10 +2458,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				for _, tc := range chunk.Msg.ToolCalls {
 					debugLog("streamChunk: tool call id=%q name=%q", tc.ID, tc.Name)
-					// task_start is silent — no badge in the conversation view.
+					rawArgs, _ := json.Marshal(tc.Arguments)
 					if tc.Name == "task_start" {
 						m.toolCallIdx[tc.ID] = -1
+					} else if liveIdx, existed := m.toolCallIdx[tc.ID]; existed && liveIdx >= 0 {
+						// Live-streamed item already created; patch in the final display args.
+						m.items[liveIdx].toolArgs = toolCallDisplayArgs(tc.Name, tc.Arguments)
+						m.items[liveIdx].toolRawArgs = string(rawArgs)
+						m.items[liveIdx].toolNote = toolCallIntent(tc.Name, tc.Arguments)
 					} else {
+						// No live-streamed item (server sent no argument deltas): create now.
 						m.toolCallIdx[tc.ID] = len(m.items)
 						rawArgBytes, _ := json.Marshal(tc.Arguments)
 						m.items = append(m.items, displayItem{
@@ -2485,28 +2491,83 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, nextCmd)
 			}
 		default:
+			// Live tool call argument streaming: create/update tool call bubbles
+			// before any text content so the user sees the call immediately.
+			if len(chunk.ToolCallChunks) > 0 {
+				if m.state != stateStreaming {
+					m.state = stateStreaming
+					m.streamingStart = time.Now()
+					m.streamedTokens = 0
+				}
+				for _, tcc := range chunk.ToolCallChunks {
+					if tcc.ID != "" && tcc.Name != "" {
+						// First chunk: create the tool call item expanded (uncollapsed).
+						if tcc.Name != "task_start" {
+							m.toolCallIdx[tcc.ID] = len(m.items)
+							m.items = append(m.items, displayItem{
+								kind:        itemToolCall,
+								toolName:    tcc.Name,
+								toolArgs:    "",
+								toolRawArgs: "",
+								toolNote:    toolCallIntent(tcc.Name, nil),
+								toolStatus:  toolStatusPending,
+								handle:      tcc.ID,
+							})
+							// collapsedHandles defaults to false (expanded) for unknown keys.
+						} else {
+							m.toolCallIdx[tcc.ID] = -1
+						}
+					} else if tcc.ArgumentsDelta != "" {
+						// Subsequent chunks: append argument text to the live item.
+						// Scan pending tool call items for the one at the matching
+						// output index (tcc.Index). We match by order of creation
+						// since the Responses API uses output_index, not call_id.
+						n := 0
+						for _, itemIdx := range m.toolCallIdx {
+							if itemIdx < 0 || itemIdx >= len(m.items) {
+								continue
+							}
+							if n == tcc.Index {
+								m.items[itemIdx].toolRawArgs += tcc.ArgumentsDelta
+								break
+							}
+							n++
+						}
+					}
+				}
+				needRebuild = true
+			}
+
 			// Delta — reasoning or content fragment. On the first delta of any kind,
 			// reserve both a reasoning slot and an assistant slot in that order so
 			// reasoning is always rendered above the response regardless of arrival order.
 			// --- Token speed indicator updates ---
-			if m.streamingItemIdx < 0 {
+			if m.streamingItemIdx < 0 && (chunk.Delta != "" || chunk.ReasoningDelta != "") {
 				m.reasoningItemIdx = len(m.items)
 				m.items = append(m.items, displayItem{kind: itemReasoning, content: ""})
 				m.streamingItemIdx = len(m.items)
 				m.items = append(m.items, displayItem{kind: itemAssistant, content: ""})
-				m.state = stateStreaming
-				m.streamingStart = time.Now()
-				m.streamedTokens = 0
+				if m.state != stateStreaming {
+					m.state = stateStreaming
+					m.streamingStart = time.Now()
+					m.streamedTokens = 0
+				}
 			}
 			addTokens := countTokens(chunk.Delta) + countTokens(chunk.ReasoningDelta)
 			m.streamedTokens += addTokens
 
 			if chunk.ReasoningDelta != "" {
-				m.items[m.reasoningItemIdx].content += chunk.ReasoningDelta
-			} else {
-				m.items[m.streamingItemIdx].content += chunk.Delta
+				if m.reasoningItemIdx >= 0 {
+					m.items[m.reasoningItemIdx].content += chunk.ReasoningDelta
+				}
+			} else if chunk.Delta != "" {
+				if m.streamingItemIdx >= 0 {
+					m.items[m.streamingItemIdx].content += chunk.Delta
+				}
 			}
-			needRebuild = true
+			if chunk.Delta != "" || chunk.ReasoningDelta != "" {
+				needRebuild = true
+			}
 			cmds = append(cmds, readNextChunk(msg.ch))
 		}
 

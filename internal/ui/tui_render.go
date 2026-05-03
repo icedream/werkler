@@ -642,11 +642,23 @@ func (m Model) renderItem(item displayItem) string {
 				line += "\n" + noteIndent + ns.Render(note)
 			}
 		}
-		// While executing (uncollapsed) show pretty-printed args; after completion
-		// the bubble collapses and shows the diff stub if available.
+		// While executing (uncollapsed) show args.  During live streaming the JSON
+		// is partial/incomplete, so display raw text with a block cursor; once the
+		// call is complete (status != pending) pretty-print the full JSON.
 		if item.handle != "" && !m.collapsedHandles[item.handle] && item.toolRawArgs != "" {
-			if expanded := formatExpandedArgs(item.toolRawArgs, m.width); expanded != "" {
-				line += "\n" + expanded
+			var argsDisplay string
+			if item.toolStatus == toolStatusPending {
+				// Streaming: show incremental raw JSON with a block cursor.
+				raw := item.toolRawArgs
+				if m.width > 4 && len(raw) > m.width-4 {
+					raw = "…" + raw[len(raw)-(m.width-6):]
+				}
+				argsDisplay = toolDimStyle.Render("  " + raw + "█")
+			} else {
+				argsDisplay = formatExpandedArgs(item.toolRawArgs, m.width)
+			}
+			if argsDisplay != "" {
+				line += "\n" + argsDisplay
 			}
 		}
 		// Show expandable diff for file_edit / file_write / file_delete; only

@@ -118,16 +118,28 @@ type ToolCall struct {
 
 // StreamChunk is one event from a streaming completion.
 // Either Delta/ReasoningDelta (incremental text) or Done (final message + tool calls) or Err is set.
+// ToolCallChunk carries one streaming fragment of a tool call's arguments.
+// The first chunk for a given call has non-empty ID and Name; subsequent
+// chunks only carry ArgumentsDelta.  Index identifies the call within the
+// response when the AI issues multiple tool calls in parallel.
+type ToolCallChunk struct {
+	Index          int    // position in the response output
+	ID             string // call_id; non-empty on the first chunk only
+	Name           string // function name; non-empty on the first chunk only
+	ArgumentsDelta string // incremental JSON fragment
+}
+
 type StreamChunk struct {
-	Delta          string     // non-empty for incremental content text chunks
-	ReasoningDelta string     // non-empty for incremental reasoning/thinking chunks
-	Done           bool       // true on the final chunk; Msg is valid
-	Msg            Message    // valid only when Done && Err == nil
-	Err            error      // non-nil on error; stream is terminated
-	RateLimits     RateLimits // populated on Done; zero when provider doesn't report limits
-	FinishReason   string     // "stop", "length", "tool_calls", etc.; populated on Done
-	Usage          Usage      // token usage; populated on Done when provider reports it
-	ResponseID     string     // opaque server-assigned response ID (Responses API); used by IncrementalClient for previous_response_id
+	Delta          string          // non-empty for incremental content text chunks
+	ReasoningDelta string          // non-empty for incremental reasoning/thinking chunks
+	ToolCallChunks []ToolCallChunk // live-streaming tool call argument fragments
+	Done           bool            // true on the final chunk; Msg is valid
+	Msg            Message         // valid only when Done && Err == nil
+	Err            error           // non-nil on error; stream is terminated
+	RateLimits     RateLimits      // populated on Done; zero when provider doesn't report limits
+	FinishReason   string          // "stop", "length", "tool_calls", etc.; populated on Done
+	Usage          Usage           // token usage; populated on Done when provider reports it
+	ResponseID     string          // opaque server-assigned response ID (Responses API)
 }
 
 // Usage holds token consumption statistics for a single AI turn.
@@ -443,24 +455,37 @@ func (c *Client) CompleteStream(ctx context.Context, messages []Message, tools [
 				}
 			}
 
-			// Accumulate tool calls by index (streamed as fragments).
-			for _, tc := range delta.ToolCalls {
-				idx := 0
-				if tc.Index != nil {
-					idx = *tc.Index
+			// Accumulate tool calls by index and emit live ToolCallChunks so the
+			// TUI can display streaming argument fragments in real time.
+			if len(delta.ToolCalls) > 0 {
+				var tcc []ToolCallChunk
+				for _, tc := range delta.ToolCalls {
+					idx := 0
+					if tc.Index != nil {
+						idx = *tc.Index
+					}
+					acc, ok := toolAccum[idx]
+					if !ok {
+						acc = &accumTool{}
+						toolAccum[idx] = acc
+					}
+					if tc.ID != "" {
+						acc.id = tc.ID
+					}
+					if tc.Function.Name != "" {
+						acc.name += tc.Function.Name
+					}
+					acc.args.WriteString(tc.Function.Arguments)
+					tcc = append(tcc, ToolCallChunk{
+						Index:          idx,
+						ID:             tc.ID,
+						Name:           tc.Function.Name,
+						ArgumentsDelta: tc.Function.Arguments,
+					})
 				}
-				acc, ok := toolAccum[idx]
-				if !ok {
-					acc = &accumTool{}
-					toolAccum[idx] = acc
+				if !send(StreamChunk{ToolCallChunks: tcc}) {
+					return
 				}
-				if tc.ID != "" {
-					acc.id = tc.ID
-				}
-				if tc.Function.Name != "" {
-					acc.name += tc.Function.Name
-				}
-				acc.args.WriteString(tc.Function.Arguments)
 			}
 		}
 

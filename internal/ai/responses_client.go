@@ -435,6 +435,63 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 					}
 				}
 
+			case "response.output_item.added":
+				// A new output item has started.  For function_call items this is
+				// where we learn the call_id and name so we can emit the first
+				// live ToolCallChunk before any argument deltas arrive.
+				var evAdded struct {
+					OutputIndex int `json:"output_index"`
+					Item        struct {
+						Type   string `json:"type"`
+						CallID string `json:"call_id"`
+						Name   string `json:"name"`
+					} `json:"item"`
+				}
+				if jerr := json.Unmarshal([]byte(data), &evAdded); jerr == nil &&
+					evAdded.Item.Type == "function_call" && evAdded.Item.CallID != "" {
+					callID := evAdded.Item.CallID
+					if _, exists := toolAccumMap[callID]; !exists {
+						toolAccumMap[callID] = &accumToolCall{
+							idx:    toolAccumOrder,
+							callID: callID,
+							name:   evAdded.Item.Name,
+						}
+						toolAccumOrder++
+					}
+					// Emit the first chunk with ID and Name so the TUI can create
+					// the tool call bubble immediately.
+					if !send(StreamChunk{ToolCallChunks: []ToolCallChunk{{
+						Index: toolAccumMap[callID].idx,
+						ID:    callID,
+						Name:  evAdded.Item.Name,
+					}}}) {
+						return
+					}
+				}
+
+				// Forward to the text-delta handler if it's a text item.
+				_ = evAdded // suppress unused warning
+
+			case "response.function_call_arguments.delta":
+				// Incremental argument fragment for a function call.
+				var evDelta struct {
+					OutputIndex int    `json:"output_index"`
+					CallID      string `json:"call_id"`
+					Delta       string `json:"delta"`
+				}
+				if jerr := json.Unmarshal([]byte(data), &evDelta); jerr == nil &&
+					evDelta.Delta != "" && evDelta.CallID != "" {
+					if acc, exists := toolAccumMap[evDelta.CallID]; exists {
+						acc.args += evDelta.Delta
+					}
+					if !send(StreamChunk{ToolCallChunks: []ToolCallChunk{{
+						Index:          toolAccumMap[evDelta.CallID].idx,
+						ArgumentsDelta: evDelta.Delta,
+					}}}) {
+						return
+					}
+				}
+
 			case "response.output_item.done":
 				var ev respOutputItemDoneEvent
 				if jerr := json.Unmarshal([]byte(data), &ev); jerr == nil {
