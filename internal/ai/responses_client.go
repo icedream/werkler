@@ -232,7 +232,13 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 	go func() {
 		defer close(ch)
 
+		var sentFinal bool
 		send := func(sc StreamChunk) bool {
+			// Track whether we've sent a terminal chunk (Done or Err) so that the
+			// deferred sentinel below can detect a backend killed mid-stream.
+			if sc.Done || sc.Err != nil {
+				sentFinal = true
+			}
 			select {
 			case ch <- sc:
 				return true
@@ -240,6 +246,18 @@ func (c *ResponsesClient) CompleteStream(ctx context.Context, messages []Message
 				return false
 			}
 		}
+		// If the goroutine exits without having sent a Done or Err chunk the
+		// server was killed mid-stream.  Emit an explicit error so callers
+		// (especially the compaction handler) don't mistake a channel close
+		// for a successful completion.
+		defer func() {
+			if !sentFinal {
+				select {
+				case ch <- StreamChunk{Err: fmt.Errorf("responses stream: server closed connection without completing: %w", io.ErrUnexpectedEOF)}:
+				default:
+				}
+			}
+		}()
 
 		instructions, inputItems := toResponsesItems(ctx, messages)
 

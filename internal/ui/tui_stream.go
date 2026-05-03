@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"io"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/icedream/werkler/internal/ai"
@@ -49,7 +51,18 @@ func readNextCompactChunk(ch <-chan ai.StreamChunk, snap []ai.Message, modelName
 	return func() tea.Msg {
 		chunk, ok := <-ch
 		if !ok {
-			return compactChunkMsg{ch: ch, chunk: ai.StreamChunk{Done: true}, snap: snap, modelName: modelName, toolTokens: toolTokens, maxTokens: maxTokens}
+			// Channel closed without a terminal Done/Err chunk — the server was
+			// killed or the goroutine panicked.  Treat as an error so the
+			// compaction handler does not mistake this for a successful completion
+			// and proceed to apply a partial (or empty) summary.
+			return compactChunkMsg{
+				ch:         ch,
+				chunk:      ai.StreamChunk{Err: fmt.Errorf("compaction stream closed unexpectedly: %w", io.ErrUnexpectedEOF)},
+				snap:       snap,
+				modelName:  modelName,
+				toolTokens: toolTokens,
+				maxTokens:  maxTokens,
+			}
 		}
 		return compactChunkMsg{ch: ch, chunk: chunk, snap: snap, modelName: modelName, toolTokens: toolTokens, maxTokens: maxTokens}
 	}
