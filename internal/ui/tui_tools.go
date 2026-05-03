@@ -694,11 +694,20 @@ func renderStreamingFileEdit(rawArgs string, width int) string {
 	for _, edit := range parsed.Edits {
 		switch {
 		case edit.OldStr != "" && edit.NewStr != "":
+			// Both sides available — show the live unified diff.
 			if diff := tools.ComputeUnifiedDiff(edit.OldStr, edit.NewStr, parsed.Path); diff != "" {
 				sb.WriteString(renderDiff(diff, width))
 				sb.WriteString("\n")
 			}
+		case edit.OldStr != "":
+			// Only old_str so far — show as − lines (the content being replaced).
+			// new_str hasn't arrived yet; once it does the case above takes over.
+			for _, l := range strings.Split(edit.OldStr, "\n") {
+				sb.WriteString(diffRemovedStyle.Render("-" + l))
+				sb.WriteString("\n")
+			}
 		case edit.NewStr != "":
+			// new_str without old_str — show as + lines.
 			for _, l := range strings.Split(edit.NewStr, "\n") {
 				sb.WriteString(diffAddedStyle.Render("+" + l))
 				sb.WriteString("\n")
