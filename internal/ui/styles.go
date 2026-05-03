@@ -157,6 +157,16 @@ var (
 
 	diffRemovedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("196")) // red
+
+	diffHunkStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8")) // dim grey
+
+	// Intra-line highlight: bold+underline the differing characters within a line.
+	diffAddedHighStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("42")).Bold(true).Underline(true)
+
+	diffRemovedHighStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("196")).Bold(true).Underline(true)
 )
 
 func newGlamourRenderer(width int, style string) *glamour.TermRenderer {

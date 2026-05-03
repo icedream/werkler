@@ -642,6 +642,21 @@ func (m Model) renderItem(item displayItem) string {
 				line += "\n" + noteIndent + ns.Render(note)
 			}
 		}
+		// Show expandable diff for file_edit / file_write / file_delete.
+		if item.toolDiff != "" && item.handle != "" {
+			if m.collapsedHandles[item.handle] {
+				changed := countDiffChangedLines(item.toolDiff)
+				plural := "s"
+				if changed == 1 {
+					plural = ""
+				}
+				line += "\n" + toolDimStyle.Render(fmt.Sprintf(
+					"  \u2195 %d line%s changed  (use /expand %s to show diff)",
+					changed, plural, item.handle))
+			} else {
+				line += "\n" + renderDiff(item.toolDiff, m.width)
+			}
+		}
 		return line
 
 	case itemError:

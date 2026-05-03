@@ -2735,10 +2735,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch msg.toolName {
 				case "file_edit":
 					m.items[idx].toolNote = parseFileEditNote(msg.result)
+					if msg.diff != "" {
+						m.items[idx].toolDiff = msg.diff
+						m.items[idx].handle = msg.callID
+						m.collapsedHandles[msg.callID] = true
+					}
 				case "file_write":
 					m.items[idx].toolNote = parseFileWriteNote(msg.result)
+					if msg.diff != "" {
+						m.items[idx].toolDiff = msg.diff
+						m.items[idx].handle = msg.callID
+						m.collapsedHandles[msg.callID] = true
+					}
 				case "file_delete":
 					m.items[idx].toolNote = parseFileDeleteNote(msg.result)
+					if msg.diff != "" {
+						m.items[idx].toolDiff = msg.diff
+						m.items[idx].handle = msg.callID
+						m.collapsedHandles[msg.callID] = true
+					}
 				}
 			}
 			m.messages = append(m.messages, ai.Message{

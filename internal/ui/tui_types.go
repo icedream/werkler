@@ -147,6 +147,7 @@ type displayItem struct {
 	handle         string // process handle (itemProcessOutput only)
 	toolNote       string // secondary annotation: intent title (process_start) or diff summary (file_edit)
 	truncatedLines int    // lines dropped from the top of process output to stay within cap
+	toolDiff       string // unified diff for file_edit/write/delete; empty for other tools
 }
 
 // --- Tea messages ---
@@ -191,6 +192,7 @@ type toolResultMsg struct {
 	callID   string
 	toolName string
 	result   string
+	diff     string         // unified diff for file_edit/write/delete
 	parts    []ai.ImagePart // non-nil when the tool returned image data (e.g. read_image)
 	err      error
 }

@@ -2177,6 +2177,9 @@ func (m *Manager) handleFileWrite(ctx context.Context, args map[string]any) (str
 		}
 	}
 
+	oldBytes, _ := os.ReadFile(path)
+	oldContent := string(oldBytes)
+
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("file_write: %w", err)
 	}
@@ -2184,6 +2187,7 @@ func (m *Manager) handleFileWrite(ctx context.Context, args map[string]any) (str
 	return jsonResult(map[string]any{
 		"path":  path,
 		"bytes": len(content),
+		"diff":  computeUnifiedDiff(oldContent, content, path),
 	}), nil
 }
 
@@ -2276,19 +2280,23 @@ func (m *Manager) handleFileEdit(ctx context.Context, args map[string]any) (stri
 		return "", fmt.Errorf("file_edit: writing %s: %w", path, err)
 	}
 
+	newContent, _ := os.ReadFile(path)
+	diff := computeUnifiedDiff(string(data), string(newContent), path)
+
 	if len(hunks) == 1 {
 		return jsonResult(map[string]any{
 			"path":    path,
 			"line":    results[0].line,
 			"added":   results[0].added,
 			"removed": results[0].removed,
+			"diff":    diff,
 		}), nil
 	}
 	editsOut := make([]map[string]any, len(results))
 	for i, r := range results {
 		editsOut[i] = map[string]any{"line": r.line, "added": r.added, "removed": r.removed}
 	}
-	return jsonResult(map[string]any{"path": path, "edits": editsOut}), nil
+	return jsonResult(map[string]any{"path": path, "edits": editsOut, "diff": diff}), nil
 }
 
 // findMatchLines returns the starting line numbers for all occurrences of substr in text.
@@ -2326,10 +2334,15 @@ func (m *Manager) handleFileDelete(ctx context.Context, args map[string]any) (st
 		return "", fmt.Errorf("file_delete: %s is a directory; use process_start with rm -r to delete directories", path)
 	}
 
+	oldBytes, _ := os.ReadFile(path)
+
 	if err := os.Remove(path); err != nil {
 		return "", fmt.Errorf("file_delete: %w", err)
 	}
-	return jsonResult(map[string]any{"deleted": path}), nil
+	return jsonResult(map[string]any{
+		"deleted": path,
+		"diff":    computeUnifiedDiff(string(oldBytes), "", path),
+	}), nil
 }
 
 // ensure Manager implements chat.ToolManager.

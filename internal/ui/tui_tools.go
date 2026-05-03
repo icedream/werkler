@@ -63,7 +63,15 @@ func doCallTool(ctx context.Context, toolMgr *tools.Manager, session *chat.Sessi
 			defer toolMgr.SetActiveCallID("")
 		}
 		result, parts, err := session.CallToolWithParts(ctx, tc)
-		return toolResultMsg{tc.ID, tc.Name, result, parts, err}
+		// Extract unified diff from tool result JSON if present.
+		var diff string
+		if err == nil {
+			var resultJSON map[string]any
+			if jerr := json.Unmarshal([]byte(result), &resultJSON); jerr == nil {
+				diff, _ = resultJSON["diff"].(string)
+			}
+		}
+		return toolResultMsg{tc.ID, tc.Name, result, diff, parts, err}
 	}
 }
 
@@ -356,4 +364,104 @@ func fileWriteErrorNote(err error) string {
 		msg = msg[:100] + "…"
 	}
 	return msg
+}
+
+// renderDiff renders a unified diff string with coloured +/-/@@ lines and
+// intra-line character-level highlighting for changed lines.
+func renderDiff(raw string, width int) string {
+	_ = width // reserved for future line-wrapping
+	lines := strings.Split(raw, "\n")
+
+	// Collect removed/added lines in adjacent pairs for intra-line diff.
+	// Pass 1: group consecutive - then + lines into pairs.
+	type renderedLine struct{ s string }
+	result := make([]renderedLine, 0, len(lines))
+
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			result = append(result, renderedLine{diffHunkStyle.Render(line)})
+			i++
+		case strings.HasPrefix(line, "---"), strings.HasPrefix(line, "+++"):
+			// file header lines — dim, no intraline
+			result = append(result, renderedLine{toolDimStyle.Render(line)})
+			i++
+		case strings.HasPrefix(line, "-"):
+			// Collect a run of removed lines, then look ahead for matching added lines.
+			var removed, added []string
+			for i < len(lines) && strings.HasPrefix(lines[i], "-") {
+				removed = append(removed, strings.TrimPrefix(lines[i], "-"))
+				i++
+			}
+			for i < len(lines) && strings.HasPrefix(lines[i], "+") {
+				added = append(added, strings.TrimPrefix(lines[i], "+"))
+				i++
+			}
+			// Render pairs with intra-line highlighting; lone lines get plain colour.
+			pairs := len(removed)
+			if len(added) < pairs {
+				pairs = len(added)
+			}
+			for j, rem := range removed {
+				if j < pairs {
+					segs := tools.IntralineDiff(rem, added[j])
+					var sb strings.Builder
+					sb.WriteString(diffRemovedStyle.Render("-"))
+					for _, seg := range segs {
+						if seg.Removed {
+							sb.WriteString(diffRemovedHighStyle.Render(seg.Text))
+						} else if !seg.Added {
+							sb.WriteString(diffRemovedStyle.Render(seg.Text))
+						}
+					}
+					result = append(result, renderedLine{sb.String()})
+				} else {
+					result = append(result, renderedLine{diffRemovedStyle.Render("-" + rem)})
+				}
+			}
+			for j, add := range added {
+				if j < pairs {
+					segs := tools.IntralineDiff(removed[j], add)
+					var sb strings.Builder
+					sb.WriteString(diffAddedStyle.Render("+"))
+					for _, seg := range segs {
+						if seg.Added {
+							sb.WriteString(diffAddedHighStyle.Render(seg.Text))
+						} else if !seg.Removed {
+							sb.WriteString(diffAddedStyle.Render(seg.Text))
+						}
+					}
+					result = append(result, renderedLine{sb.String()})
+				} else {
+					result = append(result, renderedLine{diffAddedStyle.Render("+" + add)})
+				}
+			}
+		case strings.HasPrefix(line, "+"):
+			result = append(result, renderedLine{diffAddedStyle.Render(line)})
+			i++
+		default:
+			result = append(result, renderedLine{toolDimStyle.Render(line)})
+			i++
+		}
+	}
+
+	var sb strings.Builder
+	for _, r := range result {
+		sb.WriteString(r.s + "\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// countDiffChangedLines counts the number of added and removed lines in a diff.
+func countDiffChangedLines(diff string) int {
+	n := 0
+	for _, l := range strings.Split(diff, "\n") {
+		if (strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "+++")) ||
+			(strings.HasPrefix(l, "-") && !strings.HasPrefix(l, "---")) {
+			n++
+		}
+	}
+	return n
 }
