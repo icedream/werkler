@@ -684,8 +684,22 @@ func (m Model) renderItem(item displayItem) string {
 			if len(outLines) > maxLiveLines {
 				outLines = outLines[len(outLines)-maxLiveLines:]
 			}
+			// Indent is 2 spaces; leave at least 20 chars for content.
+			maxW := m.width - 2
+			if maxW < 20 {
+				maxW = 20
+			}
 			for _, l := range outLines {
-				line += "\n" + toolDimStyle.Render("  "+l)
+				// Wordwrap long lines so the viewport never clips mid-character.
+				wrapped := wordwrap.String(l, maxW)
+				for i, wl := range strings.Split(wrapped, "\n") {
+					if i == 0 {
+						line += "\n" + toolDimStyle.Render("  "+wl)
+					} else {
+						// Continuation lines get extra indent to show they wrapped.
+						line += "\n" + toolDimStyle.Render("    "+wl)
+					}
+				}
 			}
 		}
 		return line

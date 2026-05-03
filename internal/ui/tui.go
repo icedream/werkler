@@ -2670,10 +2670,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			// Output line — append to item and schedule next read.
 			if idx, ok := m.toolCallIdx[msg.callID]; ok && idx >= 0 {
-				if m.items[idx].toolLiveOutput != "" {
-					m.items[idx].toolLiveOutput += "\n"
+				out := &m.items[idx].toolLiveOutput
+				if *out != "" {
+					*out += "\n"
 				}
-				m.items[idx].toolLiveOutput += msg.event.Line
+				*out += msg.event.Line
+				// Keep only the last 200 lines in memory; the renderer shows
+				// at most 30 anyway, so older lines are never needed.
+				const keepLines = 200
+				if strings.Count(*out, "\n") > keepLines {
+					for strings.Count(*out, "\n") > keepLines {
+						if k := strings.IndexByte(*out, '\n'); k >= 0 {
+							*out = (*out)[k+1:]
+						} else {
+							break
+						}
+					}
+				}
 			}
 			cmds = append(cmds, readNextToolOutputChunk(msg.ch, msg.callID, msg.toolName))
 		}
