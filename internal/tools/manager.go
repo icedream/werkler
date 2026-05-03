@@ -1925,7 +1925,7 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 // --- File tool handlers ---
 
 // maxFileReadMultiBytes is the aggregate output cap for file_read_multi.
-const maxFileReadMultiBytes = 1 << 10 // 1 KiB
+const maxFileReadMultiBytes = 8 << 10 // 8 KiB
 
 func (m *Manager) handleFileReadMulti(ctx context.Context, args map[string]any) (string, error) {
 	rawRegions, _ := args["regions"].([]any)
