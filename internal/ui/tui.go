@@ -775,6 +775,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				}
+				// Check external commands before the built-in switch so they can
+				// also be dispatched with arguments without being caught by text != "".
+				if !handled {
+					if inputText := strings.TrimSpace(m.input.Value()); inputText != "" {
+						if ext, args, ok := matchExternal(inputText); ok {
+							m.input.Reset()
+							m.showCompletion = false
+							m.updateCompletion()
+							msg, extCmds := ext.Action(args)
+							if msg != "" {
+								m.items = append(m.items, displayItem{kind: itemInfo, content: msg})
+								needRebuild = true
+							}
+							cmds = append(cmds, extCmds...)
+							handled = true
+						}
+					}
+				}
 				if !handled {
 					text := strings.TrimSpace(m.input.Value())
 					switch {
@@ -1539,6 +1557,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					needRebuild = true
 				default:
+					// External commands that are safeWhileBusy can run immediately.
+					if ext, args, ok := matchExternal(text); ok && ext.SafeWhileBusy {
+						m.input.Reset()
+						m.showCompletion = false
+						m.updateCompletion()
+						msg, extCmds := ext.Action(args)
+						if msg != "" {
+							m.items = append(m.items, displayItem{kind: itemInfo, content: msg})
+							needRebuild = true
+						}
+						cmds = append(cmds, extCmds...)
+						break
+					}
 					// If the completion popup is showing and a safe-while-busy command
 					// is selected (exact name, no args), run it immediately.
 					if m.showCompletion {

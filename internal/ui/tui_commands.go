@@ -321,6 +321,9 @@ func init() {
 				for _, cmd := range slashCommands {
 					lines = append(lines, fmt.Sprintf("- `/%s` — %s", cmd.name, cmd.description))
 				}
+				for _, ext := range externalCommands {
+					lines = append(lines, fmt.Sprintf("- `/%s` — %s", ext.Name, ext.Description))
+				}
 				m.items = append(m.items, displayItem{
 					kind:    itemMarkdown,
 					content: strings.Join(lines, "\n"),
@@ -350,6 +353,18 @@ func (m Model) filteredCmds() []slashCommand {
 		}
 		if strings.HasPrefix(cmd.name, prefix) {
 			out = append(out, cmd)
+		}
+	}
+	// Include matching external commands.
+	for _, ext := range externalCommands {
+		if busy && !ext.SafeWhileBusy {
+			continue
+		}
+		if ext.Available != nil && !ext.Available() {
+			continue
+		}
+		if strings.HasPrefix(ext.Name, prefix) {
+			out = append(out, wrapExternal(ext, ""))
 		}
 	}
 	return out
