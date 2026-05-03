@@ -935,8 +935,14 @@ On success, returns the line number(s) where replacements were made.`,
 		},
 		{
 			def: ai.ToolDefinition{
-				Name:        "file_delete",
-				Description: "Delete a file (not a directory).",
+				Name: "file_delete",
+				Description: `Delete a file or symlink at the given path.
+
+If path is a symlink, only the symlink itself is removed — the file it
+points to is left untouched. To verify the target still exists afterwards
+you can read it with file_read.
+
+Never removes directories (use process_start with rm -r for that).`,
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -2246,28 +2252,46 @@ func (m *Manager) handleFileDelete(ctx context.Context, args map[string]any) (st
 	if rawPath == "" {
 		return "", fmt.Errorf("file_delete: path is required")
 	}
-	path := canonicalizePath(rawPath)
 
-	if err := m.checkSingleWrite(ctx, path); err != nil {
+	// resolvedPath follows symlinks and is used ONLY for permission checks:
+	// we want to reject deletion of a symlink that points to a protected target.
+	resolvedPath := canonicalizePath(rawPath)
+	if err := m.checkSingleWrite(ctx, resolvedPath); err != nil {
 		return "", err
 	}
 
-	info, err := os.Stat(path)
+	// deletePath is the path WITHOUT symlink resolution.  os.Remove on a symlink
+	// removes the symlink itself, not its target — which is the correct behaviour.
+	// Using canonicalizePath here would silently delete the target instead.
+	deletePath := resolvePath(rawPath, "")
+	if !filepath.IsAbs(deletePath) {
+		if cwd, err := os.Getwd(); err == nil {
+			deletePath = filepath.Join(cwd, deletePath)
+		}
+	}
+	deletePath = filepath.Clean(deletePath)
+
+	// Lstat does NOT follow symlinks — we inspect the path itself, not its target.
+	info, err := os.Lstat(deletePath)
 	if err != nil {
 		return "", fmt.Errorf("file_delete: %w", err)
 	}
-	if info.IsDir() {
-		return "", fmt.Errorf("file_delete: %s is a directory; use process_start with rm -r to delete directories", path)
+	if info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+		// Only reject real directories; symlinks-to-directories are fine to remove.
+		return "", fmt.Errorf("file_delete: %s is a directory; use process_start with rm -r to delete directories", deletePath)
 	}
 
-	oldBytes, _ := os.ReadFile(path)
+	// Read target content for the diff (if it is a regular file or a symlink
+	// to a regular file).  Errors are non-fatal; binary or unreadable targets
+	// simply produce no diff.
+	oldBytes, _ := os.ReadFile(resolvedPath)
 
-	if err := os.Remove(path); err != nil {
+	if err := os.Remove(deletePath); err != nil {
 		return "", fmt.Errorf("file_delete: %w", err)
 	}
 	return jsonResult(map[string]any{
-		"deleted": path,
-		"diff":    computeUnifiedDiff(string(oldBytes), "", path),
+		"deleted": deletePath,
+		"diff":    computeUnifiedDiff(string(oldBytes), "", deletePath),
 	}), nil
 }
 
