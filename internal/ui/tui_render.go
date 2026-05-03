@@ -648,24 +648,25 @@ func (m Model) renderItem(item displayItem) string {
 				line += "\n" + noteIndent + ns.Render(note)
 			}
 		}
-		// While executing (uncollapsed) show args.  During live streaming the JSON
-		// is partial/incomplete, so display raw text with a block cursor; once the
-		// call is complete (status != pending) pretty-print the full JSON.
+		// While executing (uncollapsed) show args via the tool-specific streaming
+		// renderer.  For completed file tools with a real diff, show the diff
+		// instead of falling back to pretty-printed JSON.
 		if item.handle != "" && !m.collapsedHandles[item.handle] && item.toolRawArgs != "" {
 			var argsDisplay string
-			if item.toolStatus == toolStatusPending || item.toolStatus == toolStatusRunning {
-				// Show the tool-specific structured view while the call is in flight:
-				// pending = still streaming args; running = approved/dispatched.
+			switch {
+			case item.toolStatus == toolStatusPending || item.toolStatus == toolStatusRunning:
 				argsDisplay = renderStreamingArgs(item.toolRawArgs, item.toolName, m.width)
-			} else {
+			case item.toolDiff != "":
+				// Completed file tool — prefer the real diff over pretty JSON.
+				argsDisplay = renderDiff(item.toolDiff, m.width)
+			default:
 				argsDisplay = formatExpandedArgs(item.toolRawArgs, m.width)
 			}
 			if argsDisplay != "" {
 				line += "\n" + argsDisplay
 			}
 		}
-		// Show expandable diff for file_edit / file_write / file_delete; only
-		// visible after the bubble has been collapsed (tool done).
+		// Show diff change-count stub when collapsed (tool done with a diff).
 		if item.toolDiff != "" && item.handle != "" && m.collapsedHandles[item.handle] {
 			changed := countDiffChangedLines(item.toolDiff)
 			plural := "s"
@@ -675,9 +676,6 @@ func (m Model) renderItem(item displayItem) string {
 			line += "\n" + toolDimStyle.Render(fmt.Sprintf(
 				"  \u2195 %d line%s changed  (use /expand %s to show diff)",
 				changed, plural, item.handle))
-		} else if item.toolDiff != "" && item.handle != "" && !m.collapsedHandles[item.handle] && item.toolRawArgs == "" {
-			// Re-expanded by user after collapse: show full diff.
-			line += "\n" + renderDiff(item.toolDiff, m.width)
 		}
 		return line
 
