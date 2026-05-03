@@ -605,7 +605,12 @@ func (m Model) renderItem(item displayItem) string {
 		badgeAndName := "  " + badge + " " + name
 		prefixW := lipgloss.Width(badgeAndName)
 		line := badgeAndName
-		if item.toolArgs != "" {
+		// Suppress the compact badge args while the expanded streaming block is
+		// active — the structured view below already shows the full arguments
+		// and the compact form flashes as raw JSON on the Done-chunk update.
+		expandedActive := item.handle != "" && !m.collapsedHandles[item.handle] &&
+			item.toolRawArgs != "" && item.toolStatus == toolStatusPending
+		if item.toolArgs != "" && !expandedActive {
 			args := item.toolArgs
 			sep := "  "
 			if m.width > prefixW+len(sep)+1 {
