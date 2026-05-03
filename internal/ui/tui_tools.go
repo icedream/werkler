@@ -613,6 +613,11 @@ func renderStreamingArgs(rawArgs, toolName string, width int) string {
 }
 
 // renderStreamingGeneric is the fallback: field-per-line with block cursor.
+// renderStreamingGeneric is the fallback for unknown tools.
+// Shows a stable cursor \u2014 never raw JSON text \u2014 while tokens arrive;
+// transitions to field-per-line once the JSON is parseable.
+// call's JSON arguments for the expanded tool-call bubble.
+// renderStreamingGeneric is the fallback: field-per-line with block cursor.
 func renderStreamingGeneric(rawArgs string, width int) string {
 	if rawArgs == "" {
 		return toolDimStyle.Render("  ▋")

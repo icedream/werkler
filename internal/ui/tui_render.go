@@ -609,7 +609,8 @@ func (m Model) renderItem(item displayItem) string {
 		// active — the structured view below already shows the full arguments
 		// and the compact form flashes as raw JSON on the Done-chunk update.
 		expandedActive := item.handle != "" && !m.collapsedHandles[item.handle] &&
-			item.toolRawArgs != "" && item.toolStatus == toolStatusPending
+			item.toolRawArgs != "" &&
+			(item.toolStatus == toolStatusPending || item.toolStatus == toolStatusRunning)
 		if item.toolArgs != "" && !expandedActive {
 			args := item.toolArgs
 			sep := "  "
@@ -652,10 +653,9 @@ func (m Model) renderItem(item displayItem) string {
 		// call is complete (status != pending) pretty-print the full JSON.
 		if item.handle != "" && !m.collapsedHandles[item.handle] && item.toolRawArgs != "" {
 			var argsDisplay string
-			if item.toolStatus == toolStatusPending {
-				// Streaming: partially parse the incremental JSON and render
-				// it field-by-field so it looks structured even before the
-				// response is complete.
+			if item.toolStatus == toolStatusPending || item.toolStatus == toolStatusRunning {
+				// Show the tool-specific structured view while the call is in flight:
+				// pending = still streaming args; running = approved/dispatched.
 				argsDisplay = renderStreamingArgs(item.toolRawArgs, item.toolName, m.width)
 			} else {
 				argsDisplay = formatExpandedArgs(item.toolRawArgs, m.width)
