@@ -19,7 +19,12 @@ import (
 // from the generated summary and the original message snapshot.  It is called
 // after the summarisation stream finishes.
 func computeCompactionParams(s string, snap []ai.Message, modelName string, toolTokens, maxTokens int) (keepTurns, totalTokens int, warning string) {
-	keepTurns = 2
+	// Start conservative: keep at most 1 recent turn verbatim.  The goal is
+	// NOT to fill context up to the compaction threshold (that would trigger
+	// another compaction almost immediately); instead we aim for a small
+	// post-compaction size — around 20 % of the window — so the AI has
+	// plenty of headroom to continue working.
+	keepTurns = 1
 
 	var newSysContent string
 	if len(snap) > 0 && snap[0].Role == "system" {
@@ -42,15 +47,22 @@ func computeCompactionParams(s string, snap []ai.Message, modelName string, tool
 
 	totalTokens = estimateTotal(keepTurns)
 	if maxTokens > 0 {
-		const threshold = 0.65
-		limit := int(float32(maxTokens) * threshold)
-		for totalTokens > limit && keepTurns > 0 {
-			if warning == "" {
-				warning = "Context is very full even after compaction — " +
-					"consider switching to a model with a larger context window."
-			}
-			keepTurns--
+		// Target ~20 % of the context window post-compaction.  If even 1 turn
+		// exceeds that, drop to 0 (summary only).  Never fill to the 65 %
+		// compaction threshold — that would guarantee an immediate re-trigger.
+		const targetFraction = 0.20
+		limit := int(float32(maxTokens) * targetFraction)
+		if totalTokens > limit {
+			keepTurns = 0
 			totalTokens = estimateTotal(keepTurns)
+		}
+		// Sanity-check: warn if even the summary alone is already over the
+		// compaction threshold (the model context window is very small or the
+		// summary is unexpectedly large).
+		const compactThreshold = 0.65
+		if totalTokens > int(float32(maxTokens)*compactThreshold) {
+			warning = "Context is very full even after compaction — " +
+				"consider switching to a model with a larger context window."
 		}
 	}
 	return
