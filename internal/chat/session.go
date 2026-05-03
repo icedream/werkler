@@ -135,6 +135,7 @@ type Session struct {
 	sessionWritePaths map[string]bool // paths approved for write (+ read) access this session
 	allowAll          bool            // when true, all tools and paths are approved without prompting
 	cwdReadPrefix     string          // if non-empty, reads under this absolute path are auto-approved
+	cwdWritePrefix    string          // if non-empty, write path-checks under this path are auto-approved (tool approval still required)
 
 	// mu protects disabledTools only; the other maps are only accessed from
 	// the TUI main goroutine and therefore do not need synchronisation.
@@ -289,11 +290,16 @@ func (s *Session) IsPathReadApproved(path string) bool {
 }
 
 // IsPathWriteApproved returns true if path may be written without interactive approval.
+// Note: returning true here only skips the PATH approval dialog; the tool call
+// (file_write, run_command, etc.) must still be approved via the tool dialog.
 func (s *Session) IsPathWriteApproved(path string) bool {
 	if s.allowAll {
 		return true
 	}
 	path = resolveForApproval(path)
+	if s.cwdWritePrefix != "" && pathCoveredBy(s.cwdWritePrefix, path) {
+		return true
+	}
 	for approved := range s.sessionWritePaths {
 		if pathCoveredBy(approved, path) {
 			return true
@@ -394,6 +400,12 @@ func (s *Session) IsToolEnabled(name string) bool {
 // auto-approved without prompting. Intended to be called once at startup
 // with the resolved working directory when auto_approve_cwd_read is true.
 func (s *Session) SetCWDReadPrefix(prefix string) { s.cwdReadPrefix = prefix }
+
+// SetCWDWritePrefix sets an absolute path prefix under which the PATH portion
+// of write-approval checks is auto-approved.  The TOOL approval dialog (e.g.
+// the "approve file_write?" prompt) is not affected — it must still be granted
+// by the user.  Intended to be called at startup with the working directory.
+func (s *Session) SetCWDWritePrefix(prefix string) { s.cwdWritePrefix = prefix }
 
 // SetWorkspaceDir auto-approves reads and writes under the given directory
 // for this session. Intended to be called with the per-session workspace

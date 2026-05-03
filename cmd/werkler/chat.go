@@ -105,6 +105,12 @@ func runChat(_ *cobra.Command, _ []string) error {
 			session.SetCWDReadPrefix(cwd)
 		}
 	}
+	// Write-path checks for files under the working directory are always
+	// auto-approved so a separate path-approval dialog never fires for CWD
+	// writes.  The tool call itself (file_write etc.) still requires approval.
+	if cwd, err := os.Getwd(); err == nil {
+		session.SetCWDWritePrefix(cwd)
+	}
 
 	reviewer, reviewerLabel, err := buildReviewerClient(providers)
 	if err != nil {

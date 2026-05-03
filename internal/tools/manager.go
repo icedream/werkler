@@ -665,6 +665,29 @@ func (m *Manager) checkWritePaths(ctx context.Context, command string, args []st
 	return unapproved
 }
 
+// checkShellCommandWritePaths is like checkWritePaths for shell=true commands.
+// The shell interpreter (bash/sh) is always trusted and skipped from approval;
+// the TOOL approval dialog already shows the user the full command.
+func (m *Manager) checkShellCommandWritePaths(ctx context.Context, shell, command, cwd string) []chat.PathAccessRequest {
+	approver := m.activeApprover(ctx)
+	if approver == nil {
+		return nil
+	}
+	// Pass the command as a -c argument so ExtractPaths can scan it for paths.
+	// Index 0 is the interpreter itself — always skip it.
+	paths := ExtractPaths(shell, []string{"-c", command}, cwd)
+	var unapproved []chat.PathAccessRequest
+	for i, p := range paths {
+		if i == 0 {
+			continue // interpreter is auto-approved
+		}
+		if !approver.IsPathWriteApproved(p) {
+			unapproved = append(unapproved, chat.PathAccessRequest{Path: p, Write: true})
+		}
+	}
+	return unapproved
+}
+
 // checkSingleRead returns a non-nil error if path lacks read approval.
 func (m *Manager) checkSingleRead(ctx context.Context, path string) *UnapprovedPathsError {
 	approver := m.activeApprover(ctx)
@@ -1786,12 +1809,17 @@ func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (st
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	// Check path approval before executing.
-	effectiveCommand := command
+	// For shell=true the interpreter (bash) is always trusted; check write paths
+	// extracted from the shell command string instead.  For direct execution
+	// check the command and its arguments as before.
 	if useShell {
-		effectiveCommand = "bash"
-	}
-	if unapproved := m.checkWritePaths(ctx, effectiveCommand, cmdArgs, cwd); len(unapproved) > 0 {
-		return "", &UnapprovedPathsError{Requests: unapproved}
+		if unapproved := m.checkShellCommandWritePaths(ctx, "bash", command, cwd); len(unapproved) > 0 {
+			return "", &UnapprovedPathsError{Requests: unapproved}
+		}
+	} else {
+		if unapproved := m.checkWritePaths(ctx, command, cmdArgs, cwd); len(unapproved) > 0 {
+			return "", &UnapprovedPathsError{Requests: unapproved}
+		}
 	}
 
 	// Set up output capture.
