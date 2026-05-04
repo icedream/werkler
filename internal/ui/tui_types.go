@@ -150,6 +150,8 @@ type displayItem struct {
 	truncatedLines int    // lines dropped from the top of process output to stay within cap
 	toolDiff       string // unified diff for file_edit/write/delete; empty for other tools
 	toolLiveOutput string // live stdout/stderr while run_command is executing; cleared on done
+	toolOutput     string // combined stdout+stderr stored after run_command completes; shown on /expand
+	toolResultNote string // short result summary set on completion (e.g. "exit: 0"); kept separate from intent title in toolNote
 }
 
 // --- Tea messages ---

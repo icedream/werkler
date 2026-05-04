@@ -14,6 +14,7 @@ import (
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
 	"github.com/icedream/werkler/internal/tools"
+	"github.com/muesli/reflow/wordwrap"
 )
 
 // doLoadImage loads an image from a local path or URL and returns it as an
@@ -592,6 +593,36 @@ func countDiffChangedLines(diff string) int {
 		}
 	}
 	return n
+}
+
+// renderToolOutput renders stored run_command output (combined stdout+stderr)
+// for the expanded tool-call bubble.  Each line is wordwrapped to width.
+func renderToolOutput(output string, width int) string {
+	if output == "" {
+		return ""
+	}
+	maxW := width - 4
+	if maxW < 20 {
+		maxW = 20
+	}
+	var sb strings.Builder
+	for i, l := range strings.Split(output, "\n") {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		wrapped := wordwrap.String(l, maxW)
+		for j, wl := range strings.Split(wrapped, "\n") {
+			if j > 0 {
+				sb.WriteByte('\n')
+			}
+			if j == 0 {
+				sb.WriteString(toolDimStyle.Render("  " + wl))
+			} else {
+				sb.WriteString(toolDimStyle.Render("    " + wl))
+			}
+		}
+	}
+	return sb.String()
 }
 
 // formatExpandedArgs returns a pretty-printed, indented rendering of a tool

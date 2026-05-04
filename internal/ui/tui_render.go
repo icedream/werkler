@@ -595,13 +595,9 @@ func (m Model) renderItem(item displayItem) string {
 			badge = toolDeniedStyle.Render("✗")
 		}
 		// For tools that carry an AI-formulated title (process_start, run_command),
-		// use the intent title as the primary display name while the call is in
-		// flight.  Once done/failed, fall back to the generic name so the result
-		// note (exit code etc.) can be shown as the secondary annotation instead.
+		// use the title as the primary display name in all states.
 		var name string
-		if item.toolNote != "" &&
-			(item.toolName == "process_start" || item.toolName == "run_command") &&
-			(item.toolStatus == toolStatusPending || item.toolStatus == toolStatusRunning) {
+		if item.toolNote != "" && (item.toolName == "process_start" || item.toolName == "run_command") {
 			name = toolNameStyle.Render(item.toolNote) + " " + toolDimStyle.Render("["+item.toolName+"]")
 		} else {
 			name = renderToolName(item.toolName)
@@ -629,13 +625,15 @@ func (m Model) renderItem(item displayItem) string {
 		if item.toolStatus == toolStatusDenied {
 			line += "  " + toolDeniedStyle.Render("(denied)")
 		}
-		// Show toolNote as a secondary annotation:
-		//  - always for tools that don't use it as a primary name
-		//  - for run_command/process_start only when done/failed (result note)
-		showNote := item.toolNote != "" &&
-			(item.toolName != "process_start" && item.toolName != "run_command" ||
-				item.toolStatus == toolStatusDone || item.toolStatus == toolStatusFailed)
-		if showNote {
+		// Show toolNote as a secondary annotation for tools that don't use it as
+		// the primary name.  For run_command/process_start show toolResultNote
+		// (the exit-code summary) instead, which is a separate field so the
+		// intent title in toolNote is never overwritten.
+		noteText := item.toolNote
+		if item.toolName == "process_start" || item.toolName == "run_command" {
+			noteText = item.toolResultNote
+		}
+		if noteText != "" {
 			var ns lipgloss.Style
 			if item.toolStatus == toolStatusFailed {
 				ns = errorStyle
@@ -643,7 +641,7 @@ func (m Model) renderItem(item displayItem) string {
 				ns = statusStyle
 			}
 			const noteIndent = "    "
-			note := item.toolNote
+			note := noteText
 			if m.width > len(noteIndent)+1 {
 				wrapped := wordwrap.String(note, m.width-len(noteIndent))
 				noteParts := strings.Split(wrapped, "\n")
@@ -664,6 +662,9 @@ func (m Model) renderItem(item displayItem) string {
 			switch {
 			case item.toolStatus == toolStatusPending || item.toolStatus == toolStatusRunning:
 				argsDisplay = renderStreamingArgs(item.toolRawArgs, item.toolName, m.width)
+			case item.toolOutput != "":
+				// Completed run_command — show the actual output instead of JSON args.
+				argsDisplay = renderToolOutput(item.toolOutput, m.width)
 			case item.toolDiff != "":
 				// Completed file tool — prefer the real diff over pretty JSON.
 				argsDisplay = renderDiff(item.toolDiff, m.width)
@@ -684,6 +685,17 @@ func (m Model) renderItem(item displayItem) string {
 			line += "\n" + toolDimStyle.Render(fmt.Sprintf(
 				"  \u2195 %d line%s changed  (use /expand %s to show diff)",
 				changed, plural, item.handle))
+		}
+		// Show output line-count stub when collapsed (run_command with stored output).
+		if item.toolOutput != "" && item.handle != "" && m.collapsedHandles[item.handle] {
+			n := strings.Count(item.toolOutput, "\n") + 1
+			plural := "s"
+			if n == 1 {
+				plural = ""
+			}
+			line += "\n" + toolDimStyle.Render(fmt.Sprintf(
+				"  ↕ %d line%s of output  (use /expand %s to show)",
+				n, plural, item.handle))
 		}
 		// Live stdout/stderr while run_command is executing (cleared on done).
 		if item.toolLiveOutput != "" && item.toolStatus == toolStatusRunning {

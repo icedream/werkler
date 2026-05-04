@@ -2818,7 +2818,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				switch msg.toolName {
 				case "run_command":
-					m.items[idx].toolNote = parseRunCommandNote(msg.result)
+					m.items[idx].toolResultNote = parseRunCommandNote(msg.result)
+					// Store combined output so the user can /expand to see full output.
+					var runResult struct {
+						Combined string `json:"combined_output"`
+					}
+					if json.Unmarshal([]byte(msg.result), &runResult) == nil && runResult.Combined != "" {
+						m.items[idx].toolOutput = strings.TrimRight(runResult.Combined, "\n")
+					}
 				case "file_edit":
 					m.items[idx].toolNote = parseFileEditNote(msg.result)
 					if msg.diff != "" {
