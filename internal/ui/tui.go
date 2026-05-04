@@ -2775,11 +2775,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if h := m.items[idx].handle; h != "" {
 						m.collapsedHandles[h] = true
 					}
-					switch msg.toolName {
-					case "file_edit":
-						m.items[idx].toolNote = fileEditErrorNote(msg.err)
-					case "file_write":
-						m.items[idx].toolNote = fileWriteErrorNote(msg.err)
+					if fn := toolDescriptor(msg.toolName).ParseErrorNote; fn != nil {
+						m.items[idx].toolNote = fn(msg.err)
 					}
 				}
 				m.messages = append(m.messages, ai.Message{
@@ -2816,37 +2813,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if h := m.items[idx].handle; h != "" {
 					m.collapsedHandles[h] = true
 				}
-				switch msg.toolName {
-				case "run_command":
-					m.items[idx].toolResultNote = parseRunCommandNote(msg.result)
-					// Store combined output so the user can /expand to see full output.
-					var runResult struct {
+				d := toolDescriptor(msg.toolName)
+				if fn := d.ParseResultNote; fn != nil {
+					if d.UsesIntentTitle {
+						m.items[idx].toolResultNote = fn(msg.result)
+					} else {
+						m.items[idx].toolNote = fn(msg.result)
+					}
+				}
+				if d.StoreResultOutput {
+					var out struct {
 						Combined string `json:"combined_output"`
 					}
-					if json.Unmarshal([]byte(msg.result), &runResult) == nil && runResult.Combined != "" {
-						m.items[idx].toolOutput = strings.TrimRight(runResult.Combined, "\n")
+					if json.Unmarshal([]byte(msg.result), &out) == nil && out.Combined != "" {
+						m.items[idx].toolOutput = strings.TrimRight(out.Combined, "\n")
 					}
-				case "file_edit":
-					m.items[idx].toolNote = parseFileEditNote(msg.result)
-					if msg.diff != "" {
-						m.items[idx].toolDiff = msg.diff
-						m.items[idx].handle = msg.callID
-						m.collapsedHandles[msg.callID] = true
-					}
-				case "file_write":
-					m.items[idx].toolNote = parseFileWriteNote(msg.result)
-					if msg.diff != "" {
-						m.items[idx].toolDiff = msg.diff
-						m.items[idx].handle = msg.callID
-						m.collapsedHandles[msg.callID] = true
-					}
-				case "file_delete":
-					m.items[idx].toolNote = parseFileDeleteNote(msg.result)
-					if msg.diff != "" {
-						m.items[idx].toolDiff = msg.diff
-						m.items[idx].handle = msg.callID
-						m.collapsedHandles[msg.callID] = true
-					}
+				}
+				if msg.diff != "" {
+					m.items[idx].toolDiff = msg.diff
+					m.items[idx].handle = msg.callID
+					m.collapsedHandles[msg.callID] = true
 				}
 			}
 			m.messages = append(m.messages, ai.Message{

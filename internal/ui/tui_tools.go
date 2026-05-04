@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -111,7 +110,7 @@ func readNextToolOutputChunk(ch <-chan toolOutputEvent, callID, toolName string)
 // that support it (currently run_command).  All other tools fall back to the
 // regular single-shot doCallTool path.
 func doCallToolStream(ctx context.Context, toolMgr *tools.Manager, session *chat.Session, tc ai.ToolCall) tea.Cmd {
-	if tc.Name != "run_command" {
+	if !toolDescriptor(tc.Name).StreamOutput {
 		return doCallTool(ctx, toolMgr, session, tc)
 	}
 
@@ -328,59 +327,13 @@ func snakeCaseToTitle(s string) string {
 
 // toolCallDisplayArgs returns a compact display string for tool call arguments.
 func toolCallDisplayArgs(toolName string, args map[string]any) string {
-	switch toolName {
-	case "file_edit", "file_write", "file_delete":
-		if path, ok := args["path"].(string); ok && path != "" {
-			return shortenHomePath(path)
-		}
-	case "process_start":
-		cmd, _ := args["command"].(string)
-		if cmd != "" {
-			parts := []string{cmd}
-			if rawArgs, ok := args["args"].([]any); ok {
-				for _, a := range rawArgs {
-					if s, ok := a.(string); ok {
-						parts = append(parts, strconv.Quote(s))
-					}
-				}
-			}
-			return "$ " + strings.Join(parts, " ")
-		}
-	case "run_command":
-		cmd, _ := args["command"].(string)
-		if cmd != "" {
-			useShell, _ := args["shell"].(bool)
-			if useShell {
-				return "$ " + cmd
-			}
-			parts := []string{cmd}
-			if rawArgs, ok := args["args"].([]any); ok {
-				for _, a := range rawArgs {
-					if s, ok := a.(string); ok {
-						parts = append(parts, s)
-					}
-				}
-			}
-			return "$ " + strings.Join(parts, " ")
-		}
-	case "connect_server":
-		if name, ok := args["name"].(string); ok && name != "" {
-			return "→ " + name
-		}
-	}
-	return formatArgsCompact(args)
+	return toolBadgeArgs(toolName, args)
 }
 
-// toolCallIntent returns a short intent annotation for tool calls that carry a
+// toolCallIntent returns a short intent annotation for tools that carry a
 // human-readable title field. Returns "" for all others.
 func toolCallIntent(toolName string, args map[string]any) string {
-	switch toolName {
-	case "process_start", "run_command":
-		if title, ok := args["title"].(string); ok {
-			return title
-		}
-	}
-	return ""
+	return toolIntent(toolName, args)
 }
 
 // parseFileEditNote extracts a human-readable annotation from a successful
@@ -757,22 +710,9 @@ func jsonKeysInOrder(s string) []string {
 	return keys
 }
 
-// renderStreamingArgs renders partially-received tool call arguments in a
-// tool-aware format.  When the tool name is known a dedicated renderer is
-// used (e.g. file_edit shows a live diff); otherwise a generic field-per-line
-// view is shown with a block cursor on the last streaming field.
+// renderStreamingArgs renders partially-received tool call arguments.
 func renderStreamingArgs(rawArgs, toolName string, width int) string {
-	switch toolName {
-	case "file_edit":
-		return renderStreamingFileEdit(rawArgs, width)
-	case "file_write":
-		return renderStreamingFileWrite(rawArgs, width)
-	case "file_delete":
-		return renderStreamingFilePath(rawArgs, width)
-	case "run_command", "process_start":
-		return renderStreamingCommand(rawArgs, width)
-	}
-	return renderStreamingGeneric(rawArgs, width)
+	return toolStreamingRenderer(toolName)(rawArgs, width)
 }
 
 // renderStreamingGeneric is the fallback: field-per-line with block cursor.

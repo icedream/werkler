@@ -597,7 +597,7 @@ func (m Model) renderItem(item displayItem) string {
 		// For tools that carry an AI-formulated title (process_start, run_command),
 		// use the title as the primary display name in all states.
 		var name string
-		if item.toolNote != "" && (item.toolName == "process_start" || item.toolName == "run_command") {
+		if item.toolNote != "" && toolDescriptor(item.toolName).UsesIntentTitle {
 			name = toolNameStyle.Render(item.toolNote) + " " + toolDimStyle.Render("["+item.toolName+"]")
 		} else {
 			name = renderToolName(item.toolName)
@@ -630,7 +630,7 @@ func (m Model) renderItem(item displayItem) string {
 		// (the exit-code summary) instead, which is a separate field so the
 		// intent title in toolNote is never overwritten.
 		noteText := item.toolNote
-		if item.toolName == "process_start" || item.toolName == "run_command" {
+		if toolDescriptor(item.toolName).UsesIntentTitle {
 			noteText = item.toolResultNote
 		}
 		if noteText != "" {
@@ -963,7 +963,7 @@ func (m Model) agentWizardView() string {
 
 // toolDetailView renders the full-screen detail view for a single tool.
 func (m Model) toolDetailView() string {
-	title := headerStyle.Render(toolFriendlyName(m.toolDetailItem.name))
+	title := headerStyle.Render(toolDescriptor(m.toolDetailItem.name).FriendlyName)
 	raw := toolDimStyle.Render("[" + m.toolDetailItem.name + "]")
 	hint := statusStyle.Render("  ↑/↓ scroll  ·  esc/enter back")
 	header := title + " " + raw + hint
@@ -1062,6 +1062,5 @@ func buildInstalledItems(servers []config.MCPServerConfig) []list.Item {
 // renderToolName renders a tool name as "Friendly Name [raw_name]" where the
 // raw name is grayed out. Use this wherever tool names are shown to the user.
 func renderToolName(name string) string {
-	friendly := toolFriendlyName(name)
-	return toolNameStyle.Render(friendly) + " " + toolDimStyle.Render("["+name+"]")
+	return toolNameStyle.Render(toolDescriptor(name).FriendlyName) + " " + toolDimStyle.Render("["+name+"]")
 }

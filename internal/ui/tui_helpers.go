@@ -818,14 +818,7 @@ func (m *Model) processNextCall() tea.Cmd {
 
 	// ask_user, confirm_plan, subagent tools, use_skill, use_agent, task_start, todo_*, memory_*, and connect_server
 	// are always dispatched immediately without an approval dialog.
-	if m.session.IsApproved(call.Name) || call.Name == "ask_user" || call.Name == "confirm_plan" ||
-		m.session.IsSubagentTool(call.Name) ||
-		call.Name == "use_skill" || call.Name == "use_agent" || call.Name == "task_start" ||
-		call.Name == "todo_add" || call.Name == "todo_update" || call.Name == "todo_list" ||
-		call.Name == "todo_add_many" ||
-		call.Name == "memory_list" || call.Name == "memory_read" || call.Name == "memory_write" ||
-		call.Name == "connect_server" ||
-		call.Name == "calculate" || call.Name == "sleep" {
+	if m.session.IsApproved(call.Name) || toolDescriptor(call.Name).AutoApprove || m.session.IsSubagentTool(call.Name) {
 		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusRunning
 		}
