@@ -9,13 +9,8 @@
 package tools
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io/fs"
-	"net/http"
-	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -23,9 +18,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
-	"time"
-	"unicode/utf8"
 
 	"github.com/icedream/werkler/docs"
 	"github.com/icedream/werkler/internal/agents"
@@ -36,6 +28,16 @@ import (
 	"github.com/icedream/werkler/internal/process"
 	"github.com/icedream/werkler/internal/skills"
 	"github.com/icedream/werkler/internal/todostore"
+
+	agenttools "github.com/icedream/werkler/internal/tools/agent"
+	filetools "github.com/icedream/werkler/internal/tools/file"
+	memorytools "github.com/icedream/werkler/internal/tools/memory"
+	processtools "github.com/icedream/werkler/internal/tools/process"
+	servertools "github.com/icedream/werkler/internal/tools/server"
+	tasktools "github.com/icedream/werkler/internal/tools/task"
+	"github.com/icedream/werkler/internal/tools/toolutil"
+	usertools "github.com/icedream/werkler/internal/tools/user"
+	utiltools "github.com/icedream/werkler/internal/tools/util"
 )
 
 // PathApprover checks path-level access approvals.
@@ -154,6 +156,16 @@ type Manager struct {
 	// non-nil = only these tools (plus infra tools) are visible and callable.
 	allowedTools []string
 	filterMu     sync.RWMutex
+
+	// Subpackage handlers — each encapsulates one category of built-in tools.
+	fileHandler    *filetools.Handler
+	processHandler *processtools.Handler
+	serverHandler  *servertools.Handler
+	userHandler    *usertools.Handler
+	taskHandler    *tasktools.Handler
+	memoryHandler  *memorytools.Handler
+	agentHandler   *agenttools.Handler
+	utilHandler    *utiltools.Handler
 }
 
 type builtin struct {
@@ -175,6 +187,14 @@ func New(wrapped chat.ToolManager, pathApprover PathApprover, notify OutputNotif
 		processes:    pm,
 		pathApprover: pathApprover,
 	}
+	m.fileHandler = filetools.NewHandler(m)
+	m.processHandler = processtools.NewHandler(m)
+	m.serverHandler = servertools.NewHandler(m.mcpMgr)
+	m.userHandler = usertools.NewHandler(m)
+	m.taskHandler = tasktools.NewHandler(m)
+	m.memoryHandler = memorytools.NewHandler(m)
+	m.agentHandler = agenttools.NewHandler(m)
+	m.utilHandler = utiltools.NewHandler()
 	m.builtins = m.makeBuiltins()
 	return m
 }
@@ -622,23 +642,6 @@ func resolvePath(p, baseDir string) string {
 
 // canonicalizePath returns the canonical absolute path for permission checks.
 // For existing paths it resolves symlinks; for non-existent paths (new files)
-// it resolves the parent directory's symlinks and appends the basename.
-func canonicalizePath(p string) string {
-	p = resolvePath(p, "")
-	if !filepath.IsAbs(p) {
-		if cwd, err := os.Getwd(); err == nil {
-			p = filepath.Join(cwd, p)
-		}
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return resolved
-	}
-	// Path does not exist yet — resolve parent and join.
-	if resolvedDir, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
-		return filepath.Join(resolvedDir, filepath.Base(p))
-	}
-	return filepath.Clean(p)
-}
 
 // checkWritePaths returns unapproved paths from ExtractPaths.
 // The command binary (first path) requires execute-level approval; all other
@@ -688,343 +691,68 @@ func (m *Manager) checkShellCommandWritePaths(ctx context.Context, shell, comman
 	return unapproved
 }
 
-// checkSingleRead returns a non-nil error if path lacks read approval.
-func (m *Manager) checkSingleRead(ctx context.Context, path string) *UnapprovedPathsError {
-	approver := m.activeApprover(ctx)
-	if approver == nil {
-		return nil
-	}
-	if !approver.IsPathReadApproved(path) {
-		return &UnapprovedPathsError{Requests: []chat.PathAccessRequest{{Path: path, Write: false}}}
-	}
-	return nil
-}
-
-// checkSingleWrite returns a non-nil error if path lacks write approval.
-func (m *Manager) checkSingleWrite(ctx context.Context, path string) *UnapprovedPathsError {
-	approver := m.activeApprover(ctx)
-	if approver == nil {
-		return nil
-	}
-	if !approver.IsPathWriteApproved(path) {
-		return &UnapprovedPathsError{Requests: []chat.PathAccessRequest{{Path: path, Write: true}}}
-	}
-	return nil
-}
-
 // --- Built-in tool definitions ---
 
 func (m *Manager) makeBuiltins() []builtin {
-	builtins := []builtin{
-		{
-			def: ai.ToolDefinition{
-				Name: "process_start",
-				Description: `Start a subprocess. Returns a handle for subsequent interaction.
-Use pty=true for interactive programs (editors, REPLs, password prompts) — output will contain ANSI codes that are stripped before being returned to you.
-Use pty=false (default) for non-interactive commands (builds, scripts) — output is clean plain text.
-
-IMPORTANT: "command" is the executable only; "args" are the arguments WITHOUT the command name.
-Example — to run "git status --short": command="git", args=["status", "--short"].
-Do NOT put "git" (or any command name) in args.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"command":         map[string]any{"type": "string", "description": "Absolute path or PATH-resolvable command name"},
-						"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command arguments only — do NOT include the command name as the first element (unlike argv[0])"},
-						"title":           map[string]any{"type": "string", "description": "REQUIRED. Short human-readable phrase describing the purpose of this command (e.g. \"Build project\", \"Run tests\", \"Search for TODO comments\"). Shown to the user in the approval dialog and chat log."},
-						"cwd":             map[string]any{"type": "string", "description": "Working directory; empty = inherit werkler's cwd"},
-						"pty":             map[string]any{"type": "boolean", "description": "Allocate a PTY (pseudo-terminal); required for interactive programs"},
-						"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Extra environment variables merged on top of the current environment"},
-						"timeout_seconds": map[string]any{"type": "number", "description": "Seconds to wait for initial output before returning (0 = don't wait, default 5)"},
-					},
-					"required": []string{"command", "title"},
-				},
-			},
-			handle: m.handleProcessStart,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name:        "process_send",
-				Description: "Send text to a running process's stdin / PTY.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"handle":          map[string]any{"type": "string", "description": "Process handle from process_start"},
-						"text":            map[string]any{"type": "string", "description": "Text to write"},
-						"timeout_seconds": map[string]any{"type": "number", "description": "Seconds to wait for new output after sending (default 2)"},
-					},
-					"required": []string{"handle", "text"},
-				},
-			},
-			handle: m.handleProcessSend,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name: "process_send_key",
-				Description: `Send a named key to a running process.
-Available keys: enter, tab, escape, backspace, delete, home, end, page_up, page_down,
-up, down, left, right, ctrl+a through ctrl+z, f1-f12.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"handle":          map[string]any{"type": "string", "description": "Process handle from process_start"},
-						"key":             map[string]any{"type": "string", "description": "Key name, e.g. \"enter\", \"ctrl+c\", \"up\""},
-						"timeout_seconds": map[string]any{"type": "number", "description": "Seconds to wait for new output after sending (default 2)"},
-					},
-					"required": []string{"handle", "key"},
-				},
-			},
-			handle: m.handleProcessSendKey,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name:        "process_read",
-				Description: "Read output from a running process since the last read.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"handle":          map[string]any{"type": "string", "description": "Process handle from process_start"},
-						"timeout_seconds": map[string]any{"type": "number", "description": "Seconds to wait for new output (default 5)"},
-					},
-					"required": []string{"handle"},
-				},
-			},
-			handle: m.handleProcessRead,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name:        "process_stop",
-				Description: "Stop a running process and collect its final output.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"handle": map[string]any{"type": "string", "description": "Process handle from process_start"},
-						"force":  map[string]any{"type": "boolean", "description": "Use SIGKILL instead of SIGTERM (default false)"},
-					},
-					"required": []string{"handle"},
-				},
-			},
-			handle: m.handleProcessStop,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name: "run_command",
-				Description: `Run a command synchronously and return its output in a single call. No polling required.
-Use this for one-shot non-interactive commands (builds, scripts, grep, CLI tools, etc.).
-Do NOT use for interactive programs, programs that require a TTY, or long-running background processes -- use process_start for those.
-
-IMPORTANT: "command" is the executable only; "args" are the arguments WITHOUT the command name.
-Example -- to run "git status --short": command="git", args=["status", "--short"].
-Do NOT put "git" (or any command name) in args.
-
-SHELL MODE: Any time your command uses pipes (|), redirects (>, >>), logical operators (&&, ||),
-subshells ($(...)), globs, or any other shell syntax, you MUST set shell=true and put the entire
-command string in "command" with no "args".
-Examples requiring shell=true: "ps aux | grep nginx", "cat /proc/loadavg", "free -m && uptime",
-"ls *.go | wc -l", "top -bn1 | head -20".
-Examples NOT requiring shell=true: "git", "grep", "uptime", "free", "ps" (with args instead).`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"command":         map[string]any{"type": "string", "description": "Absolute path or PATH-resolvable command name. When shell=true, this is the full shell command string (e.g. \"ps aux | grep nginx\")."},
-						"args":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command arguments only -- do NOT include the command name. Must not be provided when shell=true."},
-						"shell":           map[string]any{"type": "boolean", "description": "If true, run via bash -c. REQUIRED for any command containing |, &&, ||, >, >>, $(...), or other shell syntax."},
-						"cwd":             map[string]any{"type": "string", "description": "Working directory; empty = inherit werkler's cwd"},
-						"env":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Extra environment variables merged on top of the current environment"},
-						"timeout_seconds": map[string]any{"type": "number", "description": "Seconds to wait before killing the process (default 30, max 600)"},
-						"title":           map[string]any{"type": "string", "description": "REQUIRED. Short human-readable phrase describing what is being run. Shown in the approval dialog."},
-					},
-					"required": []string{"command", "title"},
-				},
-			},
-			handle: m.handleRunCommand,
-		},
-		// --- File tools ---
-		{
-			def: ai.ToolDefinition{
-				Name: "file_read_multi",
-				Description: `Read text file regions, multiple in one call possible. Returns each region labeled with a header line.
-Each region may specify start_line and end_line (1-indexed, inclusive); omit both to read the full file.
-Partial failures are reported inline — other regions still return their content.
-Total output is capped at 1 KiB across all regions.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"regions": map[string]any{
-							"type":        "array",
-							"description": "List of regions to read",
-							"items": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"path":       map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
-									"start_line": map[string]any{"type": "number", "description": "First line to return (1-indexed, default 1)"},
-									"end_line":   map[string]any{"type": "number", "description": "Last line to return (1-indexed, default: end of file)"},
-								},
-								"required": []string{"path"},
-							},
-						},
-					},
-					"required": []string{"regions"},
-				},
-			},
-			handle: m.handleFileReadMulti,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name:        "read_image",
-				Description: "Load a local image file so you can see its visual content. ONLY use for the following supported formats: PNG, JPEG, GIF, WebP.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{"type": "string", "description": "Absolute or ~ path to the image file"},
-					},
-					"required": []string{"path"},
-				},
-			},
-			handleWithParts: m.handleReadImage,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name:        "file_list",
-				Description: "List the contents of a directory. Returns a JSON array of {name, type, size} objects.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{"type": "string", "description": "Absolute or ~ path to the directory"},
-					},
-					"required": []string{"path"},
-				},
-			},
-			handle: m.handleFileList,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name: "file_write",
-				Description: `Create a new file or overwrite an existing file with the given text content.
-This is the correct tool to use whenever you need to write a file whole.
-To create a new file including its parent directories, set create_parents to true.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path":           map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
-						"content":        map[string]any{"type": "string", "description": "File contents (UTF-8)"},
-						"create_parents": map[string]any{"type": "boolean", "description": "Create parent directories if they don't exist (default false)"},
-					},
-					"required": []string{"path", "content"},
-				},
-			},
-			handle: m.handleFileWrite,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name: "file_edit",
-				Description: `Replace one or more exact-string occurrences in a file.
-
-Single-hunk form (most common):
-  path, old_str, new_str — replace one occurrence of old_str with new_str.
-
-Multi-hunk form (use when making several changes to the same file in one call):
-  path, edits: [{old_str, new_str}, …] — apply each replacement in order.
-  All hunks are validated before any writes; the call fails atomically if any
-  old_str is not found or matches more than once.
-
-In both forms: the match must be exact (including whitespace). Returns an error
-if old_str appears zero times (not found) or more than once (ambiguous — include
-more surrounding context).
-On success, returns the line number(s) where replacements were made.
-
-Field generation order (important for live diff rendering):
-  Generate fields in this order: path first, then old_str, then new_str.
-  For multi-hunk edits: path first, then each edit's old_str before new_str.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path":    map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
-						"old_str": map[string]any{"type": "string", "description": "Exact text to find and replace (single-hunk form)"},
-						"new_str": map[string]any{"type": "string", "description": "Replacement text (single-hunk form)"},
-						"edits": map[string]any{
-							"type":        "array",
-							"description": "List of {old_str, new_str} pairs applied in order (multi-hunk form). Mutually exclusive with top-level old_str/new_str.",
-							"items": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"old_str": map[string]any{"type": "string"},
-									"new_str": map[string]any{"type": "string"},
-								},
-								"required": []string{"old_str", "new_str"},
-							},
-						},
-					},
-					"required": []string{"path"},
-				},
-			},
-			handle: m.handleFileEdit,
-		},
-		{
-			def: ai.ToolDefinition{
-				Name: "file_delete",
-				Description: `Delete a file or symlink at the given path.
-
-If path is a symlink, only the symlink itself is removed — the file it
-points to is left untouched. To verify the target still exists afterwards
-you can read it with file_read.
-
-Never removes directories (use process_start with rm -r for that).`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{"type": "string", "description": "Absolute or ~ path to the file"},
-					},
-					"required": []string{"path"},
-				},
-			},
-			handle: m.handleFileDelete,
-		},
-		// --- Interaction tools ---
-		{
-			def: ai.ToolDefinition{
-				Name: "ask_user",
-				Description: `Ask the user a direct question and wait for their answer.
-Use this when the task requires a decision or information that only the user can provide.
-
-REQUIRED: When there are 2–4 known valid answers, you MUST put them in the "choices" array — do NOT embed numbered options in the question string itself.
-WRONG: question="What should I do?\n\n1. Deploy now\n2. Review first", choices=[]
-RIGHT: question="What should I do?", choices=["Deploy now", "Review first"]
-
-Set allow_freeform to false to restrict the user strictly to those choices.
-Set recommended_choice to highlight a suggested option.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"question": map[string]any{
-							"type":        "string",
-							"description": "The question to present to the user. Must be a plain sentence ending in '?'. Do NOT include numbered or bulleted options — put those in the 'choices' array.",
-						},
-						"choices": map[string]any{
-							"type":        "array",
-							"items":       map[string]any{"type": "string"},
-							"description": "Predefined answer choices (e.g. [\"Yes\", \"No\"] or [\"Option A\", \"Option B\", \"Option C\"]). Always populate this when there are 2–4 known valid answers.",
-						},
-						"recommended_choice": map[string]any{
-							"type":        "string",
-							"description": "The choice you recommend; must exactly match one of the choices",
-						},
-						"allow_freeform": map[string]any{
-							"type":        "boolean",
-							"description": "Whether to also accept a custom typed answer (default: true)",
-						},
-					},
-					"required": []string{"question"},
-				},
-			},
-			handle: m.handleAskUser,
-		},
+	// Lazy-initialise handlers so tests that construct Manager directly (not via
+	// New()) still get a working set of tools.
+	if m.fileHandler == nil {
+		m.fileHandler = filetools.NewHandler(m)
+	}
+	if m.processHandler == nil {
+		m.processHandler = processtools.NewHandler(m)
+	}
+	if m.serverHandler == nil {
+		m.serverHandler = servertools.NewHandler(m.mcpMgr)
+	}
+	if m.userHandler == nil {
+		m.userHandler = usertools.NewHandler(m)
+	}
+	if m.taskHandler == nil {
+		m.taskHandler = tasktools.NewHandler(m)
+	}
+	if m.memoryHandler == nil {
+		m.memoryHandler = memorytools.NewHandler(m)
+	}
+	if m.agentHandler == nil {
+		m.agentHandler = agenttools.NewHandler(m)
+	}
+	if m.utilHandler == nil {
+		m.utilHandler = utiltools.NewHandler()
 	}
 
+	// Collect Builtin definitions from all subpackage handlers, then convert
+	// them to the internal builtin type used by the dispatcher.
+	var all []toolutil.Builtin
+
+	// Process and command tools.
+	all = append(all, m.processHandler.Tools()...)
+
+	// File system tools.
+	all = append(all, m.fileHandler.Tools()...)
+
+	// User interaction.
+	all = append(all, m.userHandler.Tools()...)
+
+	// Task management and todo list.
+	all = append(all, m.taskHandler.Tools()...)
+
+	// Project memory.
+	if m.memoryStore != nil {
+		all = append(all, m.memoryHandler.Tools()...)
+	}
+
+	// Skill and agent activation.
+	all = append(all, m.agentHandler.Tools()...)
+
+	// Utility (calculate, sleep).
+	all = append(all, m.utilHandler.Tools()...)
+
+	// Subagents: each is registered as its own named tool that dispatches via runSubagent.
 	for i := range m.subagents {
-		sa := &m.subagents[i]
-		builtins = append(builtins, builtin{
-			def: ai.ToolDefinition{
+		sa := m.subagents[i] // local copy for closure capture
+		all = append(all, toolutil.Builtin{
+			Def: ai.ToolDefinition{
 				Name:        sa.name,
 				Description: sa.description,
 				InputSchema: map[string]any{
@@ -1032,1358 +760,66 @@ Set recommended_choice to highlight a suggested option.`,
 					"properties": map[string]any{
 						"context": map[string]any{
 							"type":        "string",
-							"description": "The content to submit for review",
-						},
-						"focus": map[string]any{
-							"type":        "string",
-							"description": `Optional: specific aspects to focus on (e.g. "clarity", "accuracy")`,
+							"description": "The plan, code, or content to review — provide full context so the reviewer can give useful feedback.",
 						},
 					},
 					"required": []string{"context"},
 				},
 			},
-			handle: func(ctx context.Context, args map[string]any) (string, error) {
-				return m.runSubagent(ctx, sa, args)
+			Handle: func(ctx context.Context, args map[string]any) (string, error) {
+				return m.runSubagent(ctx, &sa, args)
 			},
 		})
 	}
 
-	if len(m.skills) > 0 {
-		names := make([]any, len(m.skills))
-		for i, s := range m.skills {
-			names[i] = s.Name
-		}
-		builtins = append(builtins, builtin{
-			def: ai.ToolDefinition{
-				Name:        "use_skill",
-				Description: "Load the instructions for a named skill into the conversation.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"name": map[string]any{
-							"type":        "string",
-							"enum":        names,
-							"description": "Name of the skill to load",
-						},
-					},
-					"required": []string{"name"},
-				},
-			},
-			handle: m.handleUseSkill,
-		})
-	}
+	// MCP server connection (only when servers are configured).
+	// Rebuild the server handler so it picks up the current mcpMgr state.
+	m.serverHandler = servertools.NewHandler(m.mcpMgr)
+	all = append(all, m.serverHandler.Tools()...)
 
-	if len(m.agents) > 0 {
-		names := make([]any, len(m.agents))
-		for i, a := range m.agents {
-			names[i] = a.Name
-		}
-		builtins = append(builtins, builtin{
-			def: ai.ToolDefinition{
-				Name:        "use_agent",
-				Description: "Activate a named agent persona for the current session.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"name": map[string]any{
-							"type":        "string",
-							"enum":        names,
-							"description": "Agent name to activate",
-						},
-					},
-					"required": []string{"name"},
-				},
-			},
-			handle: m.handleUseAgent,
-		})
-	}
-
-	if m.todoStore != nil {
-		builtins = append(builtins,
-			builtin{
-				def: ai.ToolDefinition{
-					Name: "todo_add",
-					Description: `Add a single todo item to the session task list.
-Always supply a short kebab-case id (e.g. "write-readme", "fix-login-bug") so you can
-reference the todo later. Use proactively at the start of multi-step tasks.
-To add several todos at once, use todo_add_many instead.
-IMPORTANT: Duplicate titles are not allowed. If a todo with the same title already exists
-you will receive the existing item back — do NOT call todo_add again with the same title.
-IMPORTANT: Duplicate IDs are not allowed. Choose a unique id; if the id already exists
-you will receive the existing item back.
-Only rephrase/re-id if this is genuinely a distinct task.`,
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"id":          map[string]any{"type": "string", "description": "Short kebab-case identifier (e.g. write-readme). Must be unique in this session."},
-							"title":       map[string]any{"type": "string", "description": "Short one-line title"},
-							"description": map[string]any{"type": "string", "description": "Optional detail or acceptance criteria"},
-						},
-						"required": []string{"title"},
-					},
-				},
-				handle: m.handleTodoAdd,
-			},
-			builtin{
-				def: ai.ToolDefinition{
-					Name: "todo_add_many",
-					Description: `Add multiple todo items to the session task list in a single call.
-Prefer this over repeated todo_add calls whenever you know the full list of tasks upfront.
-Duplicate titles or IDs are skipped with a note in the result — do not retry them.`,
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"items": map[string]any{
-								"type":        "array",
-								"description": "List of todo items to add",
-								"items": map[string]any{
-									"type": "object",
-									"properties": map[string]any{
-										"id":          map[string]any{"type": "string", "description": "Short kebab-case identifier. Must be unique in this session."},
-										"title":       map[string]any{"type": "string", "description": "Short one-line title"},
-										"description": map[string]any{"type": "string", "description": "Optional detail or acceptance criteria"},
-									},
-									"required": []string{"title"},
-								},
-							},
-						},
-						"required": []string{"items"},
-					},
-				},
-				handle: m.handleTodoAddMany,
-			},
-			builtin{
-				def: ai.ToolDefinition{
-					Name:        "todo_update",
-					Description: `Update the status (or title/description) of an existing todo item.`,
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"id":          map[string]any{"type": "string", "description": "Todo ID returned by todo_add"},
-							"status":      map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "done", "blocked"}, "description": "New status"},
-							"title":       map[string]any{"type": "string", "description": "Replace title"},
-							"description": map[string]any{"type": "string", "description": "Replace description"},
-						},
-						"required": []string{"id"},
-					},
-				},
-				handle: m.handleTodoUpdate,
-			},
-			builtin{
-				def: ai.ToolDefinition{
-					Name:        "todo_list",
-					Description: `Return the current todo list as text so you can review progress.`,
-					InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-				},
-				handle: m.handleTodoList,
-			},
-		)
-	}
-
-	if m.memoryStore != nil {
-		builtins = append(builtins,
-			builtin{
-				def: ai.ToolDefinition{
-					Name:        "memory_list",
-					Description: `List all named project memory files for the current directory, with their sizes.`,
-					InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-				},
-				handle: m.handleMemoryList,
-			},
-			builtin{
-				def: ai.ToolDefinition{
-					Name: "memory_read",
-					Description: `Read a named project memory file.
-All memories are injected into your system prompt at session start; call this
-only to re-read a specific memory mid-session (e.g. one that was too large to inject).`,
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"name": map[string]any{
-								"type":        "string",
-								"description": `Memory name (slug: lowercase letters, digits, hyphens; e.g. "general", "api-notes")`,
-							},
-						},
-						"required": []string{"name"},
-					},
-				},
-				handle: m.handleMemoryRead,
-			},
-			builtin{
-				def: ai.ToolDefinition{
-					Name:        "lookup_werkler_docs",
-					Description: "Look up information from werkler's built-in documentation. Call this when the user asks about werkler features, keybindings, configuration options, modes, skills, autopilot, memory, or agents. Returns the relevant documentation sections.",
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"topic": map[string]any{
-								"type":        "string",
-								"description": `The topic or question to look up (e.g. "keybindings", "how to configure providers", "autopilot cycle limit")`,
-							},
-						},
-						"required": []string{"topic"},
-					},
-				},
-				handle: func(_ context.Context, args map[string]any) (string, error) {
-					topic, _ := args["topic"].(string)
-					return docs.Search(topic), nil
-				},
-			},
-			builtin{
-				def: ai.ToolDefinition{
-					Name: "memory_write",
-					Description: `Write (replace) a named project memory file.
-Use named files to keep different concerns separate (e.g. "general", "conventions", "architecture").
-Maximum ` + fmt.Sprintf("%d", memorystore.MaxBytesPerFile) + ` bytes per file; up to ` + fmt.Sprintf("%d", memorystore.MaxFiles) + ` files per project.
-Use this to persist project knowledge across sessions: conventions, architecture decisions,
-known issues, preferred patterns, important file locations.`,
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"name": map[string]any{
-								"type":        "string",
-								"description": `Memory name (slug: lowercase letters, digits, hyphens; e.g. "general", "api-notes")`,
-							},
-							"content": map[string]any{
-								"type":        "string",
-								"description": "Markdown content to store (replaces the named file's previous content)",
-							},
-						},
-						"required": []string{"name", "content"},
-					},
-				},
-				handle: m.handleMemoryWrite,
-			},
-			builtin{
-				def: ai.ToolDefinition{
-					Name: "memory_delete",
-					Description: `Delete a named project memory file.
-Use only when the memory is fully obsolete. This cannot be undone without rewriting from scratch.`,
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"name": map[string]any{
-								"type":        "string",
-								"description": "Name of the memory file to delete",
-							},
-						},
-						"required": []string{"name"},
-					},
-				},
-				handle: m.handleMemoryDelete,
-			},
-			builtin{
-				def: ai.ToolDefinition{
-					Name: "memory_promote",
-					Description: `Move a named memory file to a parent directory's store, making it available to all sub-projects.
-Use this when a note turns out to be relevant across the whole project or workspace (e.g. a monorepo root),
-not just the current directory. The memory is deleted from the current directory after being moved.
-Call memory_list first if you are unsure which memories exist.
-target_directory accepts a relative path (e.g. ".." or "../..") or an absolute path; it must be a parent of the current project directory.`,
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"name": map[string]any{
-								"type":        "string",
-								"description": "Name of the memory to promote",
-							},
-							"target_directory": map[string]any{
-								"type":        "string",
-								"description": `Relative path to the target parent directory, e.g. ".." or "../.."`,
-							},
-						},
-						"required": []string{"name", "target_directory"},
-					},
-				},
-				handle: m.handleMemoryPromote,
-			},
-		)
-	}
-
-	if m.mcpMgr != nil {
-		configured := m.mcpMgr.ConfiguredServers()
-		if len(configured) > 0 {
-			nameList := make([]string, len(configured))
-			for i, srv := range configured {
-				nameList[i] = srv.Name
-			}
-			builtins = append(builtins, builtin{
-				def: ai.ToolDefinition{
-					Name: "connect_server",
-					Description: "Connect to a configured MCP server to make its tools available. " +
-						"Call this immediately when the user's request requires tools from that server — " +
-						"do not ask for permission first and do not connect servers unrelated to the current task. " +
-						"After connecting, the server's tools will be listed in the result.",
-					InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"name": map[string]any{
-								"type":        "string",
-								"description": "Name of the server to connect",
-								"enum":        nameList,
-							},
-						},
-						"required": []string{"name"},
-					},
-				},
-				handle: m.handleConnectServer,
-			})
-		}
-	}
-
-	// calculate, and sleep are always registered.
-	builtins = append(builtins,
-		builtin{
-			def: ai.ToolDefinition{
-				Name: "calculate",
-				Description: `Evaluate a mathematical expression and return the result.
-Use this for arithmetic, unit conversions, and any calculation you would normally
-estimate. Supports: +, -, *, /, % (remainder), bitwise &/|/^/<</>>/&^.
-Unary minus and plus are supported. Integer literals: 0xff, 0b1010, 0o17.
-Constants: pi, e, phi, sqrt2, ln2.
-Functions: sqrt, cbrt, abs, floor, ceil, round, trunc, exp, exp2, log, log2,
-log10, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, pow, hypot,
-mod, min, max. Note: ^ is bitwise XOR; use pow(x,y) for exponentiation.`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"expression": map[string]any{
-							"type":        "string",
-							"description": "Mathematical expression to evaluate (e.g. \"sqrt(2) * pi\", \"2**8\" is invalid — use pow(2,8))",
-						},
-					},
-					"required": []string{"expression"},
-				},
-			},
-			handle: m.handleCalculate,
-		},
-		builtin{
-			def: ai.ToolDefinition{
-				Name: "sleep",
-				Description: `Pause execution for a duration or until a specific time.
-Use this ONLY when you genuinely need to wait (e.g. polling for a file,
-waiting for a background process, or an explicit user request to delay).
-Avoid calling this unless strictly necessary.
-Specify either "seconds" (float, max 600) OR "until" (RFC3339 timestamp, max 600s ahead).`,
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"seconds": map[string]any{
-							"type":        "number",
-							"description": "Seconds to sleep (max 600)",
-						},
-						"until": map[string]any{
-							"type":        "string",
-							"description": "RFC3339 timestamp to sleep until (max 600 s in the future)",
-						},
-					},
-				},
-			},
-			handle: m.handleSleep,
-		},
-	)
-	builtins = append(builtins, builtin{
-		def: ai.ToolDefinition{
-			Name: "task_start",
-			Description: `Set the title of the task you are currently working on.
-Call this whenever you begin a new sub-task or phase of work so the user can see
-what you are doing in the status bar. You can call it multiple times to update
-the title as work progresses. The title should be a short, human-readable phrase
-such as "Implementing OAuth callback" or "Writing tests for parser".
-Do NOT call this for every small step — only when starting a meaningful new phase.`,
+	// Documentation lookup (built-in, always available).
+	all = append(all, toolutil.Builtin{
+		Def: ai.ToolDefinition{
+			Name:        "lookup_werkler_docs",
+			Description: "Look up information from werkler's built-in documentation. Call this when the user asks about werkler features, keybindings, configuration options, modes, skills, autopilot, memory, or agents. Returns the relevant documentation sections.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"title": map[string]any{
+					"topic": map[string]any{
 						"type":        "string",
-						"description": "Short description of the current task or phase",
+						"description": `The topic or question to look up (e.g. "keybindings", "how to configure providers", "autopilot cycle limit")`,
 					},
 				},
-				"required": []string{"title"},
+				"required": []string{"topic"},
 			},
 		},
-		handle: m.handleTaskStart,
-	})
-	// task_complete is always registered — autopilot and manual use both benefit.
-	builtins = append(builtins, builtin{
-		def: ai.ToolDefinition{
-			Name: "task_complete",
-			Description: `Signal that the assigned task is fully complete. Call this when all work is done and no further action is needed.
-In autopilot mode this stops the autonomous loop. Outside autopilot mode it marks the task done and returns to idle.
-Provide a concise summary of what was accomplished.`,
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"summary": map[string]any{
-						"type":        "string",
-						"description": "Concise summary of what was accomplished",
-					},
-				},
-				"required": []string{"summary"},
-			},
+		Handle: func(_ context.Context, args map[string]any) (string, error) {
+			topic, _ := args["topic"].(string)
+			return docs.Search(topic), nil
 		},
-		handle: m.handleTaskComplete,
-	})
-	builtins = append(builtins, builtin{
-		def: ai.ToolDefinition{
-			Name: "confirm_plan",
-			Description: `Present the finalised plan to the user and ask whether to proceed with implementation.
-Call this ONLY after writing the plan file and completing any review cycles.
-Provide a brief 2-3 sentence summary of the plan for the user to review.
-The user will choose one of: implement now, implement with autopilot, or reject.
-The return value tells you how to proceed:
-- "approved": implement immediately in the current conversation turn.
-- "approved_with_autopilot": autopilot has been enabled — STOP your response; the autonomous loop will continue.
-- "rejected: <reason>": acknowledge the reason and stop; do NOT start implementing.`,
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"summary": map[string]any{
-						"type":        "string",
-						"description": "Brief 2-3 sentence summary of the plan for the user",
-					},
-				},
-				"required": []string{"summary"},
-			},
-		},
-		handle: m.handleConfirmPlan,
 	})
 
+	// Convert toolutil.Builtin → internal builtin.
+	builtins := make([]builtin, len(all))
+	for i, b := range all {
+		builtins[i] = builtin{
+			def:             b.Def,
+			handle:          b.Handle,
+			handleWithParts: b.HandleWithParts,
+		}
+	}
 	return builtins
 }
 
 // --- Built-in handlers ---
 
-func stringArg(args map[string]any, key string) string {
-	v, _ := args[key].(string)
-	return v
-}
-
-func boolArg(args map[string]any, key string) bool {
-	v, _ := args[key].(bool)
-	return v
-}
-
-func float64Arg(args map[string]any, key string, def float64) float64 {
-	if v, ok := args[key].(float64); ok {
-		return v
-	}
-	return def
-}
-
-func stringSliceArg(args map[string]any, key string) []string {
-	raw, _ := args[key].([]any)
-	out := make([]string, 0, len(raw))
-	for _, v := range raw {
-		if s, ok := v.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func stringMapArg(args map[string]any, key string) map[string]string {
-	raw, _ := args[key].(map[string]any)
-	out := make(map[string]string, len(raw))
-	for k, v := range raw {
-		if s, ok := v.(string); ok {
-			out[k] = s
-		}
-	}
-	return out
-}
-
-func jsonResult(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprintf("%v", v)
-	}
-	return string(b)
-}
-
-func (m *Manager) handleConnectServer(ctx context.Context, args map[string]any) (string, error) {
-	name := stringArg(args, "name")
-	if name == "" {
-		return "", fmt.Errorf("connect_server: name is required")
-	}
-	already, err := m.mcpMgr.ConnectByName(ctx, name)
-	if err != nil {
-		return "", err
-	}
-	if already {
-		return fmt.Sprintf("Server %q is already connected.", name), nil
-	}
-	toolNames, err := m.mcpMgr.ToolNamesForServer(ctx, name)
-	if err != nil || len(toolNames) == 0 {
-		return fmt.Sprintf("Connected to server %q. New tools from this server are now available.", name), nil
-	}
-	return fmt.Sprintf(
-		"Connected to server %q. You can now call these tools directly:\n- %s",
-		name, strings.Join(toolNames, "\n- "),
-	), nil
-}
-
-func (m *Manager) handleProcessStart(ctx context.Context, args map[string]any) (string, error) {
-	command := stringArg(args, "command")
-	if command == "" {
-		return "", fmt.Errorf("process_start: command is required")
-	}
-	cmdArgs := stringSliceArg(args, "args")
-	title := stringArg(args, "title")
-	if title == "" {
-		// Fallback: derive a title from the command name + first arg so the TUI
-		// always shows something meaningful even if the model skipped the field.
-		base := filepath.Base(command)
-		if len(cmdArgs) > 0 {
-			title = base + " " + cmdArgs[0]
-		} else {
-			title = base
-		}
-		args["title"] = title
-	}
-	cwd := stringArg(args, "cwd")
-	usePTY := boolArg(args, "pty")
-	env := stringMapArg(args, "env")
-	timeoutSecs := float64Arg(args, "timeout_seconds", 5)
-
-	// Check path permissions before starting.
-	if unapproved := m.checkWritePaths(ctx, command, cmdArgs, cwd); len(unapproved) > 0 {
-		return "", &UnapprovedPathsError{Requests: unapproved}
-	}
-
-	handle, err := m.processes.Start(ctx, command, cmdArgs, cwd, env, usePTY)
-	if err != nil {
-		return "", fmt.Errorf("process_start: %w", err)
-	}
-
-	timeout := time.Duration(timeoutSecs * float64(time.Second))
-	output, _, _, err := m.processes.ReadOutput(handle, timeout)
-	if err != nil {
-		output = ""
-	}
-
-	return jsonResult(map[string]any{
-		"handle": handle,
-		"output": output,
-	}), nil
-}
-
-func (m *Manager) handleProcessSend(ctx context.Context, args map[string]any) (string, error) {
-	handle := stringArg(args, "handle")
-	text := stringArg(args, "text")
-	timeoutSecs := float64Arg(args, "timeout_seconds", 2)
-
-	if err := m.processes.Send(handle, text); err != nil {
-		return "", err
-	}
-
-	timeout := time.Duration(timeoutSecs * float64(time.Second))
-	output, running, exitCode, err := m.processes.ReadOutput(handle, timeout)
-	if err != nil {
-		return "", err
-	}
-	return jsonResult(map[string]any{
-		"output":    output,
-		"running":   running,
-		"exit_code": exitCode,
-	}), nil
-}
-
-func (m *Manager) handleProcessSendKey(ctx context.Context, args map[string]any) (string, error) {
-	handle := stringArg(args, "handle")
-	key := stringArg(args, "key")
-	timeoutSecs := float64Arg(args, "timeout_seconds", 2)
-
-	if err := m.processes.SendKey(handle, key); err != nil {
-		return "", err
-	}
-
-	timeout := time.Duration(timeoutSecs * float64(time.Second))
-	output, running, exitCode, err := m.processes.ReadOutput(handle, timeout)
-	if err != nil {
-		return "", err
-	}
-	return jsonResult(map[string]any{
-		"output":    output,
-		"running":   running,
-		"exit_code": exitCode,
-	}), nil
-}
-
-func (m *Manager) handleProcessRead(ctx context.Context, args map[string]any) (string, error) {
-	handle := stringArg(args, "handle")
-	timeoutSecs := float64Arg(args, "timeout_seconds", 5)
-
-	timeout := time.Duration(timeoutSecs * float64(time.Second))
-	output, running, exitCode, err := m.processes.ReadOutput(handle, timeout)
-	if err != nil {
-		return "", err
-	}
-	return jsonResult(map[string]any{
-		"output":    output,
-		"running":   running,
-		"exit_code": exitCode,
-	}), nil
-}
-
-func (m *Manager) handleProcessStop(_ context.Context, args map[string]any) (string, error) {
-	handle := stringArg(args, "handle")
-	force := boolArg(args, "force")
-
-	exitCode, output, err := m.processes.Stop(handle, force)
-	if err != nil {
-		return "", err
-	}
-	return jsonResult(map[string]any{
-		"exit_code": exitCode,
-		"output":    output,
-	}), nil
-}
-
-// runCommandOutputCap is the maximum bytes captured per stream (stdout / stderr / combined).
-const runCommandOutputCap = 512 * 1024
-
-// runCommandMaxTimeout is the maximum allowed value for timeout_seconds.
-const runCommandMaxTimeout = 600.0
-
-// capBuffer is a size-limited buffer. Writes beyond the cap are silently discarded;
-// the Truncated field records the total number of bytes dropped.
-type capBuffer struct {
-	mu        sync.Mutex
-	buf       bytes.Buffer
-	cap       int
-	written   int
-	Truncated int
-}
-
-func newCapBuffer(cap int) *capBuffer { return &capBuffer{cap: cap} }
-
-func (b *capBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	remaining := b.cap - b.written
-	if remaining <= 0 {
-		b.Truncated += len(p)
-		return len(p), nil
-	}
-	if len(p) > remaining {
-		b.buf.Write(p[:remaining])
-		b.written += remaining
-		b.Truncated += len(p) - remaining
-		return len(p), nil
-	}
-	b.buf.Write(p)
-	b.written += len(p)
-	return len(p), nil
-}
-
-// String returns the captured bytes as a UTF-8 string, appending a truncation
-// notice if any bytes were dropped.
-func (b *capBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	raw := b.buf.Bytes()
-	// Snap to last complete UTF-8 rune boundary.
-	for len(raw) > 0 && !utf8.Valid(raw) {
-		raw = raw[:len(raw)-1]
-	}
-	s := string(raw)
-	if b.Truncated > 0 {
-		s += fmt.Sprintf("\n[truncated: %d bytes omitted]", b.Truncated)
-	}
-	return s
-}
-
 // combinedWriter multiplexes writes to both a stream-specific buffer and a
 // combined buffer. The combined buffer is protected by a separate mutex so
-// writes from concurrent goroutines are serialised globally.
-type combinedWriter struct {
-	stream   *capBuffer
-	combined *capBuffer
-	mu       *sync.Mutex // shared mutex that serialises combined writes
-}
-
-func (w *combinedWriter) Write(p []byte) (int, error) {
-	_, _ = w.stream.Write(p)
-	w.mu.Lock()
-	_, _ = w.combined.Write(p)
-	w.mu.Unlock()
-	return len(p), nil
-}
-
-func (m *Manager) handleRunCommand(ctx context.Context, args map[string]any) (string, error) {
-	command := stringArg(args, "command")
-	if command == "" {
-		return jsonResult(map[string]any{"error": "run_command: command is required"}), nil
-	}
-	title := stringArg(args, "title")
-	if title == "" {
-		title = command
-		args["title"] = title
-	}
-
-	useShell := boolArg(args, "shell")
-	cmdArgs := stringSliceArg(args, "args")
-	// When shell=true, args must be empty — the full command goes in "command".
-	// Weaker models sometimes pass both; silently drop args rather than erroring
-	// so the call still succeeds.
-	if useShell && len(cmdArgs) > 0 {
-		cmdArgs = nil
-	}
-	// When shell=false but command contains spaces, the model most likely intended
-	// a shell command (e.g. "ls -la"). Auto-promote to shell mode so the call
-	// succeeds rather than failing with "executable not found".
-	if !useShell && strings.ContainsRune(command, ' ') {
-		useShell = true
-		cmdArgs = nil
-	}
-
-	cwd := stringArg(args, "cwd")
-	if cwd != "" {
-		info, err := os.Stat(cwd)
-		if err != nil {
-			return jsonResult(map[string]any{"error": fmt.Sprintf("run_command: cwd does not exist: %s", cwd)}), nil
-		}
-		if !info.IsDir() {
-			return jsonResult(map[string]any{"error": fmt.Sprintf("run_command: cwd is not a directory: %s", cwd)}), nil
-		}
-	}
-
-	timeoutSecs := float64Arg(args, "timeout_seconds", 30)
-	if timeoutSecs <= 0 {
-		timeoutSecs = 30
-	}
-	if timeoutSecs > runCommandMaxTimeout {
-		timeoutSecs = runCommandMaxTimeout
-	}
-
-	// Build env: start from current environment, apply overrides.
-	// A null JSON value for a key (which arrives as nil in map[string]any) means unset.
-	baseEnv := os.Environ()
-	var envOverrides map[string]any
-	if raw, ok := args["env"].(map[string]any); ok {
-		envOverrides = raw
-	}
-	var finalEnv []string
-	if len(envOverrides) > 0 {
-		// Build a map of key->value from os.Environ() then apply overrides.
-		envMap := make(map[string]string, len(baseEnv))
-		for _, kv := range baseEnv {
-			if idx := strings.IndexByte(kv, '='); idx >= 0 {
-				envMap[kv[:idx]] = kv[idx+1:]
-			}
-		}
-		for k, v := range envOverrides {
-			if v == nil {
-				delete(envMap, k)
-			} else if s, ok := v.(string); ok {
-				envMap[k] = s
-			}
-		}
-		finalEnv = make([]string, 0, len(envMap))
-		for k, v := range envMap {
-			finalEnv = append(finalEnv, k+"="+v)
-		}
-	} else {
-		finalEnv = baseEnv
-	}
-
-	// Build the exec.Cmd.
-	var cmd *exec.Cmd
-	if useShell {
-		cmd = exec.Command("bash", "-c", command)
-	} else {
-		cmd = exec.Command(command, cmdArgs...)
-	}
-	cmd.Env = finalEnv
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
-	// Attach stdin to /dev/null so blocking reads are immediately detected.
-	devNull, err := os.Open(os.DevNull)
-	if err == nil {
-		cmd.Stdin = devNull
-		defer func() { _ = devNull.Close() }()
-	}
-	// Spawn in a new process group so we can kill the whole group on timeout.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	// Check path approval before executing.
-	// For shell=true the interpreter (bash) is always trusted; check write paths
-	// extracted from the shell command string instead.  For direct execution
-	// check the command and its arguments as before.
-	if useShell {
-		if unapproved := m.checkShellCommandWritePaths(ctx, "bash", command, cwd); len(unapproved) > 0 {
-			return "", &UnapprovedPathsError{Requests: unapproved}
-		}
-	} else {
-		if unapproved := m.checkWritePaths(ctx, command, cmdArgs, cwd); len(unapproved) > 0 {
-			return "", &UnapprovedPathsError{Requests: unapproved}
-		}
-	}
-
-	// Set up output capture.
-	stdoutBuf := newCapBuffer(runCommandOutputCap)
-	stderrBuf := newCapBuffer(runCommandOutputCap)
-	combinedBuf := newCapBuffer(runCommandOutputCap)
-	combinedMu := &sync.Mutex{}
-
-	// If a live-output channel is present in the context, tee each combined
-	// write to it line by line so the TUI can display output as it arrives.
-	var stdoutLive, stderrLive *liveLineWriter
-	if liveCh := liveOutputFromCtx(ctx); liveCh != nil {
-		stdoutLive = &liveLineWriter{
-			inner:  &combinedWriter{stream: stdoutBuf, combined: combinedBuf, mu: combinedMu},
-			liveCh: liveCh,
-		}
-		stderrLive = &liveLineWriter{
-			inner:  &combinedWriter{stream: stderrBuf, combined: combinedBuf, mu: combinedMu},
-			liveCh: liveCh,
-		}
-		cmd.Stdout = stdoutLive
-		cmd.Stderr = stderrLive
-	} else {
-		cmd.Stdout = &combinedWriter{stream: stdoutBuf, combined: combinedBuf, mu: combinedMu}
-		cmd.Stderr = &combinedWriter{stream: stderrBuf, combined: combinedBuf, mu: combinedMu}
-	}
-
-	if startErr := cmd.Start(); startErr != nil {
-		return jsonResult(map[string]any{"error": fmt.Sprintf("run_command: %s", startErr.Error())}), nil
-	}
-
-	// Wait for process in a goroutine so we can enforce the timeout.
-	type waitResult struct {
-		exitCode int
-	}
-	done := make(chan waitResult, 1)
-	go func() {
-		err := cmd.Wait()
-		code := 0
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				code = exitErr.ExitCode()
-			} else {
-				code = -1
-			}
-		}
-		done <- waitResult{code}
-	}()
-
-	timeout := time.Duration(timeoutSecs * float64(time.Second))
-	timedOut := false
-	var exitCode int
-
-	select {
-	case result := <-done:
-		exitCode = result.exitCode
-		// Flush any partial line that had no trailing newline.
-		if stdoutLive != nil {
-			stdoutLive.flush()
-		}
-		if stderrLive != nil {
-			stderrLive.flush()
-		}
-	case <-time.After(timeout):
-		timedOut = true
-		// Kill the process group: SIGTERM first, then SIGKILL after 2s grace.
-		if cmd.Process != nil {
-			pgid := -cmd.Process.Pid // negative PID signals the whole process group
-			_ = syscall.Kill(pgid, syscall.SIGTERM)
-			select {
-			case result := <-done:
-				exitCode = result.exitCode
-			case <-time.After(2 * time.Second):
-				_ = syscall.Kill(pgid, syscall.SIGKILL)
-				result := <-done
-				exitCode = result.exitCode
-			}
-		}
-	}
-
-	return jsonResult(map[string]any{
-		"exit_code":       exitCode,
-		"stdout":          stdoutBuf.String(),
-		"stderr":          stderrBuf.String(),
-		"combined_output": combinedBuf.String(),
-		"timed_out":       timedOut,
-	}), nil
-}
 
 // --- File tool handlers ---
 
-// maxFileReadMultiBytes is the aggregate output cap for file_read_multi.
-const maxFileReadMultiBytes = 8 << 10 // 8 KiB
-
-func (m *Manager) handleFileReadMulti(ctx context.Context, args map[string]any) (string, error) {
-	rawRegions, _ := args["regions"].([]any)
-	if len(rawRegions) == 0 {
-		return "", fmt.Errorf("file_read_multi: regions must be a non-empty array")
-	}
-
-	type region struct {
-		rawPath   string
-		path      string
-		startLine int
-		endLine   int
-		hasStart  bool
-		hasEnd    bool
-	}
-
-	regions := make([]region, 0, len(rawRegions))
-	for i, r := range rawRegions {
-		rm, ok := r.(map[string]any)
-		if !ok {
-			return "", fmt.Errorf("file_read_multi: region[%d] is not an object", i)
-		}
-		rp := stringArg(rm, "path")
-		if rp == "" {
-			return "", fmt.Errorf("file_read_multi: region[%d]: path is required", i)
-		}
-		reg := region{rawPath: rp, path: canonicalizePath(rp)}
-		if v, ok := rm["start_line"]; ok {
-			if f, ok2 := toFloat64(v); ok2 {
-				reg.startLine = int(f)
-			}
-			reg.hasStart = true
-		}
-		if v, ok := rm["end_line"]; ok {
-			if f, ok2 := toFloat64(v); ok2 {
-				reg.endLine = int(f)
-			}
-			reg.hasEnd = true
-		}
-		regions = append(regions, reg)
-	}
-
-	// Batch path approval: collect all unique unapproved paths.
-	approver := m.activeApprover(ctx)
-	if approver != nil {
-		seen := make(map[string]bool)
-		var unapproved []chat.PathAccessRequest
-		for _, reg := range regions {
-			if !seen[reg.path] && !approver.IsPathReadApproved(reg.path) {
-				unapproved = append(unapproved, chat.PathAccessRequest{Path: reg.path, Write: false})
-				seen[reg.path] = true
-			}
-		}
-		if len(unapproved) > 0 {
-			return "", &UnapprovedPathsError{Requests: unapproved}
-		}
-	}
-
-	var out strings.Builder
-	totalBytes := 0
-
-	for i, reg := range regions {
-		if i > 0 {
-			out.WriteString("\n")
-		}
-
-		info, err := os.Stat(reg.path)
-		if err != nil {
-			fmt.Fprintf(&out, "=== %s [ERROR] ===\n%s\n", reg.rawPath, err.Error())
-			continue
-		}
-		if info.IsDir() {
-			fmt.Fprintf(&out, "=== %s [ERROR] ===\ndirectory; use file_list\n", reg.rawPath)
-			continue
-		}
-
-		data, err := os.ReadFile(reg.path)
-		if err != nil {
-			fmt.Fprintf(&out, "=== %s [ERROR] ===\n%s\n", reg.rawPath, err.Error())
-			continue
-		}
-		if !utf8.Valid(data) {
-			fmt.Fprintf(&out, "=== %s [ERROR] ===\nbinary file; use process_start\n", reg.rawPath)
-			continue
-		}
-
-		lines := strings.Split(string(data), "\n")
-		totalLines := len(lines)
-
-		startLine := 1
-		endLine := totalLines
-		if reg.hasStart {
-			startLine = reg.startLine
-		}
-		if reg.hasEnd {
-			endLine = reg.endLine
-		}
-		if startLine < 1 {
-			startLine = 1
-		}
-		if endLine > totalLines {
-			endLine = totalLines
-		}
-		if startLine > endLine {
-			fmt.Fprintf(&out, "=== %s [ERROR] ===\nstart_line (%d) > end_line (%d)\n", reg.rawPath, startLine, endLine)
-			continue
-		}
-
-		selected := lines[startLine-1 : endLine]
-
-		rangeLabel := fmt.Sprintf("L%d-L%d", startLine, startLine+len(selected)-1)
-		header := fmt.Sprintf("=== %s [%s of %d] ===\n", reg.rawPath, rangeLabel, totalLines)
-		out.WriteString(header)
-		totalBytes += len(header)
-
-		var sectionBuf strings.Builder
-		for i, l := range selected {
-			fmt.Fprintf(&sectionBuf, "%4d│%s\n", startLine+i, l)
-		}
-		section := sectionBuf.String()
-
-		remaining := maxFileReadMultiBytes - totalBytes
-		if remaining <= 0 {
-			out.WriteString("[output cap reached — omitted]\n")
-			break
-		}
-		if len(section) > remaining {
-			out.WriteString(section[:remaining])
-			out.WriteString("\n[output cap reached — truncated]\n")
-			break
-		}
-		out.WriteString(section)
-		totalBytes += len(section)
-	}
-
-	return out.String(), nil
-}
-
-func (m *Manager) handleReadImage(ctx context.Context, args map[string]any) (string, []ai.ImagePart, error) {
-	rawPath := stringArg(args, "path")
-	if rawPath == "" {
-		return "", nil, fmt.Errorf("read_image: path is required")
-	}
-	path := canonicalizePath(rawPath)
-
-	if err := m.checkSingleRead(ctx, path); err != nil {
-		return "", nil, err
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", nil, fmt.Errorf("read_image: %w", err)
-	}
-
-	mime := http.DetectContentType(data)
-	if mime == "application/octet-stream" {
-		ext := strings.ToLower(filepath.Ext(path))
-		switch ext {
-		case ".png":
-			mime = "image/png"
-		case ".jpg", ".jpeg":
-			mime = "image/jpeg"
-		case ".gif":
-			mime = "image/gif"
-		case ".webp":
-			mime = "image/webp"
-		default:
-			return "", nil, fmt.Errorf("read_image: unsupported image format (extension %s)", ext)
-		}
-	}
-	if !strings.HasPrefix(mime, "image/") {
-		return "", nil, fmt.Errorf("read_image: %s is not an image file (detected content type: %s)", path, mime)
-	}
-
-	part := ai.ImagePart{
-		Data:     data,
-		MIMEType: mime,
-		Name:     filepath.Base(path),
-	}
-	return fmt.Sprintf("Image loaded: %s (%s, %d bytes)", filepath.Base(path), mime, len(data)), []ai.ImagePart{part}, nil
-}
-
-func (m *Manager) handleFileList(ctx context.Context, args map[string]any) (string, error) {
-	rawPath := stringArg(args, "path")
-	if rawPath == "" {
-		return "", fmt.Errorf("file_list: path is required")
-	}
-	path := canonicalizePath(rawPath)
-
-	if err := m.checkSingleRead(ctx, path); err != nil {
-		return "", err
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("file_list: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("file_list: %s is not a directory; use file_read to read files", path)
-	}
-
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return "", fmt.Errorf("file_list: %w", err)
-	}
-
-	type entry struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-		Size *int64 `json:"size,omitempty"`
-	}
-	result := make([]entry, 0, len(entries))
-	for _, e := range entries {
-		var kind string
-		var size *int64
-		switch {
-		case e.IsDir():
-			kind = "directory"
-		case e.Type()&fs.ModeSymlink != 0:
-			kind = "symlink"
-		default:
-			kind = "file"
-			if fi, err2 := e.Info(); err2 == nil {
-				s := fi.Size()
-				size = &s
-			}
-		}
-		result = append(result, entry{Name: e.Name(), Type: kind, Size: size})
-	}
-	return jsonResult(result), nil
-}
-
-func (m *Manager) handleFileWrite(ctx context.Context, args map[string]any) (string, error) {
-	rawPath := stringArg(args, "path")
-	if rawPath == "" {
-		return "", fmt.Errorf("file_write: path is required")
-	}
-	path := canonicalizePath(rawPath)
-	content := stringArg(args, "content")
-	createParents := boolArg(args, "create_parents")
-
-	if err := m.checkSingleWrite(ctx, path); err != nil {
-		return "", err
-	}
-
-	if createParents {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return "", fmt.Errorf("file_write: creating parent directories: %w", err)
-		}
-	}
-
-	oldBytes, _ := os.ReadFile(path)
-	oldContent := string(oldBytes)
-
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("file_write: %w", err)
-	}
-
-	return jsonResult(map[string]any{
-		"path":  path,
-		"bytes": len(content),
-		"diff":  ComputeUnifiedDiff(oldContent, content, path),
-	}), nil
-}
-
-func (m *Manager) handleFileEdit(ctx context.Context, args map[string]any) (string, error) {
-	rawPath := stringArg(args, "path")
-	if rawPath == "" {
-		return "", fmt.Errorf("file_edit: path is required")
-	}
-	path := canonicalizePath(rawPath)
-
-	// Build the list of {old_str, new_str} pairs.
-	type hunk struct{ old, new string }
-	var hunks []hunk
-
-	if rawEdits, ok := args["edits"].([]any); ok && len(rawEdits) > 0 {
-		// Multi-hunk form: edits: [{old_str, new_str}, …]
-		for i, item := range rawEdits {
-			m, ok := item.(map[string]any)
-			if !ok {
-				return "", fmt.Errorf("file_edit: edits[%d] must be an object", i)
-			}
-			old, _ := m["old_str"].(string)
-			if old == "" {
-				return "", fmt.Errorf("file_edit: edits[%d].old_str must not be empty", i)
-			}
-			newVal, _ := m["new_str"].(string)
-			hunks = append(hunks, hunk{old, newVal})
-		}
-	} else {
-		// Single-hunk form: top-level old_str / new_str.
-		oldStr := stringArg(args, "old_str")
-		newStr := stringArg(args, "new_str")
-		if oldStr == "" {
-			return "", fmt.Errorf("file_edit: old_str must not be empty; use file_write to overwrite entire files")
-		}
-		hunks = []hunk{{oldStr, newStr}}
-	}
-
-	if err := m.checkSingleWrite(ctx, path); err != nil {
-		return "", err
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("file_edit: %w", err)
-	}
-	if !utf8.Valid(data) {
-		return "", fmt.Errorf("file_edit: %s appears to be a binary file", path)
-	}
-
-	content := string(data)
-
-	// Validate all hunks before writing anything (atomic failure).
-	for i, h := range hunks {
-		count := strings.Count(content, h.old)
-		switch {
-		case count == 0:
-			if len(hunks) == 1 {
-				return "", fmt.Errorf("file_edit: old_str not found in %s — call file_read on the file first and use the exact text from the file as old_str (watch for whitespace and indentation)", path)
-			}
-			return "", fmt.Errorf("file_edit: edits[%d] old_str not found in %s", i, path)
-		case count > 1:
-			lineNums := findMatchLines(content, h.old)
-			if len(hunks) == 1 {
-				return "", fmt.Errorf("file_edit: old_str matches %d times in %s (at lines %v); include more surrounding context to make it unique",
-					count, path, lineNums)
-			}
-			return "", fmt.Errorf("file_edit: edits[%d] old_str matches %d times in %s (at lines %v); include more surrounding context",
-				i, count, path, lineNums)
-		}
-	}
-
-	// Apply all hunks in order.
-	type result struct {
-		line    int
-		added   int
-		removed int
-	}
-	results := make([]result, len(hunks))
-	for i, h := range hunks {
-		idx := strings.Index(content, h.old)
-		line := strings.Count(content[:idx], "\n") + 1
-		removed := strings.Count(h.old, "\n") + 1
-		added := strings.Count(h.new, "\n") + 1
-		results[i] = result{line, added, removed}
-		content = strings.Replace(content, h.old, h.new, 1)
-	}
-
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("file_edit: writing %s: %w", path, err)
-	}
-
-	newContent, _ := os.ReadFile(path)
-	diff := ComputeUnifiedDiff(string(data), string(newContent), path)
-
-	if len(hunks) == 1 {
-		return jsonResult(map[string]any{
-			"path":    path,
-			"line":    results[0].line,
-			"added":   results[0].added,
-			"removed": results[0].removed,
-			"diff":    diff,
-		}), nil
-	}
-	editsOut := make([]map[string]any, len(results))
-	for i, r := range results {
-		editsOut[i] = map[string]any{"line": r.line, "added": r.added, "removed": r.removed}
-	}
-	return jsonResult(map[string]any{"path": path, "edits": editsOut, "diff": diff}), nil
-}
-
-// findMatchLines returns the starting line numbers for all occurrences of substr in text.
-func findMatchLines(text, substr string) []int {
-	var lines []int
-	offset := 0
-	for {
-		idx := strings.Index(text[offset:], substr)
-		if idx < 0 {
-			break
-		}
-		abs := offset + idx
-		lines = append(lines, strings.Count(text[:abs], "\n")+1)
-		offset = abs + len(substr)
-	}
-	return lines
-}
-
-func (m *Manager) handleFileDelete(ctx context.Context, args map[string]any) (string, error) {
-	rawPath := stringArg(args, "path")
-	if rawPath == "" {
-		return "", fmt.Errorf("file_delete: path is required")
-	}
-
-	// resolvedPath follows symlinks and is used ONLY for permission checks:
-	// we want to reject deletion of a symlink that points to a protected target.
-	resolvedPath := canonicalizePath(rawPath)
-	if err := m.checkSingleWrite(ctx, resolvedPath); err != nil {
-		return "", err
-	}
-
-	// deletePath is the path WITHOUT symlink resolution.  os.Remove on a symlink
-	// removes the symlink itself, not its target — which is the correct behaviour.
-	// Using canonicalizePath here would silently delete the target instead.
-	deletePath := resolvePath(rawPath, "")
-	if !filepath.IsAbs(deletePath) {
-		if cwd, err := os.Getwd(); err == nil {
-			deletePath = filepath.Join(cwd, deletePath)
-		}
-	}
-	deletePath = filepath.Clean(deletePath)
-
-	// Lstat does NOT follow symlinks — we inspect the path itself, not its target.
-	info, err := os.Lstat(deletePath)
-	if err != nil {
-		return "", fmt.Errorf("file_delete: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
-		// Only reject real directories; symlinks-to-directories are fine to remove.
-		return "", fmt.Errorf("file_delete: %s is a directory; use process_start with rm -r to delete directories", deletePath)
-	}
-
-	// Read target content for the diff (if it is a regular file or a symlink
-	// to a regular file).  Errors are non-fatal; binary or unreadable targets
-	// simply produce no diff.
-	oldBytes, _ := os.ReadFile(resolvedPath)
-
-	if err := os.Remove(deletePath); err != nil {
-		return "", fmt.Errorf("file_delete: %w", err)
-	}
-	return jsonResult(map[string]any{
-		"deleted": deletePath,
-		"diff":    ComputeUnifiedDiff(string(oldBytes), "", deletePath),
-	}), nil
-}
-
 // ensure Manager implements chat.ToolManager.
 var _ chat.ToolManager = (*Manager)(nil)
-
-func (m *Manager) handleAskUser(ctx context.Context, args map[string]any) (string, error) {
-	question := stringArg(args, "question")
-	if question == "" {
-		return "error: ask_user requires a non-empty question", nil
-	}
-	choices := stringSliceArg(args, "choices")
-	recommended := stringArg(args, "recommended_choice")
-	allowFreeform := true
-	if v, ok := args["allow_freeform"].(bool); ok {
-		allowFreeform = v
-	}
-	if !allowFreeform && len(choices) == 0 {
-		return "error: ask_user requires at least one choice when allow_freeform is false", nil
-	}
-	if recommended != "" {
-		found := false
-		for _, c := range choices {
-			if c == recommended {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Sprintf("error: recommended_choice %q does not match any provided choice", recommended), nil
-		}
-	}
-	if m.userAsker == nil {
-		return "(ask_user requires interactive mode — run werkler interactively to provide an answer)", nil
-	}
-	return m.userAsker(ctx, question, choices, recommended, allowFreeform)
-}
 
 // --- Subagent framework ---
 
@@ -2416,12 +852,12 @@ func (m *Manager) callBuiltinAsSubagent(ctx context.Context, sa *subagentDef, na
 // runSubagent runs the agentic loop for sa, feeding userContent as the first
 // user message. Returns the subagent's final text response.
 func (m *Manager) runSubagent(ctx context.Context, sa *subagentDef, args map[string]any) (string, error) {
-	content := stringArg(args, "context")
+	content := toolutil.StringArg(args, "context")
 	if content == "" {
 		return "error: subagent " + sa.name + " requires a non-empty context", nil
 	}
 	userContent := content
-	if focus := stringArg(args, "focus"); focus != "" {
+	if focus := toolutil.StringArg(args, "focus"); focus != "" {
 		userContent += "\n\nFocus particularly on: " + focus
 	}
 
@@ -2533,294 +969,50 @@ be treated as your final answer.`,
 	}
 }
 
-func (m *Manager) handleUseSkill(_ context.Context, args map[string]any) (string, error) {
-	name := stringArg(args, "name")
-	for _, s := range m.skills {
-		if s.Name == name {
-			return s.Content, nil
-		}
-	}
-	return "skill not found: " + name, nil
+// toFloat64 coerces a JSON-decoded number value to float64.
+
+// ─── Subpackage Context interface implementations ─────────────────────────────
+// Manager implements the narrow Context interfaces required by each handler
+// subpackage.  These methods delegate to the Manager's internal state, keeping
+// subpackages decoupled from the concrete Manager type.
+
+// filetools.Context
+func (m *Manager) ActiveApprover(ctx context.Context) filetools.PathApprover {
+	return m.activeApprover(ctx)
 }
 
-func (m *Manager) handleUseAgent(_ context.Context, args map[string]any) (string, error) {
-	name := stringArg(args, "name")
-	for _, a := range m.agents {
-		if a.Name == name {
-			if m.agentActivate != nil {
-				m.agentActivate(name)
-			}
-			return fmt.Sprintf("Agent %q activated.", name), nil
-		}
-	}
-	return fmt.Sprintf("agent not found: %q", name), nil
+// processtools.Context
+func (m *Manager) ProcessRegistry() *process.Manager { return m.processes }
+func (m *Manager) CheckWritePaths(ctx context.Context, command string, args []string, cwd string) []toolutil.PathAccessRequest {
+	return m.checkWritePaths(ctx, command, args, cwd)
+}
+func (m *Manager) CheckShellCommandWritePaths(ctx context.Context, shell, command, cwd string) []toolutil.PathAccessRequest {
+	return m.checkShellCommandWritePaths(ctx, shell, command, cwd)
+}
+func (m *Manager) LiveOutputCh(ctx context.Context) chan<- string { return liveOutputFromCtx(ctx) }
+
+// usertools.Context
+func (m *Manager) UserAsker() usertools.Asker { return usertools.Asker(m.userAsker) }
+func (m *Manager) PlanConfirmer() usertools.PlanConfirmer {
+	return usertools.PlanConfirmer(m.planConfirmer)
 }
 
-func (m *Manager) handleTodoAdd(_ context.Context, args map[string]any) (string, error) {
-	title := stringArg(args, "title")
-	if title == "" {
-		return "error: title is required", nil
-	}
-	requestedID := stringArg(args, "id")
-	// Reject exact-duplicate titles or IDs so the AI doesn't create ghost copies.
-	for _, t := range m.todoStore.List() {
-		if t.Title == title {
-			return fmt.Sprintf("duplicate: todo %q already exists with id=%s status=%s — use todo_update to change it", title, t.ID, t.Status), nil
-		}
-		if requestedID != "" && t.ID == requestedID {
-			return fmt.Sprintf("duplicate: id %q already exists (title=%q status=%s) — choose a different id or use todo_update", requestedID, t.Title, t.Status), nil
-		}
-	}
-	id := m.todoStore.Add(requestedID, title, stringArg(args, "description"))
-	return fmt.Sprintf("added: id=%s status=pending title=%q", id, title), nil
-}
-
-func (m *Manager) handleTodoAddMany(_ context.Context, args map[string]any) (string, error) {
-	rawItems, _ := args["items"].([]any)
-	if len(rawItems) == 0 {
-		return "error: items array is required and must not be empty", nil
-	}
-	var sb strings.Builder
-	existing := m.todoStore.List()
-	for i, raw := range rawItems {
-		item, ok := raw.(map[string]any)
-		if !ok {
-			fmt.Fprintf(&sb, "item %d: skipped (invalid format)\n", i+1)
-			continue
-		}
-		title := stringArg(item, "title")
-		if title == "" {
-			fmt.Fprintf(&sb, "item %d: skipped (title is required)\n", i+1)
-			continue
-		}
-		requestedID := stringArg(item, "id")
-		skipped := false
-		for _, t := range existing {
-			if t.Title == title {
-				fmt.Fprintf(&sb, "duplicate: %q already exists id=%s status=%s\n", title, t.ID, t.Status)
-				skipped = true
-				break
-			}
-			if requestedID != "" && t.ID == requestedID {
-				fmt.Fprintf(&sb, "duplicate id %q (title=%q status=%s) — choose a different id\n", requestedID, t.Title, t.Status)
-				skipped = true
-				break
-			}
-		}
-		if skipped {
-			continue
-		}
-		id := m.todoStore.Add(requestedID, title, stringArg(item, "description"))
-		// Keep existing list in sync so later items in the same batch are checked correctly.
-		existing = m.todoStore.List()
-		fmt.Fprintf(&sb, "added: id=%s title=%q\n", id, title)
-	}
-	return strings.TrimSpace(sb.String()), nil
-}
-
-func (m *Manager) handleTodoUpdate(_ context.Context, args map[string]any) (string, error) {
-	id := stringArg(args, "id")
-	if id == "" {
-		return "error: id is required", nil
-	}
-	var f todostore.UpdateFields
-	if v := stringArg(args, "status"); v != "" {
-		f.Status = &v
-	}
-	if v := stringArg(args, "title"); v != "" {
-		f.Title = &v
-	}
-	if v := stringArg(args, "description"); v != "" {
-		f.Description = &v
-	}
-	if err := m.todoStore.Update(id, f); err != nil {
-		return "error: " + err.Error(), nil
-	}
-	// Echo the updated todo so the AI knows exactly what changed.
-	for _, t := range m.todoStore.List() {
-		if t.ID == id {
-			return fmt.Sprintf("updated: id=%s status=%s title=%q", t.ID, t.Status, t.Title), nil
-		}
-	}
-	return "updated: " + id, nil
-}
-
-func (m *Manager) handleTodoList(_ context.Context, _ map[string]any) (string, error) {
-	todos := m.todoStore.List()
-	if len(todos) == 0 {
-		return "no todos", nil
-	}
-	var sb strings.Builder
-	icons := map[string]string{
-		todostore.StatusPending:    "○",
-		todostore.StatusInProgress: "▶",
-		todostore.StatusDone:       "✓",
-		todostore.StatusBlocked:    "✗",
-	}
-	for _, t := range todos {
-		icon := icons[t.Status]
-		if icon == "" {
-			icon = "?"
-		}
-		fmt.Fprintf(&sb, "%s [%s] %s: %s\n", icon, t.ID, t.Status, t.Title)
-		if t.Description != "" {
-			fmt.Fprintf(&sb, "    %s\n", t.Description)
-		}
-	}
-	return strings.TrimRight(sb.String(), "\n"), nil
-}
-
-func (m *Manager) handleTaskStart(_ context.Context, args map[string]any) (string, error) {
-	title := stringArg(args, "title")
+// tasktools.Context
+func (m *Manager) TodoStore() *todostore.Store { return m.todoStore }
+func (m *Manager) NotifyTaskTitle(title string) {
 	if m.taskTitle != nil {
 		m.taskTitle(title)
 	}
-	return "ok", nil
 }
 
-func (m *Manager) handleTaskComplete(_ context.Context, args map[string]any) (string, error) {
-	summary := stringArg(args, "summary")
-	if summary == "" {
-		summary = "Task complete."
-	}
-	return summary, nil
-}
+// memorytools.Context
+func (m *Manager) MemoryStore() *memorystore.MemoryStore { return m.memoryStore }
 
-func (m *Manager) handleConfirmPlan(ctx context.Context, args map[string]any) (string, error) {
-	summary := stringArg(args, "summary")
-	if m.planConfirmer == nil {
-		// Non-interactive (prompt mode or no TUI): auto-approve without a dialog.
-		return "approved: proceed with implementation", nil
+// agenttools.Context
+func (m *Manager) Skills() []skills.Skill { return m.skills }
+func (m *Manager) Agents() []agents.Agent { return m.agents }
+func (m *Manager) NotifyAgentActivate(name string) {
+	if m.agentActivate != nil {
+		m.agentActivate(name)
 	}
-	return m.planConfirmer(ctx, summary)
-}
-
-func (m *Manager) handleCalculate(_ context.Context, args map[string]any) (string, error) {
-	expr := stringArg(args, "expression")
-	if expr == "" {
-		return "error: expression is required", nil
-	}
-	v, err := evalExpression(expr)
-	if err != nil {
-		return fmt.Sprintf("error: %s", err), nil
-	}
-	return fmt.Sprintf("%s = %s", expr, formatResult(v)), nil
-}
-
-const maxSleepSeconds = 600.0
-
-func (m *Manager) handleSleep(ctx context.Context, args map[string]any) (string, error) {
-	var dur time.Duration
-
-	if until := stringArg(args, "until"); until != "" {
-		t, err := time.Parse(time.RFC3339, until)
-		if err != nil {
-			return fmt.Sprintf("error: invalid 'until' timestamp %q: %s", until, err), nil
-		}
-		dur = time.Until(t)
-	} else if v, ok := args["seconds"]; ok {
-		secs, ok2 := toFloat64(v)
-		if !ok2 || secs < 0 {
-			return "error: 'seconds' must be a non-negative number", nil
-		}
-		dur = time.Duration(secs * float64(time.Second))
-	} else {
-		return "error: specify either 'seconds' or 'until'", nil
-	}
-
-	if dur <= 0 {
-		return "0s elapsed (target time already passed)", nil
-	}
-	if dur > maxSleepSeconds*time.Second {
-		dur = maxSleepSeconds * time.Second
-	}
-
-	start := time.Now()
-	select {
-	case <-ctx.Done():
-		return fmt.Sprintf("sleep cancelled after %s", time.Since(start).Round(time.Millisecond)), nil
-	case <-time.After(dur):
-		return fmt.Sprintf("slept %s", dur.Round(time.Millisecond)), nil
-	}
-}
-
-// toFloat64 coerces a JSON-decoded number value to float64.
-func toFloat64(v any) (float64, bool) {
-	switch n := v.(type) {
-	case float64:
-		return n, true
-	case json.Number:
-		f, err := n.Float64()
-		return f, err == nil
-	case int:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	}
-	return 0, false
-}
-
-func (m *Manager) handleMemoryList(_ context.Context, _ map[string]any) (string, error) {
-	entries := m.memoryStore.List()
-	if len(entries) == 0 {
-		return "(no project memories stored yet)", nil
-	}
-	var sb strings.Builder
-	for _, e := range entries {
-		fmt.Fprintf(&sb, "- %s (%d bytes)\n", e.Name, e.Size)
-	}
-	return strings.TrimSpace(sb.String()), nil
-}
-
-func (m *Manager) handleMemoryRead(_ context.Context, args map[string]any) (string, error) {
-	name := stringArg(args, "name")
-	if name == "" {
-		return "error: name is required", nil
-	}
-	content, err := m.memoryStore.ReadNamed(name)
-	if err != nil {
-		return "error reading project memory: " + err.Error(), nil
-	}
-	if content == "" {
-		return fmt.Sprintf("(no memory named %q exists)", name), nil
-	}
-	return content, nil
-}
-
-func (m *Manager) handleMemoryWrite(_ context.Context, args map[string]any) (string, error) {
-	name := stringArg(args, "name")
-	content := stringArg(args, "content")
-	if name == "" {
-		return "error: name is required", nil
-	}
-	if err := m.memoryStore.WriteNamed(name, content); err != nil {
-		return "error writing project memory: " + err.Error(), nil
-	}
-	return fmt.Sprintf("memory %q saved (%d bytes)", name, len(strings.TrimSpace(content))), nil
-}
-
-func (m *Manager) handleMemoryDelete(_ context.Context, args map[string]any) (string, error) {
-	name := stringArg(args, "name")
-	if name == "" {
-		return "error: name is required", nil
-	}
-	if err := m.memoryStore.DeleteNamed(name); err != nil {
-		return "error deleting project memory: " + err.Error(), nil
-	}
-	return fmt.Sprintf("memory %q deleted", name), nil
-}
-
-func (m *Manager) handleMemoryPromote(_ context.Context, args map[string]any) (string, error) {
-	name := stringArg(args, "name")
-	targetDir := stringArg(args, "target_directory")
-	if name == "" {
-		return "error: name is required", nil
-	}
-	if targetDir == "" {
-		return "error: target_directory is required", nil
-	}
-	if err := m.memoryStore.Promote(name, targetDir); err != nil {
-		return "error promoting memory: " + err.Error(), nil
-	}
-	return fmt.Sprintf("memory %q promoted to %s", name, targetDir), nil
 }

@@ -1,6 +1,7 @@
-package tools
+package file
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,11 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newFileDeleteTestManager() *Manager {
-	m := &Manager{}
-	m.builtins = m.makeBuiltins()
-	return m
-}
+// noopContext satisfies the file.Context interface without any approvals.
+type noopContext struct{}
+
+func (noopContext) ActiveApprover(_ context.Context) PathApprover { return nil }
+
+func newFileHandler() *Handler { return NewHandler(noopContext{}) }
 
 func TestHandleFileDelete_RemovesSymlinkNotTarget(t *testing.T) {
 	dir := t.TempDir()
@@ -23,15 +25,13 @@ func TestHandleFileDelete_RemovesSymlinkNotTarget(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("hello"), 0o644))
 	require.NoError(t, os.Symlink(target, link))
 
-	m := newFileDeleteTestManager()
-	_, err := m.handleFileDelete(t.Context(), map[string]any{"path": link})
+	h := newFileHandler()
+	_, err := h.handleFileDelete(t.Context(), map[string]any{"path": link})
 	require.NoError(t, err)
 
-	// The symlink must be gone.
 	_, lerr := os.Lstat(link)
 	assert.True(t, os.IsNotExist(lerr), "symlink should be removed")
 
-	// The target must still exist.
 	_, terr := os.Stat(target)
 	assert.NoError(t, terr, "target file must not be deleted")
 }
@@ -41,8 +41,8 @@ func TestHandleFileDelete_RemovesRegularFile(t *testing.T) {
 	f := filepath.Join(dir, "file.txt")
 	require.NoError(t, os.WriteFile(f, []byte("data"), 0o644))
 
-	m := newFileDeleteTestManager()
-	_, err := m.handleFileDelete(t.Context(), map[string]any{"path": f})
+	h := newFileHandler()
+	_, err := h.handleFileDelete(t.Context(), map[string]any{"path": f})
 	require.NoError(t, err)
 
 	_, ferr := os.Lstat(f)
@@ -54,8 +54,8 @@ func TestHandleFileDelete_RejectsDirectory(t *testing.T) {
 	sub := filepath.Join(dir, "sub")
 	require.NoError(t, os.Mkdir(sub, 0o755))
 
-	m := newFileDeleteTestManager()
-	_, err := m.handleFileDelete(t.Context(), map[string]any{"path": sub})
+	h := newFileHandler()
+	_, err := h.handleFileDelete(t.Context(), map[string]any{"path": sub})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "directory")
 }
@@ -67,10 +67,8 @@ func TestHandleFileDelete_SymlinkToDir_RemovesSymlinkNotDir(t *testing.T) {
 	require.NoError(t, os.Mkdir(realDir, 0o755))
 	require.NoError(t, os.Symlink(realDir, link))
 
-	m := newFileDeleteTestManager()
-	_, err := m.handleFileDelete(t.Context(), map[string]any{"path": link})
-	// A symlink-to-directory must be removable (the old code mistakenly
-	// rejected it with "is a directory").
+	h := newFileHandler()
+	_, err := h.handleFileDelete(t.Context(), map[string]any{"path": link})
 	require.NoError(t, err)
 
 	_, lerr := os.Lstat(link)

@@ -66,4 +66,3 @@ func ToFloat64(v any) (float64, bool) {
 	}
 	return 0, false
 }
-

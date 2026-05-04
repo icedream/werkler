@@ -1,20 +1,36 @@
-package tools
+package process
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/icedream/werkler/internal/tools/toolutil"
+
+	extprocess "github.com/icedream/werkler/internal/process"
 )
+
+type noopProcessContext struct{}
+
+func (noopProcessContext) ProcessRegistry() *extprocess.Manager { return nil }
+func (noopProcessContext) CheckWritePaths(_ context.Context, _ string, _ []string, _ string) []toolutil.PathAccessRequest {
+	return nil
+}
+func (noopProcessContext) CheckShellCommandWritePaths(_ context.Context, _, _, _ string) []toolutil.PathAccessRequest {
+	return nil
+}
+func (noopProcessContext) LiveOutputCh(_ context.Context) chan<- string { return nil }
 
 // callRunCommand is a test helper that calls handleRunCommand and unmarshals
 // the JSON result into a map.
 func callRunCommand(t *testing.T, args map[string]any) map[string]any {
 	t.Helper()
-	m := newTestManager()
-	result, err := m.handleRunCommand(t.Context(), args)
+	h := NewHandler(noopProcessContext{})
+	result, err := h.handleRunCommand(t.Context(), args)
 	require.NoError(t, err)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal([]byte(result), &out))
