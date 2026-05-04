@@ -1,3 +1,6 @@
 # Build outputs
 /modeltest
 /werkler
+
+# Plans and design docs (local only — never committed)
+docs/plans/
