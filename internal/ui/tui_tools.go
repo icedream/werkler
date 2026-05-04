@@ -424,6 +424,40 @@ func parseFileDeleteNote(result string) string {
 	return ""
 }
 
+// parseRunCommandNote returns a short result annotation for a run_command call.
+// Shows exit code and, when non-zero, the last non-empty output line so the
+// user can see what failed without expanding the bubble.
+func parseRunCommandNote(result string) string {
+	var data struct {
+		ExitCode int    `json:"exit_code"`
+		TimedOut bool   `json:"timed_out"`
+		Combined string `json:"combined_output"`
+	}
+	if err := json.Unmarshal([]byte(result), &data); err != nil {
+		return ""
+	}
+	if data.TimedOut {
+		return "timed out"
+	}
+	if data.ExitCode == 0 {
+		return "exit: 0"
+	}
+	// Non-zero exit: show the last non-empty output line as a hint.
+	lastLine := ""
+	for _, l := range strings.Split(strings.TrimRight(data.Combined, "\n"), "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			lastLine = t
+		}
+	}
+	if len(lastLine) > 80 {
+		lastLine = lastLine[:79] + "…"
+	}
+	if lastLine != "" {
+		return fmt.Sprintf("exit: %d — %s", data.ExitCode, lastLine)
+	}
+	return fmt.Sprintf("exit: %d", data.ExitCode)
+}
+
 // fileEditErrorNote returns a short, user-readable summary of a file_edit error.
 func fileEditErrorNote(err error) string {
 	if err == nil {

@@ -2817,6 +2817,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.collapsedHandles[h] = true
 				}
 				switch msg.toolName {
+				case "run_command":
+					m.items[idx].toolNote = parseRunCommandNote(msg.result)
 				case "file_edit":
 					m.items[idx].toolNote = parseFileEditNote(msg.result)
 					if msg.diff != "" {
