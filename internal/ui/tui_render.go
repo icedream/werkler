@@ -686,37 +686,55 @@ func (m Model) renderItem(item displayItem) string {
 				"  \u2195 %d line%s changed  (use /expand %s to show diff)",
 				changed, plural, item.handle))
 		}
-		// Show output line-count stub when collapsed (run_command with stored output).
+		// Show last 3 lines of stored output when collapsed, plus a hint when
+		// more lines exist.  Mirrors the running view so the transition is smooth.
 		if item.toolOutput != "" && item.handle != "" && m.collapsedHandles[item.handle] {
-			n := strings.Count(item.toolOutput, "\n") + 1
-			plural := "s"
-			if n == 1 {
-				plural = ""
+			all := strings.Split(item.toolOutput, "\n")
+			const previewLines = 3
+			shown := all
+			hidden := 0
+			if len(all) > previewLines {
+				hidden = len(all) - previewLines
+				shown = all[len(all)-previewLines:]
 			}
-			line += "\n" + toolDimStyle.Render(fmt.Sprintf(
-				"  ↕ %d line%s of output  (use /expand %s to show)",
-				n, plural, item.handle))
-		}
-		// Live stdout/stderr while run_command is executing (cleared on done).
-		if item.toolLiveOutput != "" && item.toolStatus == toolStatusRunning {
-			outLines := strings.Split(item.toolLiveOutput, "\n")
-			const maxLiveLines = 30
-			if len(outLines) > maxLiveLines {
-				outLines = outLines[len(outLines)-maxLiveLines:]
-			}
-			// Indent is 2 spaces; leave at least 20 chars for content.
 			maxW := m.width - 2
 			if maxW < 20 {
 				maxW = 20
 			}
-			for _, l := range outLines {
-				// Wordwrap long lines so the viewport never clips mid-character.
+			for _, l := range shown {
 				wrapped := wordwrap.String(l, maxW)
 				for i, wl := range strings.Split(wrapped, "\n") {
 					if i == 0 {
 						line += "\n" + toolDimStyle.Render("  "+wl)
 					} else {
-						// Continuation lines get extra indent to show they wrapped.
+						line += "\n" + toolDimStyle.Render("    "+wl)
+					}
+				}
+			}
+			if hidden > 0 {
+				line += "\n" + toolDimStyle.Render(fmt.Sprintf(
+					"  … %d more lines  (use /expand %s to show all)",
+					hidden, item.handle))
+			}
+		}
+		// Live stdout/stderr while run_command is executing (cleared on done).
+		// Show only the last 3 lines so the bubble stays compact and stable.
+		if item.toolLiveOutput != "" && item.toolStatus == toolStatusRunning {
+			outLines := strings.Split(item.toolLiveOutput, "\n")
+			const maxLiveLines = 10
+			if len(outLines) > maxLiveLines {
+				outLines = outLines[len(outLines)-maxLiveLines:]
+			}
+			maxW := m.width - 2
+			if maxW < 20 {
+				maxW = 20
+			}
+			for _, l := range outLines {
+				wrapped := wordwrap.String(l, maxW)
+				for i, wl := range strings.Split(wrapped, "\n") {
+					if i == 0 {
+						line += "\n" + toolDimStyle.Render("  "+wl)
+					} else {
 						line += "\n" + toolDimStyle.Render("    "+wl)
 					}
 				}
