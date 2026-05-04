@@ -595,9 +595,13 @@ func (m Model) renderItem(item displayItem) string {
 			badge = toolDeniedStyle.Render("✗")
 		}
 		// For tools that carry an AI-formulated title (process_start, run_command),
-		// use the title as the primary display name instead of the generic friendly name.
+		// use the intent title as the primary display name while the call is in
+		// flight.  Once done/failed, fall back to the generic name so the result
+		// note (exit code etc.) can be shown as the secondary annotation instead.
 		var name string
-		if item.toolNote != "" && (item.toolName == "process_start" || item.toolName == "run_command") {
+		if item.toolNote != "" &&
+			(item.toolName == "process_start" || item.toolName == "run_command") &&
+			(item.toolStatus == toolStatusPending || item.toolStatus == toolStatusRunning) {
 			name = toolNameStyle.Render(item.toolNote) + " " + toolDimStyle.Render("["+item.toolName+"]")
 		} else {
 			name = renderToolName(item.toolName)
@@ -625,9 +629,13 @@ func (m Model) renderItem(item displayItem) string {
 		if item.toolStatus == toolStatusDenied {
 			line += "  " + toolDeniedStyle.Render("(denied)")
 		}
-		// Only show toolNote as a secondary annotation when it wasn't already
-		// promoted to the name line above.
-		if item.toolNote != "" && item.toolName != "process_start" && item.toolName != "run_command" {
+		// Show toolNote as a secondary annotation:
+		//  - always for tools that don't use it as a primary name
+		//  - for run_command/process_start only when done/failed (result note)
+		showNote := item.toolNote != "" &&
+			(item.toolName != "process_start" && item.toolName != "run_command" ||
+				item.toolStatus == toolStatusDone || item.toolStatus == toolStatusFailed)
+		if showNote {
 			var ns lipgloss.Style
 			if item.toolStatus == toolStatusFailed {
 				ns = errorStyle
