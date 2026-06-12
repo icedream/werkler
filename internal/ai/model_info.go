@@ -26,3 +26,8 @@ func (m ModelInfo) HasContext() bool {
 type ModelInfoGetter interface {
 	GetModelInfo(ctx context.Context) (ModelInfo, error)
 }
+
+// Modeler is an optional interface for clients that expose their current model name.
+type Modeler interface {
+	Model() string
+}

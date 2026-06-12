@@ -682,35 +682,9 @@ func toResponsesItems(_ context.Context, messages []Message) (instructions strin
 	return instructions, items
 }
 
-// StreamCompleterAdapter wraps a StreamCompleter to implement Completer
-// by collecting the final Done chunk from the stream.
-type StreamCompleterAdapter struct {
-	sc StreamCompleter
-}
-
-// NewStreamCompleterAdapter creates a StreamCompleterAdapter.
-func NewStreamCompleterAdapter(sc StreamCompleter) *StreamCompleterAdapter {
-	return &StreamCompleterAdapter{sc: sc}
-}
-
-// Complete implements Completer by draining the stream and returning the final message.
-func (a *StreamCompleterAdapter) Complete(ctx context.Context, messages []Message, tools []ToolDefinition) (Message, error) {
-	ch := a.sc.CompleteStream(ctx, messages, tools)
-	for chunk := range ch {
-		if chunk.Err != nil {
-			return Message{}, chunk.Err
-		}
-		if chunk.Done {
-			return chunk.Msg, nil
-		}
-	}
-	return Message{}, fmt.Errorf("stream ended without a final message")
-}
-
 // Compile-time interface assertions.
 var _ Completer = (*ResponsesClient)(nil)
 var _ StreamCompleter = (*ResponsesClient)(nil)
 var _ ModelManager = (*ResponsesClient)(nil)
 var _ ModelInfoGetter = (*ResponsesClient)(nil)
 var _ Modeler = (*ResponsesClient)(nil)
-var _ Completer = (*StreamCompleterAdapter)(nil)
