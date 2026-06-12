@@ -32,6 +32,10 @@ Numbered list of remaining steps, in order. Include anything the user requested 
 ## Key Facts
 Bullet list of decisions, constraints, patterns, or file locations the assistant must remember to continue correctly. Omit anything obvious.
 
+## Files Read
+Bullet list of file paths the assistant has already read and has in context. Format: path/to/file — last_read_after: <description of what was read at that point>.
+This section is CRITICAL — the AI must NOT re-read these files. It only needs to re-read files not listed here.
+
 ## Next Action
 One sentence: the exact next step the assistant should take when it resumes.
 
@@ -40,7 +44,7 @@ RULES — follow strictly:
 2. Describe code changes in plain English only (e.g. "added error handling to Foo", "changed return type to []string").
 3. Facts only. Past tense for completed work. Present/future tense for pending work.
 4. Keep each bullet/line short. Omit filler words.
-5. If the transcript contains a prior summary block, merge it: carry forward its Pending and Key Facts, update Completed.`
+5. If the transcript contains a prior summary block, merge it: carry forward its Pending and Key Facts, update Completed, and merge any Files Read entries (deduplicate by path, keep the most recent read description).`
 
 // CompactionUserMessage returns the user-turn content for a compaction request,
 // wrapping the pre-built transcript string.

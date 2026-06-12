@@ -109,7 +109,7 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 				if len(result) > cap {
 					result = result[:cap] + "…"
 				}
-				transcript.WriteString("Tool result: ")
+				transcript.WriteString(fmt.Sprintf("Tool result (call_id: %s): ", msg.ToolCallID))
 				transcript.WriteString(result)
 			}
 			transcript.WriteString("\n\n")
@@ -239,15 +239,23 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 	if m.autoCompactPending {
 		// Auto-compact: restart the AI turn that was interrupted.
 		// History was rewritten, so the previous response ID and cached system
-		// message are both stale.
-		if m.incrementalClient != nil {
-			m.incrementalClient.SetLastResponseID("")
+		// message are both stale. Use doStartStream (full context) directly
+		// to bypass IncrementalClient, which would otherwise strip messages to
+		// "new only" and omit the system message, causing self-hosted models
+		// to reject the request ("no user prompt provided").
+		//
+		// If keepTurns was 0 the compacted history has only the system message
+		// (no user turn). Inject a synthetic "Continue." so the AI has a prompt
+		// to work with — the AI will re-evaluate and re-issue any tool calls
+		// it needs based on the summary context.
+		if len(m.messages) == 0 || m.messages[len(m.messages)-1].Role != "user" {
+			m.messages = append(m.messages, ai.Message{Role: "user", Content: "Continue."})
 		}
 		m.turnSystemMsg = ""
 		m.autoCompactPending = false
 		m.turnRoundtrips++
 		m.setThinking()
-		cmds = append(cmds, m.doStream(m.newOpCtx(), m.buildStreamMessages(m.messages), m.tools))
+		cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
 	} else {
 		// Manual compact: also reset since history changed.
 		if m.incrementalClient != nil {
