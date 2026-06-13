@@ -20,7 +20,7 @@ column number, e.g. `config.toml:12:5: ...`, to help you locate the problem.
 ## AI provider
 
 Werkler supports multiple AI providers simultaneously. You can switch between
-them in the model picker (`ctrl+p`) or by running `werkler chat --provider=name`.
+them in the model picker (`ctrl+p`) or by running `werkler --provider=name`.
 
 ### Multi-provider config
 
@@ -156,15 +156,17 @@ model = "claude-sonnet-4-5"
 ### Command-line flags
 
 ```
-werkler --model gpt-4o chat            # override active provider's model
-werkler chat --provider=copilot        # switch active provider
-werkler chat --mode plan               # activate a mode preset on startup
-werkler chat --agent code-review-agent # activate a named agent on startup
-werkler chat --resume                  # open session picker on startup
-werkler chat --session abc123          # resume a specific session by ID or prefix
-werkler chat -p "..."                  # short form of --prompt
-werkler chat -v                        # short form of --verbose
+werkler --model gpt-4o               # override active provider's model
+werkler --provider=copilot           # switch active provider
+werkler --mode plan                  # activate a mode preset on startup
+werkler --agent code-review-agent    # activate a named agent on startup
+werkler --resume                     # open session picker on startup
+werkler --session abc123             # resume a specific session by ID or prefix
+werkler -p "..."                     # short form of --prompt
+werkler -v                           # short form of --verbose
 ```
+
+> **Note:** `werkler` with no subcommand runs `chat` by default. All flags above work without the `chat` subcommand.
 
 The `--model` flag overrides the model for the active provider. Use `--provider`
 to select a different named provider from `[[ai.providers]]`.
@@ -447,7 +449,7 @@ revoked.
 
 > **Note:** Because the OAuth flow requires a browser, it cannot run in
 > non-interactive (`--prompt`) mode. If you try, Werkler will print an error
-> and exit. Run `werkler chat` once first to authenticate, then use
+> and exit. Run `werkler` once first to authenticate, then use
 > `--prompt` freely afterwards.
 
 ### Local server — stdio (Docker)
@@ -471,7 +473,7 @@ Set the token in your shell before starting werkler:
 
 ```sh
 export GITHUB_PERSONAL_ACCESS_TOKEN=ghp_your_token_here
-werkler chat
+werkler
 ```
 
 ### Local server — stdio (binary)

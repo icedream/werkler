@@ -40,7 +40,7 @@ Werkler uses a TOML configuration file located at:
 ```sh
 # Create a basic config
 mkdir -p ~/.config/werkler
-werkler chat  # Generates default config if missing
+werkler  # Generates default config if missing
 ```
 
 See [Configuration Documentation](docs/configuration.md) for detailed configuration options including:
@@ -55,12 +55,14 @@ See [Configuration Documentation](docs/configuration.md) for detailed configurat
 ### Quick start
 
 ```sh
-# Start interactive chat
-werkler chat
+# Start interactive chat (same as `werkler chat`)
+werkler
 
 # Run a prompt and exit
-werkler chat --prompt "Help me design an API"
+werkler --prompt "Help me design an API"
 ```
+
+> **Note:** `werkler` with no subcommand runs `chat` by default. All `werkler chat` examples below can also be written as `werkler` (or `werkler <chat-flags>` with `--config`/`--model` global flags before the command).
 
 ### Common tasks
 
@@ -85,34 +87,34 @@ werkler auth status
 
 ```sh
 # Use a specific config file
-werkler --config /path/to/config.toml chat
+werkler --config /path/to/config.toml
 
 # Override the active AI model
-werkler --model gpt-4o chat
+werkler --model gpt-4o
 
 # Switch AI provider
-werkler chat --provider=openai
+werkler --provider=openai
 
 # Resume the session picker on startup
-werkler chat --resume
+werkler --resume
 
 # Resume a specific saved session by ID (or unique prefix)
-werkler chat --session abc123
+werkler --session abc123
 
 # Activate a named mode preset on startup
-werkler chat --mode plan
+werkler --mode plan
 
 # Activate a named agent on startup
-werkler chat --agent code-review-agent
+werkler --agent code-review-agent
 
 # Enable autopilot for autonomous work
-werkler chat --autopilot --prompt "Write tests for pkg/api"
+werkler --autopilot --prompt "Write tests for pkg/api"
 
 # Limit autopilot cycles
-werkler chat --autopilot --autopilot-max-cycles 20 --prompt "..."
+werkler --autopilot --autopilot-max-cycles 20 --prompt "..."
 
 # Enable verbose output in prompt mode
-werkler chat --prompt "..." --verbose
+werkler --prompt "..." --verbose
 ```
 
 ## 🛠️ AI Providers

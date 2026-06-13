@@ -25,7 +25,7 @@ like one long uninterrupted work session.
 **CLI flag (recommended for automation):**
 
 ```sh
-werkler chat --autopilot --prompt "Refactor all usages of the legacy API in src/"
+werkler --autopilot --prompt "Refactor all usages of the legacy API in src/"
 ```
 
 **TUI slash command:**
@@ -90,7 +90,7 @@ max_cycles = 100
 **Override per invocation:**
 
 ```sh
-werkler chat --autopilot --autopilot-max-cycles 20 --prompt "..."
+werkler --autopilot --autopilot-max-cycles 20 --prompt "..."
 ```
 
 A "cycle" is one complete end-of-turn response from the AI (no tool calls).
@@ -114,7 +114,7 @@ A typical autopilot session for a multi-file refactor might look like:
 Autopilot works in `--prompt` mode too:
 
 ```sh
-werkler chat --autopilot --prompt "Write unit tests for all untested functions in pkg/api"
+werkler --autopilot --prompt "Write unit tests for all untested functions in pkg/api"
 ```
 
 If the cycle cap is hit in `--prompt` mode, the command exits with an error

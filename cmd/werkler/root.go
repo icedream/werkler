@@ -24,6 +24,10 @@ routine tasks: writing and reviewing code, designing software, drafting tickets,
 and more.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	RunE: func(_ *cobra.Command, args []string) error {
+		chatCmd.SetArgs(args)
+		return chatCmd.Execute()
+	},
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return loadConfig()
 	},
