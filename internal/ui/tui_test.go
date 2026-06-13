@@ -621,3 +621,43 @@ func TestJSONKeysInOrder(t *testing.T) {
 		}
 	}
 }
+
+// --- parseFileReadMultiNote ---
+
+func TestParseFileReadMultiNote_Empty(t *testing.T) {
+	assert.Equal(t, "", parseFileReadMultiNote(""))
+	assert.Equal(t, "", parseFileReadMultiNote("no headers here\njust text\n"))
+}
+
+func TestParseFileReadMultiNote_SingleFile(t *testing.T) {
+	result := "=== src/main.go [L1-L613 of 613] ===\npackage main\n"
+	assert.Equal(t, "src/main.go:1-613", parseFileReadMultiNote(result))
+}
+
+func TestParseFileReadMultiNote_SingleFileRange(t *testing.T) {
+	result := "=== src/main.go [L10-L42 of 200] ===\npackage main\n"
+	assert.Equal(t, "src/main.go:10-42", parseFileReadMultiNote(result))
+}
+
+func TestParseFileReadMultiNote_TwoFiles(t *testing.T) {
+	result := "=== src/main.go [L1-L100 of 200] ===\npackage main\n\n=== config.toml [L1-L50 of 100] ===\nkey = \"value\"\n"
+	assert.Equal(t, "2 files — src/main.go:1-100, config.toml:1-50",
+		parseFileReadMultiNote(result))
+}
+
+func TestParseFileReadMultiNote_MultipleFilesTruncated(t *testing.T) {
+	result := "=== a.md [L1-L10 of 50] ===\ntext\n\n=== b.md [L1-L20 of 100] ===\ntext\n\n=== c.md [L1-L5 of 30] ===\ntext\n"
+	assert.Equal(t, "3 files — a.md:1-10, b.md:1-20, and 1 more",
+		parseFileReadMultiNote(result))
+}
+
+func TestParseFileReadMultiNote_Error(t *testing.T) {
+	result := "=== src/binary.py [ERROR] ===\nbinary file\n"
+	assert.Equal(t, "src/binary.py [ERROR]", parseFileReadMultiNote(result))
+}
+
+func TestParseFileReadMultiNote_Mixed(t *testing.T) {
+	result := "=== src/main.go [L1-L50 of 100] ===\npackage\n\n=== src/bad.py [ERROR] ===\nbinary\n"
+	assert.Equal(t, "2 files — src/main.go:1-50, src/bad.py [ERROR]",
+		parseFileReadMultiNote(result))
+}

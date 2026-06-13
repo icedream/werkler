@@ -119,14 +119,71 @@ func parseRunCommandResultNote(result string) string {
 	return parseRunCommandNote(result)
 }
 
+// parseFileReadMultiNote extracts file paths with line ranges from a
+// file_read_multi result.  The result text has headers like:
+//
+//	=== path/to/file [L10-L42 of 100] ===
+//
+// It returns a compact summary like "2 files — path.md, config.toml"
+// or "path.md:1-613" for a single file.
+// Errors (e.g. [ERROR] markers) are included in the summary.
+func parseFileReadMultiNote(result string) string {
+	lines := strings.Split(result, "\n")
+	entries := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "=== ") {
+			continue
+		}
+		inner := strings.TrimSuffix(strings.TrimPrefix(line, "=== "), " ===")
+		// Parse "path [Lstart-end of total]" → "path:start-end"
+		// or "path [ERROR]" → "path [ERROR]"
+		if idx := strings.Index(inner, " [L"); idx >= 0 {
+			closing := strings.Index(inner[idx+1:], "]")
+			if closing > 0 {
+				path := strings.TrimSpace(inner[:idx])
+				rangeText := inner[idx+2 : idx+1+closing-1] // e.g. "L10-L42 of 100"
+				// Extract start-end from "Lstart-end of N"
+				if ofIdx := strings.Index(rangeText, " of "); ofIdx > 0 {
+					ranges := rangeText[:ofIdx] // "L10-L42"
+					// Strip leading "L" and the second "L" before the end number
+					startStr := strings.ReplaceAll(ranges, "L", "")
+					entries = append(entries, path+":"+startStr)
+				} else {
+					entries = append(entries, inner)
+				}
+			} else {
+				entries = append(entries, inner)
+			}
+		} else {
+			// Keep as-is (e.g. error entries)
+			entries = append(entries, inner)
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	if len(entries) == 1 {
+		return entries[0]
+	}
+	const maxShow = 2
+	total := len(entries)
+	show := entries[:min(maxShow, total)]
+	if total > maxShow {
+		return fmt.Sprintf("%d files — %s, and %d more", total,
+			strings.Join(show, ", "), total-maxShow)
+	}
+	return fmt.Sprintf("%d files — %s", total, strings.Join(show, ", "))
+}
+
 // builtinTools maps tool name → ToolDescriptor.  All switch statements that
 // previously scattered tool-specific logic across multiple files are replaced
 // by a single toolDescriptor(name) lookup.
 var builtinTools = map[string]ToolDescriptor{
 	// --- File tools ---
 	"file_read_multi": {
-		FriendlyName: "Read files",
-		BadgeArgs:    filePathBadgeArgs,
+		FriendlyName:    "Read files",
+		BadgeArgs:       filePathBadgeArgs,
+		ParseResultNote: parseFileReadMultiNote,
 	},
 	"file_write": {
 		FriendlyName:      "Write file",
