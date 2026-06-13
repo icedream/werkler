@@ -93,6 +93,7 @@ type process struct {
 	running  bool
 	exitCode int
 	done     chan struct{}
+	readDone chan struct{}
 }
 
 func (p *process) write(b []byte) error {
@@ -183,10 +184,11 @@ func (m *Manager) Start(
 	}
 
 	p := &process{
-		cmd:     cmd,
-		pty:     usePTY,
-		running: true,
-		done:    make(chan struct{}),
+		cmd:      cmd,
+		pty:      usePTY,
+		running:  true,
+		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
 
 	var handle string
@@ -197,6 +199,7 @@ func (m *Manager) Start(
 			return "", fmt.Errorf("starting process with PTY: %w", err)
 		}
 		p.ptmx = ptmx
+		go m.readLoop(handle, p, p.ptmx)
 	} else {
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
@@ -211,9 +214,10 @@ func (m *Manager) Start(
 		if err := cmd.Start(); err != nil {
 			return "", fmt.Errorf("starting process: %w", err)
 		}
-		// readLoop is started after registering the handle below to avoid a
-		// race where output arrives before the handle is in m.procs.
-		defer func() { go m.readLoop(handle, p, stdout) }()
+		// Start readLoop immediately so we drain the pipe before waitLoop
+		// calls cmd.Wait(). This avoids a race where the child exits before
+		// the parent has read its output.
+		go m.readLoop(handle, p, stdout)
 	}
 
 	handle = newHandle()
@@ -229,15 +233,13 @@ func (m *Manager) Start(
 	}
 	m.mu.Unlock()
 
-	if usePTY {
-		go m.readLoop(handle, p, p.ptmx)
-	}
 	go waitLoop(m, handle, p)
 
 	return handle, nil
 }
 
 // readLoop drains r into the process output buffer until EOF.
+// Signals readDone when finished so waitLoop can wait for it.
 func (m *Manager) readLoop(handle string, p *process, r io.Reader) {
 	buf := make([]byte, 4096)
 	for {
@@ -256,12 +258,15 @@ func (m *Manager) readLoop(handle string, p *process, r io.Reader) {
 			}
 		}
 		if err != nil {
-			return
+			break
 		}
 	}
+	close(p.readDone)
 }
 
 // waitLoop waits for the process to exit and updates state.
+// For non-PTY processes, also waits for readLoop to finish draining
+// the pipe before closing p.done, ensuring all output is buffered.
 func waitLoop(m *Manager, handle string, p *process) {
 	err := p.cmd.Wait()
 	p.mu.Lock()
@@ -277,6 +282,17 @@ func waitLoop(m *Manager, handle string, p *process) {
 
 	if p.ptmx != nil {
 		_ = p.ptmx.Close()
+	}
+
+	// Wait for readLoop to finish draining the pipe/PTY before
+	// closing p.done. This ensures ReadOutput sees all output.
+	if p.readDone != nil {
+		readDone := p.readDone
+		select {
+		case <-readDone:
+		case <-time.After(5 * time.Second):
+			// Safety timeout in case readLoop is stuck.
+		}
 	}
 
 	m.mu.Lock()
