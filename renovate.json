@@ -4,7 +4,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "fileMatch": ["^\\.github/workflows/[^/]+\\.ya?ml$"],
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
         "golangci-lint-action[^\\n]*\\n\\s+with:\\n\\s+version:\\s+v?(?<currentValue>[^\\s]+)"
       ],
