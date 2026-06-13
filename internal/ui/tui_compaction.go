@@ -109,8 +109,7 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 				if len(result) > cap {
 					result = result[:cap] + "…"
 				}
-				transcript.WriteString(fmt.Sprintf("Tool result (call_id: %s): ", msg.ToolCallID))
-				transcript.WriteString(result)
+				fmt.Fprintf(&transcript, "Tool result (call_id: %s): %s", msg.ToolCallID, result)
 			}
 			transcript.WriteString("\n\n")
 		}
