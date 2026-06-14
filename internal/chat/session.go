@@ -80,6 +80,7 @@ Always use these built-in tools for file operations — do NOT use any fs__* MCP
 - file_write — create or overwrite a file (use this to write new files)
 - file_edit — replace a specific string in an existing file (surgical edits)
 - file_read_multi — read a file with line ranges
+- read_image — read an IMAGE file (PNG, JPEG, GIF, WebP) for visual analysis; NEVER use for text documents or PDFs
 - file_list — list a directory
 - file_delete — delete a file
 - file_append — append to a file

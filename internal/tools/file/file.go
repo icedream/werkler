@@ -78,7 +78,7 @@ Total output is capped at 8 KiB across all regions.`,
 
 var readImageDef = ai.ToolDefinition{
 	Name:        "read_image",
-	Description: "Load a local image file so you can see its visual content. ONLY use for the following supported formats: PNG, JPEG, GIF, WebP.",
+	Description: "Read an image file and return it as a base64-encoded image for visual analysis. ONLY use for image files (PNG, JPEG, GIF, WebP). DO NOT use for text documents, PDFs, or any non-image files. For reading text files, use file_read_multi instead.",
 	InputSchema: map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -408,7 +408,7 @@ func (h *Handler) handleReadImage(ctx context.Context, args map[string]any) (str
 		}
 	}
 	if !strings.HasPrefix(mime, "image/") {
-		return "", nil, fmt.Errorf("read_image: %s is not an image file (detected content type: %s)", path, mime)
+		return "", nil, fmt.Errorf("read_image: %s is not an image file (detected content type: %s). For reading text documents or PDFs, use file_read_multi instead.", path, mime)
 	}
 	part := ai.ImagePart{Data: data, MIMEType: mime, Name: filepath.Base(path)}
 	return fmt.Sprintf("Image loaded: %s (%s, %d bytes)", filepath.Base(path), mime, len(data)), []ai.ImagePart{part}, nil
