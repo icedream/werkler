@@ -34,10 +34,9 @@ and more.`,
 			}
 		}
 
-		chatCmd.SetArgs(args)
-		return chatCmd.Execute()
+		return chatCmd.RunE(cmd, args)
 	},
-	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		return loadConfig()
 	},
 }
