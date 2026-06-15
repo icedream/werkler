@@ -29,8 +29,7 @@ and more.`,
 			// Check if we are in an interactive terminal.
 			// If not, show help instead of launching the TUI.
 			if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
-				cmd.Help()
-				return nil
+				return cmd.Help()
 			}
 		}
 
