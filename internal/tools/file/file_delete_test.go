@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/icedream/werkler/internal/chat"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -13,7 +14,9 @@ import (
 // noopContext satisfies the file.Context interface without any approvals.
 type noopContext struct{}
 
-func (noopContext) ActiveApprover(_ context.Context) PathApprover { return nil }
+func (noopContext) ActiveApprover(_ context.Context) PathApprover              { return nil }
+func (noopContext) CheckRedundantRead(_ string, _ []chat.Range) (bool, string) { return false, "" }
+func (noopContext) RecordRecentRead(_ string, _ string, _ []chat.Range)        {}
 
 func newFileHandler() *Handler { return NewHandler(noopContext{}) }
 

@@ -27,6 +27,10 @@ type PathApprover interface {
 type Context interface {
 	// ActiveApprover returns the path approver for this request, or nil.
 	ActiveApprover(ctx context.Context) PathApprover
+	// CheckRedundantRead checks if the requested path and ranges have been read recently in this session.
+	CheckRedundantRead(path string, ranges []chat.Range) (bool, string)
+	// RecordRecentRead adds a record of a successful file read to the session history.
+	RecordRecentRead(path, rawPath string, ranges []chat.Range)
 }
 
 // Handler holds the file tool handlers.
@@ -352,6 +356,14 @@ func (h *Handler) handleFileReadMulti(ctx context.Context, args map[string]any) 
 			fmt.Fprintf(&out, "=== %s [ERROR] ===\nstart_line (%d) > end_line (%d)\n", reg.rawPath, startLine, endLine)
 			continue
 		}
+
+		// Check for redundant reads
+		isRedundant, _ := h.ctx.CheckRedundantRead(reg.path, []chat.Range{{StartLine: startLine, EndLine: endLine}})
+		if isRedundant {
+			fmt.Fprintf(&out, "=== %s [WARNING] ===\nWarning: The requested range [%d-%d] for %s has already been read in this session and is currently in your context.\n", reg.rawPath, startLine, endLine, reg.rawPath)
+			continue
+		}
+
 		selected := lines[startLine-1 : endLine]
 		rangeLabel := fmt.Sprintf("L%d-L%d", startLine, startLine+len(selected)-1)
 		header := fmt.Sprintf("=== %s [%s of %d] ===\n", reg.rawPath, rangeLabel, totalLines)
@@ -374,6 +386,9 @@ func (h *Handler) handleFileReadMulti(ctx context.Context, args map[string]any) 
 		}
 		out.WriteString(section)
 		totalBytes += len(section)
+
+		// Record successful read
+		h.ctx.RecordRecentRead(reg.path, reg.rawPath, []chat.Range{{StartLine: startLine, EndLine: endLine}})
 	}
 	return out.String(), nil
 }

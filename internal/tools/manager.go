@@ -74,6 +74,23 @@ func (m *Manager) activeApprover(ctx context.Context) PathApprover {
 	return m.pathApprover
 }
 
+func (m *Manager) CheckRedundantRead(path string, ranges []chat.Range) (bool, string) {
+	if s, ok := m.wrapped.(interface {
+		CheckRedundantRead(string, []chat.Range) (bool, string)
+	}); ok {
+		return s.CheckRedundantRead(path, ranges)
+	}
+	return false, ""
+}
+
+func (m *Manager) RecordRecentRead(path, rawPath string, ranges []chat.Range) {
+	if s, ok := m.wrapped.(interface {
+		RecordRecentRead(string, string, []chat.Range)
+	}); ok {
+		s.RecordRecentRead(path, rawPath, ranges)
+	}
+}
+
 // UnapprovedPathsError is returned by CallTool when one or more paths accessed
 // by a built-in tool have not been approved by the user.
 // It implements chat.PathApprovalError so Session.CallTool propagates it as a

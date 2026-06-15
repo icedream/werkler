@@ -7,9 +7,24 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/icedream/werkler/internal/ai"
 )
+
+// Range describes a line range.
+type Range struct {
+	StartLine int `json:"start_line"`
+	EndLine   int `json:"end_line"`
+}
+
+// RecentRead describes a recent file read.
+type RecentRead struct {
+	Path      string    `json:"path"`      // canonicalized path
+	RawPath   string    `json:"raw_path"`  // original path provided by user (for error messages)
+	Ranges    []Range   `json:"ranges"`    // list of ranges read
+	Timestamp time.Time `json:"timestamp"` // when it was read
+}
 
 // PathAccessRequest describes a single path access that needs user approval.
 type PathAccessRequest struct {
@@ -138,10 +153,11 @@ type Session struct {
 	cwdReadPrefix     string          // if non-empty, reads under this absolute path are auto-approved
 	cwdWritePrefix    string          // if non-empty, write path-checks under this path are auto-approved (tool approval still required)
 
-	// mu protects disabledTools only; the other maps are only accessed from
+	// mu protects disabledTools and recentReads only; the other maps are only accessed from
 	// the TUI main goroutine and therefore do not need synchronisation.
 	mu            sync.RWMutex
 	disabledTools map[string]bool // tool names explicitly disabled for this session
+	recentReads   []RecentRead    // recent file reads to detect redundancy
 }
 
 // NewSession creates a Session with the given tool manager and auto-approve glob patterns.
@@ -155,6 +171,56 @@ func NewSession(tools ToolManager, autoApproveGlobs []string, autoApprovePaths [
 		sessionWritePaths: make(map[string]bool),
 		disabledTools:     make(map[string]bool),
 	}
+}
+
+// RecordRecentRead adds a record of a successful file read to the session history.
+func (s *Session) RecordRecentRead(path, rawPath string, ranges []Range) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Prune if too many reads (keep last 50)
+	if len(s.recentReads) >= 50 {
+		s.recentReads = s.recentReads[1:]
+	}
+
+	s.recentReads = append(s.recentReads, RecentRead{
+		Path:      path,
+		RawPath:   rawPath,
+		Ranges:    ranges,
+		Timestamp: time.Now(),
+	})
+}
+
+// CheckRedundantRead checks if the requested path and ranges have been read recently in this session.
+// Returns true and the original raw path if a redundant read is detected.
+func (s *Session) CheckRedundantRead(path string, ranges []Range) (bool, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, recent := range s.recentReads {
+		if recent.Path == path {
+			// Check if all requested ranges are covered by previously read ranges for this file
+			allCovered := true
+			for _, reqRange := range ranges {
+				covered := false
+				for _, recRange := range recent.Ranges {
+					if reqRange.StartLine >= recRange.StartLine && reqRange.EndLine <= recRange.EndLine {
+						covered = true
+						break
+					}
+				}
+				if !covered {
+					allCovered = false
+					break
+				}
+			}
+
+			if allCovered {
+				return true, recent.RawPath // Note: returning recent.RawPath might be misleading if it's a different file but same path (unlikely) or just to provide context. Actually, we should probably return the path that was read.
+			}
+		}
+	}
+	return false, ""
 }
 
 // NewConversation returns an initial message list containing the system prompt,
