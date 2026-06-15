@@ -47,10 +47,10 @@ func computeCompactionParams(s string, snap []ai.Message, modelName string, tool
 
 	totalTokens = estimateTotal(keepTurns)
 	if maxTokens > 0 {
-		// Target ~20 % of the context window post-compaction.  If even 1 turn
+		// Target ~30 % of the context window post-compaction.  If even 1 turn
 		// exceeds that, drop to 0 (summary only).  Never fill to the 65 %
 		// compaction threshold — that would guarantee an immediate re-trigger.
-		const targetFraction = 0.20
+		const targetFraction = 0.30
 		limit := int(float32(maxTokens) * targetFraction)
 		if totalTokens > limit {
 			keepTurns = 0
@@ -73,46 +73,12 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 	snap := make([]ai.Message, len(messages))
 	copy(snap, messages)
 	return func() tea.Msg {
-		var transcript strings.Builder
-
-		// Prepend any prior summary so the new one incorporates it.
-		if prior := extractPriorSummary(snap); prior != "" {
-			transcript.WriteString("## Prior summary (from earlier compaction — incorporate into new summary)\n\n")
-			transcript.WriteString(prior)
-			transcript.WriteString("\n\n---\n\n## New transcript\n\n")
-		}
-
-		for i, msg := range snap {
-			if msg.Role == "system" {
-				continue
-			}
-			switch msg.Role {
-			case "user":
-				transcript.WriteString("User: ")
-				transcript.WriteString(msg.Content)
-			case "assistant":
-				if msg.Content != "" {
-					transcript.WriteString("Assistant: ")
-					transcript.WriteString(msg.Content)
-				}
-				for _, tc := range msg.ToolCalls {
-					raw, _ := json.Marshal(tc.Arguments)
-					args := string(raw)
-					if len(args) > 300 {
-						args = args[:300] + "…"
-					}
-					fmt.Fprintf(&transcript, "Assistant called tool %q args: %s", tc.Name, args)
-				}
-			case "tool":
-				result := msg.Content
-				cap := toolResultCap(i, len(snap))
-				if len(result) > cap {
-					result = result[:cap] + "…"
-				}
-				fmt.Fprintf(&transcript, "Tool result (call_id: %s): %s", msg.ToolCallID, result)
-			}
-			transcript.WriteString("\n\n")
-		}
+		// Build a structured JSON transcript that preserves tool call IDs,
+		// full arguments, and complete tool results — unlike the old flat-text
+		// approach that truncated args to 300 chars and capped tool results.
+		// The compaction AI receives the same structured format it saw during
+		// the actual conversation, yielding much more precise summaries.
+		transcript := buildCompactTranscript(snap)
 
 		summaryMessages := []ai.Message{
 			{
@@ -121,7 +87,7 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 			},
 			{
 				Role:    "user",
-				Content: chat.CompactionUserMessage(transcript.String()),
+				Content: chat.CompactionUserMessage(transcript),
 			},
 		}
 
@@ -136,6 +102,62 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 			maxTokens:  maxTokens,
 		}
 	}
+}
+
+// buildCompactTranscript serialises the message snapshot into a compact JSON
+// array of {role, content, tool_calls, tool_call_id} objects — exactly the
+// format the AI received during the conversation. This preserves tool call IDs,
+// full arguments, and complete tool results, avoiding the information loss
+// of the old flat-text "User:/Assistant:/Tool result:" approach.
+func buildCompactTranscript(messages []ai.Message) string {
+	var entries []map[string]interface{}
+
+	for _, msg := range messages {
+		if msg.Role == "system" {
+			continue
+		}
+		entry := map[string]interface{}{"role": msg.Role}
+		switch msg.Role {
+		case "user":
+			entry["content"] = msg.Content
+		case "assistant":
+			entry["content"] = msg.Content
+			if len(msg.ToolCalls) > 0 {
+				tcs := make([]map[string]interface{}, len(msg.ToolCalls))
+				for i, tc := range msg.ToolCalls {
+					tcs[i] = map[string]interface{}{
+						"id":        tc.ID,
+						"name":      tc.Name,
+						"arguments": tc.Arguments,
+					}
+				}
+				entry["tool_calls"] = tcs
+			}
+		case "tool":
+			entry["tool_call_id"] = msg.ToolCallID
+			entry["content"] = msg.Content
+		}
+		entries = append(entries, entry)
+	}
+
+	// Prepend any prior summary so the new one incorporates it.
+	var parts []string
+	if prior := extractPriorSummary(messages); prior != "" {
+		parts = []string{
+			"## Prior summary (from earlier compaction — incorporate into new summary)",
+			prior,
+			"",
+			"## Conversation transcript (JSON array — use this to understand what actually happened)",
+		}
+	}
+
+	jsonBody, _ := json.MarshalIndent(entries, "", "  ")
+
+	if len(parts) > 0 {
+		parts = append(parts, string(jsonBody))
+		return strings.Join(parts, "\n\n")
+	}
+	return "## Conversation transcript (JSON array — use this to understand what actually happened)\n\n" + string(jsonBody)
 }
 
 // applyCompaction replaces the message history with the system message plus a
@@ -238,23 +260,27 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 	if m.autoCompactPending {
 		// Auto-compact: restart the AI turn that was interrupted.
 		// History was rewritten, so the previous response ID and cached system
-		// message are both stale. Use doStartStream (full context) directly
-		// to bypass IncrementalClient, which would otherwise strip messages to
-		// "new only" and omit the system message, causing self-hosted models
-		// to reject the request ("no user prompt provided").
+		// message are both stale. Use doStream (which may use the incremental
+		// client) rather than doStartStream (full context) — the incremental
+		// client will fall back to full-context mode when lastResponseID is
+		// empty, and on subsequent turns it will send only new messages, which
+		// preserves the KV cache prefix for the compacted context.
 		//
 		// If keepTurns was 0 the compacted history has only the system message
-		// (no user turn). Inject a synthetic "Continue." so the AI has a prompt
-		// to work with — the AI will re-evaluate and re-issue any tool calls
+		// (no user turn). Inject a synthetic prompt so the AI has a context to
+		// resume from — the AI will re-evaluate and re-issue any tool calls
 		// it needs based on the summary context.
 		if len(m.messages) == 0 || m.messages[len(m.messages)-1].Role != "user" {
-			m.messages = append(m.messages, ai.Message{Role: "user", Content: "Continue."})
+			// Reference the compaction summary so the AI knows what to continue.
+			// The summary block is at the top of the system message; this prompt
+			// gives the AI a clear instruction to resume from the summary context.
+			m.messages = append(m.messages, ai.Message{Role: "user", Content: "Based on the summary above, continue exactly where you left off."})
 		}
 		m.turnSystemMsg = ""
 		m.autoCompactPending = false
 		m.turnRoundtrips++
 		m.setThinking()
-		cmds = append(cmds, doStartStream(m.newOpCtx(), m.client, m.buildStreamMessages(m.messages), m.tools))
+		cmds = append(cmds, m.doStream(m.newOpCtx(), m.buildStreamMessages(m.messages), m.tools))
 	} else {
 		// Manual compact: also reset since history changed.
 		if m.incrementalClient != nil {

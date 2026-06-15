@@ -297,12 +297,22 @@ func (m *Model) activeSkills() []skills.Skill {
 }
 
 // rebuildSystemPrompt replaces messages[0] with a freshly built system message
-// reflecting the current active skills and model context. Call after toggling skills.
+// reflecting the current active skills and model context, while preserving any
+// existing compaction summary block so it survives across compactions and session
+// resumption. Call after toggling skills.
 func (m *Model) rebuildSystemPrompt() {
 	if len(m.messages) == 0 {
 		return
 	}
-	m.messages[0] = m.newConversation()[0]
+	// Preserve any compaction summary so the AI can resume work after a restart
+	// or manual compaction — without this, applySession → rebuildSystemPrompt
+	// would wipe the summary that was just loaded from disk.
+	priorSummary := extractPriorSummary(m.messages)
+	base := m.newConversation()[0]
+	if priorSummary != "" {
+		base.Content = replaceSummaryBlock(base.Content, priorSummary)
+	}
+	m.messages[0] = base
 }
 
 // applySkillToggle synchronises the tool manager and system prompt after a

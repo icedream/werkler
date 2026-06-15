@@ -15,6 +15,9 @@ const CompactionSystemPrompt = `You are a state recorder for an AI coding assist
 Your output will be inserted directly as context so the assistant can resume work exactly where it stopped.
 Write as if leaving a precise handoff note for yourself.
 
+INPUT FORMAT — the conversation transcript is a JSON array of messages with the same structure
+the assistant received during the conversation. Use it to determine what actually happened.
+
 OUTPUT FORMAT — reproduce these exact section headings:
 
 ## Goal
