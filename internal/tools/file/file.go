@@ -408,7 +408,7 @@ func (h *Handler) handleReadImage(ctx context.Context, args map[string]any) (str
 		}
 	}
 	if !strings.HasPrefix(mime, "image/") {
-		return "", nil, fmt.Errorf("read_image: %s is not an image file (detected content type: %s). For reading text documents or PDFs, use file_read_multi instead.", path, mime)
+		return "", nil, fmt.Errorf("read_image: %s is not an image file (detected content type: %s). For reading text documents or PDFs, use file_read_multi instead", path, mime)
 	}
 	part := ai.ImagePart{Data: data, MIMEType: mime, Name: filepath.Base(path)}
 	return fmt.Sprintf("Image loaded: %s (%s, %d bytes)", filepath.Base(path), mime, len(data)), []ai.ImagePart{part}, nil
