@@ -24,7 +24,16 @@ routine tasks: writing and reviewing code, designing software, drafting tickets,
 and more.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
-	RunE: func(_ *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			// Check if we are in an interactive terminal.
+			// If not, show help instead of launching the TUI.
+			if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+				cmd.Help()
+				return nil
+			}
+		}
+
 		chatCmd.SetArgs(args)
 		return chatCmd.Execute()
 	},
