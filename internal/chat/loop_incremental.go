@@ -112,11 +112,22 @@ func RunPromptIncremental(
 		}
 
 		// Add the message to the context
-		sessionContext.AddMessage(sessioncontext.Message{
-			Role:       msg.Role,
-			Content:    msg.Content,
-			ToolCallID: msg.ToolCallID,
-		})
+		newMsg := sessioncontext.Message{
+			Role:      msg.Role,
+			Content:   msg.Content,
+			Reasoning: msg.Reasoning,
+		}
+
+		// If it's an assistant message with tool calls, we must include them in the context history.
+		for _, tc := range msg.ToolCalls {
+			newMsg.ToolCalls = append(newMsg.ToolCalls, sessioncontext.ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Name,
+				Arguments: tc.Arguments,
+			})
+		}
+
+		sessionContext.AddMessage(newMsg)
 
 		if len(msg.ToolCalls) == 0 {
 			// End of turn with no tool calls.
