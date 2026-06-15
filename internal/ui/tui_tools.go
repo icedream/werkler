@@ -226,20 +226,6 @@ func doGetModelInfo(ctx context.Context, getter ai.ModelInfoGetter) tea.Cmd {
 	}
 }
 
-// toolResultCap returns the maximum number of characters to include from a
-// tool result in the compaction transcript. Applies a recency bias: the most
-// recent third of messages gets more space than older entries.
-func toolResultCap(msgIndex, total int) int {
-	switch {
-	case total == 0 || msgIndex >= total*2/3:
-		return 1500 // most recent third — most relevant
-	case msgIndex >= total/3:
-		return 600 // middle third
-	default:
-		return 200 // oldest third — summarise aggressively
-	}
-}
-
 // --- Formatting helpers ---
 
 func formatArgsCompact(args map[string]any) string {
