@@ -64,9 +64,9 @@ func TestManagerStart_EchoReadsOutput(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	out, running, exitCode, err := mgr.ReadOutput(handle, 2*time.Second)
+	out, newOff, running, exitCode, err := mgr.ReadNewOutput(handle, 0, 2*time.Second)
 	if err != nil {
-		t.Fatalf("ReadOutput: %v", err)
+		t.Fatalf("ReadNewOutput: %v", err)
 	}
 	if running {
 		t.Error("echo should have exited by now")
@@ -76,6 +76,9 @@ func TestManagerStart_EchoReadsOutput(t *testing.T) {
 	}
 	if !strings.Contains(out, "hello process") {
 		t.Errorf("output %q does not contain %q", out, "hello process")
+	}
+	if newOff == 0 {
+		t.Error("expected non-zero new offset")
 	}
 }
 
