@@ -191,7 +191,7 @@ func (m *Manager) Start(
 		readDone: make(chan struct{}),
 	}
 
-	var handle string
+	handle := newHandle()
 
 	if usePTY {
 		ptmx, err := pty.Start(cmd)
@@ -219,8 +219,6 @@ func (m *Manager) Start(
 		// the parent has read its output.
 		go m.readLoop(handle, p, stdout)
 	}
-
-	handle = newHandle()
 
 	m.mu.Lock()
 	m.procs[handle] = p
