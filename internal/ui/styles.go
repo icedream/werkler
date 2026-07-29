@@ -4,19 +4,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/glamour/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // thinkingSpinner is a single circle (●) that pulses through a purple→pink→purple
 // color gradient, readable at any font size.
 var thinkingSpinner = spinner.Spinner{
 	Frames: func() []string {
-		colors := []lipgloss.Color{"57", "63", "99", "135", "171", "207", "171", "135", "99", "63"}
+		colors := []string{"57", "63", "99", "135", "171", "207", "171", "135", "99", "63"}
 		f := make([]string, len(colors))
 		for i, c := range colors {
-			f[i] = lipgloss.NewStyle().Foreground(c).Render("●")
+			f[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("●")
 		}
 		return f
 	}(),

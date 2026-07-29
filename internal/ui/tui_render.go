@@ -2,13 +2,15 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/icedream/werkler/internal/agents"
 	"github.com/icedream/werkler/internal/config"
 	"github.com/icedream/werkler/internal/todostore"
@@ -42,7 +44,7 @@ func (m *Model) syncViewportHeight() {
 	if vph < 1 {
 		vph = 1
 	}
-	m.viewport.Height = vph
+	m.viewport.SetHeight(vph)
 }
 
 // recalcLayout updates viewport and input widths to account for whether the
@@ -52,14 +54,14 @@ func (m *Model) recalcLayout() {
 	if m.sidebarOpen && m.todoStore != nil && m.width-m.sidebarWidth >= minMainWidth {
 		mainW = m.width - m.sidebarWidth
 	}
-	m.viewport.Width = mainW
-	m.input.Width = mainW - 5 // 5 = len("You> ")
+	m.viewport.SetWidth(mainW)
+	m.input.SetWidth(mainW - 5) // 5 = len("You> ")
 	m.syncViewportHeight()
 }
 
 // activeBorderColor returns the lipgloss color for the TUI separator lines,
 // derived from the active mode's color (or the default muted gray).
-func (m Model) activeBorderColor() lipgloss.Color {
+func (m Model) activeBorderColor() color.Color {
 	if m.activeMode.Color != "" {
 		return lipgloss.Color(m.activeMode.Color)
 	}
@@ -71,32 +73,37 @@ func (m Model) modeSeparator(width int) string {
 	return lipgloss.NewStyle().Foreground(m.activeBorderColor()).Render(strings.Repeat("─", width))
 }
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
+	v := tea.NewView("")
 	if m.width == 0 {
-		return "" // not yet initialised — avoid rendering before first WindowSizeMsg
+		return v // not yet initialised — avoid rendering before first WindowSizeMsg
 	}
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
+	v.WindowTitle = m.effectiveWindowTitle()
 
 	// Pickers take over the full screen.
 	if m.state == statePickingModel {
-		return m.modelPicker.View()
+		return tea.View{Content: m.modelPicker.View()}
 	}
 	if m.state == statePickingSession {
-		return m.sessionPicker.View()
+		return tea.View{Content: m.sessionPicker.View()}
 	}
 	if m.state == statePickingTools {
-		return m.toolPicker.View()
+		return tea.View{Content: m.toolPicker.View()}
 	}
 	if m.state == stateViewingToolDetail {
-		return m.toolDetailView()
+		return tea.View{Content: m.toolDetailView()}
 	}
 	if m.state == statePickingSkills {
-		return m.skillPicker.View()
+		return tea.View{Content: m.skillPicker.View()}
 	}
 	if m.state == statePickingMode {
-		return m.modePicker.View()
+		return tea.View{Content: m.modePicker.View()}
 	}
 	if m.state == statePickingRegistry {
-		return m.registryView()
+		return tea.View{Content: m.registryView()}
 	}
 	if m.state == stateAgentWizardMode ||
 		m.state == stateAgentWizardDescribe ||
@@ -105,7 +112,7 @@ func (m Model) View() string {
 		m.state == stateAgentWizardManual ||
 		m.state == stateAgentWizardTools ||
 		m.state == stateAgentWizardDone {
-		return m.agentWizardView()
+		return tea.View{Content: m.agentWizardView()}
 	}
 
 	sep := m.modeSeparator(m.width)
@@ -124,7 +131,7 @@ func (m Model) View() string {
 	showSidebar := m.sidebarOpen && m.todoStore != nil && m.width-m.sidebarWidth >= minMainWidth
 	if showSidebar {
 		sidebarSep := lipgloss.NewStyle().Foreground(m.activeBorderColor())
-		sepCol := sidebarSep.Render(strings.Repeat("│\n", m.viewport.Height))
+		sepCol := sidebarSep.Render(strings.Repeat("│\n", m.viewport.Height()))
 		// Trim the trailing newline from the sep column before joining.
 		sepCol = strings.TrimSuffix(sepCol, "\n")
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
@@ -155,7 +162,7 @@ func (m Model) View() string {
 
 	b.WriteString(m.inputView())
 
-	return b.String()
+	return tea.View{Content: b.String()}
 }
 
 // --- Helper views ---
@@ -412,7 +419,7 @@ func (m Model) inputView() string {
 func (m Model) sidebarView() string {
 	contentW := m.sidebarWidth - 1 // 1 col reserved for the "│" separator
 	todos := m.todoStore.List()
-	vpH := m.viewport.Height
+	vpH := m.viewport.Height()
 
 	lines := make([]string, 0, vpH)
 	title := sidebarTitleStyle.Width(contentW).Render("Todos")

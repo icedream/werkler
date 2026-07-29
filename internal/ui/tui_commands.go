@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 )
 
 // slashCommands is the ordered registry of all /commands.
@@ -126,7 +126,7 @@ func init() {
 				si.Placeholder = "type to search registry…"
 				si.Prompt = "Search: "
 				si.CharLimit = 100
-				si.Width = m.width - 12
+				si.SetWidth(m.width - 12)
 				si.Focus()
 				m.registrySearchInput = si
 

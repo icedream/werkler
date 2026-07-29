@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/icedream/werkler/internal/ai"
 	"github.com/icedream/werkler/internal/chat"
@@ -241,12 +241,12 @@ func TestUpdate_ToolApproval_Y_StartsCallingTool(t *testing.T) {
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusPending})
 
 	// First key press stages the choice.
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: 'y'})
 	assert.Equal(t, "y", m.pendingApprovalChoice)
 	assert.Equal(t, stateAwaitingApproval, m.state)
 
 	// Enter confirms.
-	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	assert.Equal(t, stateCallingTool, m.state)
 	assert.Nil(t, m.currentCall)
@@ -265,9 +265,9 @@ func TestUpdate_ToolApproval_A_ApprovesForSessionAndCalls(t *testing.T) {
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusPending})
 
 	// Stage "a" then confirm with Enter.
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: 'a'})
 	assert.Equal(t, "a", m.pendingApprovalChoice)
-	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	assert.Equal(t, stateCallingTool, m.state)
 	assert.True(t, session.IsApproved("some_tool"), "tool should now be session-approved")
@@ -290,8 +290,8 @@ func TestUpdate_ToolApproval_N_DeniesAndProcessesNext(t *testing.T) {
 	m.items = append(m.items, displayItem{kind: itemToolCall, toolStatus: toolStatusPending})
 
 	// Stage "n" then confirm.
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: 'n'})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	assert.Equal(t, toolStatusDenied, m.items[0].toolStatus)
 	assert.Nil(t, m.currentCall)
@@ -374,7 +374,7 @@ func TestUpdate_ToolResult_Failure_InformsAI(t *testing.T) {
 
 func TestUpdate_CtrlC_Quits(t *testing.T) {
 	m := baseModel(t)
-	_, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := update(t, m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	require.NotNil(t, cmd)
 	// Execute the cmd: bubbletea quit commands return tea.QuitMsg.
 	msg := cmd()
@@ -395,9 +395,9 @@ func TestUpdate_Enter_InIdle_SendsMessage(t *testing.T) {
 
 	// Simulate typing "hello" then pressing Enter.
 	for _, r := range "hello" {
-		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = update(t, m, tea.KeyPressMsg{Code: rune(r), Text: string(r)})
 	}
-	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	assert.Equal(t, stateThinking, m.state)
 	assert.Equal(t, "", m.input.Value()) // input cleared
@@ -411,7 +411,7 @@ func TestUpdate_Enter_InIdle_SendsMessage(t *testing.T) {
 func TestUpdate_Enter_EmptyInput_NoOp(t *testing.T) {
 	m := baseModel(t)
 	m.state = stateIdle
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	assert.Equal(t, stateIdle, m.state)
 	assert.Empty(t, m.items)
 }
@@ -424,9 +424,9 @@ func TestUpdate_Queue_EnterWhileBusy_AddsToQueue(t *testing.T) {
 
 	// Type "hello" into the input.
 	for _, r := range "hello" {
-		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = update(t, m, tea.KeyPressMsg{Code: rune(r), Text: string(r)})
 	}
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	require.Len(t, m.queuedPrompts, 1)
 	assert.Equal(t, "hello", m.queuedPrompts[0].text)
@@ -441,9 +441,9 @@ func TestUpdate_Queue_MultiplePrompts_FIFO(t *testing.T) {
 
 	for _, text := range []string{"first", "second", "third"} {
 		for _, r := range text {
-			m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			m, _ = update(t, m, tea.KeyPressMsg{Code: rune(r), Text: string(r)})
 		}
-		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+		m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	}
 
 	require.Len(t, m.queuedPrompts, 3)
@@ -457,9 +457,9 @@ func TestUpdate_Queue_EscWithText_ClearsInput(t *testing.T) {
 	m.state = stateThinking
 
 	for _, r := range "hello" {
-		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = update(t, m, tea.KeyPressMsg{Code: rune(r), Text: string(r)})
 	}
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	assert.Equal(t, "", m.input.Value())
 	assert.Empty(t, m.queuedPrompts)
@@ -470,7 +470,7 @@ func TestUpdate_Queue_EscEmptyInput_RemovesLastQueued(t *testing.T) {
 	m.state = stateStreaming
 	m.queuedPrompts = []queuedPrompt{{text: "first"}, {text: "second"}}
 
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	require.Len(t, m.queuedPrompts, 1)
 	assert.Equal(t, "first", m.queuedPrompts[0].text)
@@ -479,7 +479,7 @@ func TestUpdate_Queue_EscEmptyInput_RemovesLastQueued(t *testing.T) {
 func TestUpdate_Queue_EscEmptyInputNoQueue_NoOp(t *testing.T) {
 	m := baseModel(t)
 	m.state = stateThinking
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	assert.Empty(t, m.queuedPrompts)
 	assert.Equal(t, stateThinking, m.state)
 }
@@ -487,7 +487,7 @@ func TestUpdate_Queue_EscEmptyInputNoQueue_NoOp(t *testing.T) {
 func TestUpdate_Queue_EnterEmpty_NotQueued(t *testing.T) {
 	m := baseModel(t)
 	m.state = stateThinking
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	assert.Empty(t, m.queuedPrompts)
 }
 
@@ -548,9 +548,9 @@ func TestUpdate_Queue_SurvivesToolCalls(t *testing.T) {
 	// 1. Queue a follow-up while the first stream is in-flight.
 	m.state = stateStreaming
 	for _, r := range "follow-up" {
-		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = update(t, m, tea.KeyPressMsg{Code: rune(r), Text: string(r)})
 	}
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	require.Len(t, m.queuedPrompts, 1)
 
 	// 2. First stream finishes with a tool call.

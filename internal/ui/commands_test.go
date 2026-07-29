@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,7 +97,7 @@ func TestRegisterCommand_ActionInvoked(t *testing.T) {
 	m.input.SetValue("/echo hello world")
 	m.collapsedHandles = make(map[string]bool)
 
-	next, _ := update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	assert.Equal(t, "hello world", got)
 	require.NotEmpty(t, next.items)
 	last := next.items[len(next.items)-1]

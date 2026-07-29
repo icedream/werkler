@@ -9,7 +9,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/charmbracelet/glamour"
+	"charm.land/glamour/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/icedream/werkler/internal/agents"

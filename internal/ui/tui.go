@@ -12,14 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/icedream/werkler/internal/agents"
 	"github.com/icedream/werkler/internal/ai"
@@ -455,7 +455,7 @@ func initialModel(
 		askUserItemIdx:         -1,
 		historyIdx:             -1,
 		toolCallIdx:            make(map[string]int),
-		viewport:               viewport.New(0, 0),
+		viewport:               viewport.New(viewport.WithWidth(0), viewport.WithHeight(0)),
 		modelPicker:            picker,
 		sessionPicker:          sessPicker,
 		toolPicker:             toolPickerM,
@@ -503,33 +503,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	needRebuild := false
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if msg.Type == tea.KeyCtrlC {
-			return m, tea.Quit
-		}
-
+	case tea.PasteMsg:
 		// Bracketed paste: insert pasted text into the input, collapsing newlines to spaces.
-		if msg.Paste && msg.Type == tea.KeyRunes {
-			text := strings.Map(func(r rune) rune {
-				if r == '\n' || r == '\r' || r == '\t' {
-					return ' '
-				}
-				return r
-			}, string(msg.Runes))
-			m.input.SetValue(m.input.Value() + text)
-			m.input.CursorEnd()
-			needRebuild = true
-			break
+		text := strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == '\t' {
+				return ' '
+			}
+			return r
+		}, string(msg.Content))
+		m.input.SetValue(m.input.Value() + text)
+		m.input.CursorEnd()
+		needRebuild = true
+	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
 		}
 
 		// Alt+M toggles terminal mouse reporting so the user can select and copy text.
 		if msg.String() == "alt+m" {
-			if m.mouseEnabled {
-				m.mouseEnabled = false
-				return m, tea.DisableMouse
-			}
-			m.mouseEnabled = true
-			return m, tea.EnableMouseCellMotion
+			m.mouseEnabled = !m.mouseEnabled
+			needRebuild = true
 		}
 
 		// Ctrl+T toggles live token speed indicator.
@@ -538,7 +531,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 		}
 		// ctrl+p opens the model picker from any quiescent state.
-		if msg.Type == tea.KeyCtrlP && m.modelManager != nil &&
+		if msg.String() == "ctrl+p" && m.modelManager != nil &&
 			m.state != statePickingModel {
 			switch m.state {
 			case stateIdle, stateAwaitingUserQuestion:
@@ -741,8 +734,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case stateIdle:
-			switch msg.Type {
-			case tea.KeyEnter:
+			switch msg.String() {
+			case "enter":
 				// When the completion popup is open: exact command name runs the
 				// action, a command followed by args closes the popup and falls
 				// through to text dispatch, and a partial prefix fills the input.
@@ -940,7 +933,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							// Set initial session title from the first user message (synchronous).
 							if m.sessionTitle == "" {
 								m.sessionTitle = sessionstore.GenerateTitle(m.messages)
-								cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
 								if m.sessionStore != nil {
 									cmds = append(cmds, m.saveSession())
 								}
@@ -972,7 +964,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 
-			case tea.KeyTab:
+			case "tab":
 				if m.showCompletion {
 					// Tab fills the selected completion into the input.
 					filtered := m.filteredCmds()
@@ -987,11 +979,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, inputCmd)
 				}
 
-			case tea.KeyShiftTab:
+			case "shift+tab":
 				if len(m.allModes) > 0 {
 					cmds = append(cmds, m.cycleMode()...)
 				}
-			case tea.KeyUp:
+			case "up":
 				switch {
 				case m.showCompletion:
 					filtered := m.filteredCmds()
@@ -1008,7 +1000,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, vpCmd)
 				}
 
-			case tea.KeyDown:
+			case "down":
 				switch {
 				case m.showCompletion:
 					filtered := m.filteredCmds()
@@ -1025,7 +1017,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, vpCmd)
 				}
 
-			case tea.KeyEsc:
+			case "esc":
 				if m.showCompletion {
 					m.showCompletion = false
 					m.syncViewportHeight()
@@ -1034,7 +1026,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateCompletion()
 				}
 
-			case tea.KeyCtrlR:
+			case "ctrl+r":
 				if m.sessionStore != nil {
 					m.showCompletion = false
 					m.state = statePickingSession
@@ -1043,7 +1035,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, doLoadSessions(m.sessionStore))
 				}
 
-			case tea.KeyPgUp, tea.KeyPgDown:
+			case "pgup", "pgdn":
 				// Explicit page scroll — forward to viewport only (not to textinput).
 				var vpCmd tea.Cmd
 				m.viewport, vpCmd = m.viewport.Update(msg)
@@ -1061,10 +1053,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case statePickingModel:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.returnFromModelPicker()
-			case tea.KeyEnter:
+			case "enter":
 				if sel := m.modelPicker.SelectedItem(); sel != nil {
 					item := sel.(modelItem)
 					m.modelManager.SetModel(item.ModelItem)
@@ -1083,11 +1075,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case statePickingSession:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyEnter:
+			case "enter":
 				if sel := m.sessionPicker.SelectedItem(); sel != nil {
 					switch item := sel.(type) {
 					case newSessionItem:
@@ -1103,7 +1095,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case sessionItem:
 						m.resumeHint = nil
 						m.applySession(&item.sess)
-						cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
 						needRebuild = true
 						if cmd := m.recountContext(); cmd != nil {
 							cmds = append(cmds, cmd)
@@ -1119,22 +1110,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case statePickingTools:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				// Refresh m.tools from the (possibly updated) disabled set and go back.
 				m.setTools(m.filteredFromAllDefs())
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyEnter:
+			case "enter":
 				// Open detail view for the selected tool.
 				if sel := m.toolPicker.SelectedItem(); sel != nil {
 					item := sel.(toolItem)
 					m.toolDetailItem = item
-					m.toolDetailVP = viewport.New(m.width, m.height-fixedLines)
+					m.toolDetailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(m.height-fixedLines))
 					m.toolDetailVP.SetContent(buildToolDetail(item, m.width))
 					m.state = stateViewingToolDetail
 				}
-			case tea.KeySpace:
+			case " ":
 				// Toggle the currently selected tool.
 				if sel := m.toolPicker.SelectedItem(); sel != nil {
 					item := sel.(toolItem)
@@ -1142,7 +1133,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.session.SetToolEnabled(item.name, item.enabled)
 					m.toolPicker.SetItem(m.toolPicker.Index(), item)
 				}
-			case tea.KeyRunes:
+			case "":
 				var pickerCmd tea.Cmd
 				m.toolPicker, pickerCmd = m.toolPicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
@@ -1153,8 +1144,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case stateViewingToolDetail:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC, tea.KeyEnter:
+			switch msg.String() {
+			case "esc", "ctrl+c", "enter":
 				m.state = statePickingTools
 			default:
 				var vpCmd tea.Cmd
@@ -1163,11 +1154,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case statePickingSkills:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeySpace:
+			case " ":
 				if sel := m.skillPicker.SelectedItem(); sel != nil {
 					item := sel.(skillItem)
 					item.enabled = !item.enabled
@@ -1175,7 +1166,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.skillPicker.SetItem(m.skillPicker.Index(), item)
 					m.applySkillToggle()
 				}
-			case tea.KeyRunes:
+			case "":
 				var pickerCmd tea.Cmd
 				m.skillPicker, pickerCmd = m.skillPicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
@@ -1186,11 +1177,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case statePickingMode:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyEnter:
+			case "enter":
 				if sel := m.modePicker.SelectedItem(); sel != nil {
 					item := sel.(modeItem)
 					m.applyMode(item.mode)
@@ -1207,11 +1198,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case stateAgentWizardMode:
 			// Choose AI-assisted (a) or manual (m), or Esc to cancel.
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyRunes:
+			case "":
 				switch msg.String() {
 				case "a", "A":
 					m.state = stateAgentWizardDescribe
@@ -1224,11 +1215,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 
 		case stateAgentWizardDescribe:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyCtrlS:
+			case "ctrl+s":
 				// Ctrl+S submits the description.
 				desc := strings.TrimSpace(m.agentWizardDescribeTA.Value())
 				if desc != "" {
@@ -1253,18 +1244,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var spCmd tea.Cmd
 			m.spinner, spCmd = m.spinner.Update(msg)
 			cmds = append(cmds, spCmd)
-			if msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlC {
+			if msg.String() == "esc" || msg.String() == "ctrl+c" {
 				m.setIdle()
 				m.updateCompletion()
 			}
 			needRebuild = true
 
 		case stateAgentWizardReview:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyRunes:
+			case "":
 				switch msg.String() {
 				case "c", "C":
 					// Continue to tool picker.
@@ -1294,27 +1285,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 
 		case stateAgentWizardManual:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyTab, tea.KeyEnter:
+			case "tab", "enter":
 				switch {
 				case m.agentWizardManualIdx < 2:
 					// Advance through the single-line fields.
 					m.agentWizardManualTAs[m.agentWizardManualIdx].Blur()
 					m.agentWizardManualIdx++
 					m.agentWizardManualTAs[m.agentWizardManualIdx].Focus()
-				case m.agentWizardManualIdx == 2 && msg.Type == tea.KeyTab:
+				case m.agentWizardManualIdx == 2 && msg.String() == "tab":
 					// Tab from 3rd single-line field -> instructions textarea.
 					m.agentWizardManualTAs[2].Blur()
 					m.agentWizardManualIdx = 3
 					cmds = append(cmds, m.agentWizardManualTA.Focus())
-				case m.agentWizardManualIdx == 3 && msg.Type == tea.KeyTab:
+				case m.agentWizardManualIdx == 3 && msg.String() == "tab":
 					// Tab from instructions -> submit (validate & proceed).
 					cmds = append(cmds, m.submitManualForm()...)
 				}
-			case tea.KeyShiftTab:
+			case "shift+tab":
 				if m.agentWizardManualIdx == 3 {
 					m.agentWizardManualTA.Blur()
 					m.agentWizardManualIdx = 2
@@ -1338,14 +1329,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 
 		case stateAgentWizardTools:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				m.setIdle()
 				m.updateCompletion()
-			case tea.KeyEnter:
+			case "enter":
 				// Confirm tool selection and save.
 				cmds = append(cmds, m.saveAgentFromWizard()...)
-			case tea.KeySpace:
+			case " ":
 				if sel := m.agentWizardToolPicker.SelectedItem(); sel != nil {
 					item := sel.(agentToolItem)
 					if !item.alwaysOn {
@@ -1354,7 +1345,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.agentWizardToolPicker.SetItem(m.agentWizardToolPicker.Index(), item)
 					}
 				}
-			case tea.KeyRunes:
+			case "":
 				var pickerCmd tea.Cmd
 				m.agentWizardToolPicker, pickerCmd = m.agentWizardToolPicker.Update(msg)
 				cmds = append(cmds, pickerCmd)
@@ -1371,8 +1362,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			needRebuild = true
 
 		case statePickingRegistry:
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC:
+			switch msg.String() {
+			case "esc", "ctrl+c":
 				// On browse tab: Esc clears search first, then closes on second press.
 				if m.registryTab == 0 && m.registrySearchInput.Value() != "" {
 					m.registrySearchInput.Reset()
@@ -1393,10 +1384,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, m.input.Focus())
 				}
 
-			case tea.KeyTab:
+			case "tab":
 				m.registryTab = 1 - m.registryTab
 
-			case tea.KeyEnter:
+			case "enter":
 				if m.registryTab == 0 {
 					sel := m.registryPicker.SelectedItem()
 					if sel == nil {
@@ -1438,7 +1429,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, doSaveMCPServer(m.ctx, ri.srv, m.persistMCPServer))
 				}
 
-			case tea.KeyCtrlD:
+			case "ctrl+d":
 				if m.registryTab == 1 {
 					sel := m.registryInstalledList.SelectedItem()
 					if sel == nil {
@@ -1472,8 +1463,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.registrySearchSeq++
 						cmds = append(cmds, doFetchRegistry(ctx, m.registrySearchSeq, m.registrySearchInput.Value(), ""))
 					}
-					switch msg.Type {
-					case tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown:
+					switch msg.String() {
+					case "up", "down", "pgup", "pgdn":
 						var listCmd tea.Cmd
 						m.registryPicker, listCmd = m.registryPicker.Update(msg)
 						cmds = append(cmds, listCmd)
@@ -1487,8 +1478,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case stateConnectingMCP:
 			// Allow viewport scrolling and prompt queuing; block submission until connected.
-			switch msg.Type {
-			case tea.KeyEnter:
+			switch msg.String() {
+			case "enter":
 				text := strings.TrimSpace(m.input.Value())
 				if text != "" {
 					m.input.Reset()
@@ -1497,7 +1488,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.queuedPrompts = append(m.queuedPrompts, queuedPrompt{text: text, displayed: true})
 					needRebuild = true
 				}
-			case tea.KeyEsc:
+			case "esc":
 				if m.input.Value() != "" {
 					m.input.Reset()
 				} else if len(m.queuedPrompts) > 0 {
@@ -1514,8 +1505,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case stateThinking, stateStreaming, stateCallingTool, stateConnectingOAuth, stateCompacting:
-			switch msg.Type {
-			case tea.KeyEnter:
+			switch msg.String() {
+			case "enter":
 				text := strings.TrimSpace(m.input.Value())
 				// Handle slash commands with arguments immediately — before the
 				// completion-popup path (which only runs the no-arg action) and
@@ -1591,7 +1582,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						needRebuild = true
 					}
 				}
-			case tea.KeyTab:
+			case "tab":
 				if m.showCompletion {
 					filtered := m.filteredCmds()
 					if len(filtered) > 0 {
@@ -1600,11 +1591,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.updateCompletion()
 					}
 				}
-			case tea.KeyShiftTab:
+			case "shift+tab":
 				if len(m.allModes) > 0 {
 					cmds = append(cmds, m.cycleMode()...)
 				}
-			case tea.KeyUp:
+			case "up":
 				if m.showCompletion {
 					filtered := m.filteredCmds()
 					if len(filtered) > 0 {
@@ -1615,7 +1606,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewport, vpCmd = m.viewport.Update(msg)
 					cmds = append(cmds, vpCmd)
 				}
-			case tea.KeyDown:
+			case "down":
 				if m.showCompletion {
 					filtered := m.filteredCmds()
 					if len(filtered) > 0 {
@@ -1626,7 +1617,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewport, vpCmd = m.viewport.Update(msg)
 					cmds = append(cmds, vpCmd)
 				}
-			case tea.KeyEsc:
+			case "esc":
 				switch {
 				case m.showCompletion:
 					m.showCompletion = false
@@ -1665,8 +1656,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case stateAwaitingUserQuestion:
-			switch msg.Type {
-			case tea.KeyUp:
+			switch msg.String() {
+			case "up":
 				if len(m.askUserChoices) > 0 {
 					switch {
 					case m.askUserSelectedIdx > 0:
@@ -1678,7 +1669,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					needRebuild = true
 				}
-			case tea.KeyDown:
+			case "down":
 				if len(m.askUserChoices) > 0 {
 					switch {
 					case m.askUserSelectedIdx < len(m.askUserChoices)-1:
@@ -1690,7 +1681,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					needRebuild = true
 				}
-			case tea.KeyEnter:
+			case "enter":
 				var answer string
 				var readyToSubmit bool
 				switch {
@@ -1747,7 +1738,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				if m.askUserAllowFreeform || len(m.askUserChoices) == 0 {
 					// Typing any rune deselects any highlighted choice.
-					if msg.Type == tea.KeyRunes && m.askUserSelectedIdx >= 0 {
+					if msg.Text != "" && m.askUserSelectedIdx >= 0 {
 						m.askUserSelectedIdx = -1
 						needRebuild = true
 					}
@@ -1877,7 +1868,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		m.autopilotDisable()
 		m.currentTaskTitle = "" // clear task title on completion
-		cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
 		m.items = append(m.items, displayItem{
 			kind:    itemMarkdown,
 			content: "✓ **Task complete**\n\n" + msg.summary,
@@ -1890,13 +1880,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskTitleMsg:
 		m.currentTaskTitle = msg.title
-		cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
 		needRebuild = true
 
 	case sessionTitleRefinedMsg:
 		if msg.err == nil && msg.title != "" {
 			m.sessionTitle = msg.title
-			cmds = append(cmds, tea.SetWindowTitle(m.effectiveWindowTitle()))
 			if m.sessionStore != nil {
 				cmds = append(cmds, m.saveSession())
 			}
@@ -2245,16 +2233,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.agentWizardManualTA.SetWidth(m.width - 4)
 		}
 		for i := range m.agentWizardManualTAs {
-			m.agentWizardManualTAs[i].Width = m.width - 6
+			m.agentWizardManualTAs[i].SetWidth(m.width - 6)
 		}
 		if m.state == stateViewingToolDetail {
-			m.toolDetailVP.Width = m.width
-			m.toolDetailVP.Height = m.height - fixedLines
+			m.toolDetailVP.SetWidth(m.width)
+			m.toolDetailVP.SetHeight(m.height - fixedLines)
 		}
 		if m.state == statePickingRegistry {
 			m.registryPicker.SetSize(m.width, m.height-fixedLines-2)
 			m.registryInstalledList.SetSize(m.width, m.height-fixedLines)
-			m.registrySearchInput.Width = m.width - 12
+			m.registrySearchInput.SetWidth(m.width - 12)
 		}
 		m.recalcLayout() // sets viewport.Width, input.Width, viewport.Height
 		m.renderer = newGlamourRenderer(m.width-4, m.glamourStyle)
@@ -3161,7 +3149,7 @@ func RunTUI(
 		})
 	}
 
-	prog = tea.NewProgram(&m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	prog = tea.NewProgram(&m)
 	_, err = prog.Run()
 	return err
 }
@@ -3174,7 +3162,7 @@ func resolveGlamourStyle() string {
 	if s := os.Getenv("GLAMOUR_STYLE"); s != "" {
 		return s
 	}
-	if lipgloss.HasDarkBackground() {
+	if lipgloss.HasDarkBackground(os.Stdin, os.Stdout) {
 		return "dark"
 	}
 	return "light"
