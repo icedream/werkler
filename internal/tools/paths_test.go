@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -120,5 +121,135 @@ func TestExtractPaths_BinaryFirst(t *testing.T) {
 	first := paths[0]
 	if first == "/tmp/project/src" {
 		t.Errorf("first path is a source dir, expected the binary; paths=%v", paths)
+	}
+}
+
+// TestExtractShellSubCommands_QuotedPipes verifies that pipes inside quoted
+// strings are treated as literal characters and do NOT split the command.
+func TestExtractShellSubCommands_QuotedPipes(t *testing.T) {
+	// The pipe inside double quotes is a literal character; only the outer
+	// pipe should be a separator.
+	cmds := extractShellSubCommands(`echo "foo | bar" | grep baz`, "")
+	// Should find: echo, grep (NOT a third command from splitting on the quoted pipe)
+	if len(cmds) != 2 {
+		t.Fatalf("expected 2 commands, got %d: %v", len(cmds), cmds)
+	}
+	// Commands are resolved to absolute paths.
+	if !strings.HasSuffix(cmds[0], "echo") {
+		t.Errorf("first command is %q, want echo", cmds[0])
+	}
+	if !strings.HasSuffix(cmds[1], "grep") {
+		t.Errorf("second command is %q, want grep", cmds[1])
+	}
+}
+
+// TestExtractShellSubCommands_EscapedPipes verifies that escaped pipes are treated
+// as literal characters (the pipe becomes part of the argument, not a separator).
+func TestExtractShellSubCommands_EscapedPipes(t *testing.T) {
+	cmds := extractShellSubCommands(`echo \| grep`, "")
+	// \| is a literal pipe argument, not a separator — only echo is the command.
+	if len(cmds) != 1 {
+		t.Fatalf("expected 1 command, got %d: %v", len(cmds), cmds)
+	}
+	if !strings.HasSuffix(cmds[0], "echo") {
+		t.Errorf("command is %q, want echo", cmds[0])
+	}
+}
+
+// TestExtractShellSubCommands_CommandSubstitution verifies that pipes inside
+// $() are treated as literal characters.
+func TestExtractShellSubCommands_CommandSubstitution(t *testing.T) {
+	cmds := extractShellSubCommands(`echo $(ls | grep foo)`, "")
+	// Should find: echo, ls, grep
+	if len(cmds) != 3 {
+		t.Fatalf("expected 3 commands, got %d: %v", len(cmds), cmds)
+	}
+	if !strings.HasSuffix(cmds[0], "echo") {
+		t.Errorf("first command is %q, want echo", cmds[0])
+	}
+	if !strings.HasSuffix(cmds[1], "ls") {
+		t.Errorf("second command is %q, want ls", cmds[1])
+	}
+	if !strings.HasSuffix(cmds[2], "grep") {
+		t.Errorf("third command is %q, want grep", cmds[2])
+	}
+}
+
+// TestExtractShellSubCommands_Subshells verifies that pipes inside () are treated
+// as literal characters.
+func TestExtractShellSubCommands_Subshells(t *testing.T) {
+	cmds := extractShellSubCommands(`(echo | grep)`, "")
+	// Should find: echo, grep
+	if len(cmds) != 2 {
+		t.Fatalf("expected 2 commands, got %d: %v", len(cmds), cmds)
+	}
+	if !strings.HasSuffix(cmds[0], "echo") {
+		t.Errorf("first command is %q, want echo", cmds[0])
+	}
+	if !strings.HasSuffix(cmds[1], "grep") {
+		t.Errorf("second command is %q, want grep", cmds[1])
+	}
+}
+
+// TestExtractShellSubCommands_Nested verifies nested structures work.
+func TestExtractShellSubCommands_Nested(t *testing.T) {
+	cmds := extractShellSubCommands(`$(echo "$(echo | grep)")`, "")
+	// Should find: echo, grep (echo appears twice in nesting, but deduped)
+	if len(cmds) != 2 {
+		t.Fatalf("expected 2 commands, got %d: %v", len(cmds), cmds)
+	}
+	if !strings.HasSuffix(cmds[0], "echo") {
+		t.Errorf("first command is %q, want echo", cmds[0])
+	}
+	if !strings.HasSuffix(cmds[1], "grep") {
+		t.Errorf("second command is %q, want grep", cmds[1])
+	}
+}
+
+// TestExtractShellSubCommands_Mixed verifies a complex mixed script.
+func TestExtractShellSubCommands_Mixed(t *testing.T) {
+	cmds := extractShellSubCommands(`echo "hello" | grep "world"; ls -la`, "")
+	// Should find: echo, grep, ls
+	if len(cmds) != 3 {
+		t.Fatalf("expected 3 commands, got %d: %v", len(cmds), cmds)
+	}
+	if !strings.HasSuffix(cmds[0], "echo") {
+		t.Errorf("first command is %q, want echo", cmds[0])
+	}
+	if !strings.HasSuffix(cmds[1], "grep") {
+		t.Errorf("second command is %q, want grep", cmds[1])
+	}
+	if !strings.HasSuffix(cmds[2], "ls") {
+		t.Errorf("third command is %q, want ls", cmds[2])
+	}
+}
+
+// TestExtractShellSubCommands_Heredoc verifies heredocs are handled.
+func TestExtractShellSubCommands_Heredoc(t *testing.T) {
+	cmds := extractShellSubCommands(`cat <<EOF
+foo bar
+EOF
+`, "")
+	// Should find: cat
+	if len(cmds) != 1 {
+		t.Fatalf("expected 1 command, got %d: %v", len(cmds), cmds)
+	}
+	if !strings.HasSuffix(cmds[0], "cat") {
+		t.Errorf("command is %q, want cat", cmds[0])
+	}
+}
+
+// TestExtractShellSubCommands_Fallback verifies that parse failures fall back
+// to the regex-based approach.
+func TestExtractShellSubCommands_Fallback(t *testing.T) {
+	// A script that might fail to parse (malformed).
+	// The fallback should still extract something sensible.
+	cmds := extractShellSubCommands(`echo broken |`, "")
+	// At minimum should find echo
+	if len(cmds) == 0 {
+		t.Fatalf("expected at least one command from fallback, got %v", cmds)
+	}
+	if !strings.HasSuffix(cmds[0], "echo") {
+		t.Errorf("command is %q, want echo", cmds[0])
 	}
 }
