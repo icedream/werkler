@@ -857,6 +857,32 @@ func renderStreamingFileWrite(rawArgs string, width int) string {
 	return result + toolDimStyle.Render("▋")
 }
 
+// updateToolDisplayArgs updates toolArgs and toolNote from partial JSON.
+// Parses the raw args with closePartialJSON, then calls BadgeArgs and Intent
+// on the resulting map. Returns true if anything changed.
+func updateToolDisplayArgs(item *displayItem, name string) bool {
+	if item.toolRawArgs == "" {
+		return false
+	}
+	closed := closePartialJSON(item.toolRawArgs)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(closed), &parsed); err != nil || len(parsed) == 0 {
+		return false
+	}
+	newArgs := toolBadgeArgs(name, parsed)
+	newNote := toolIntent(name, parsed)
+	changed := false
+	if newArgs != item.toolArgs {
+		item.toolArgs = newArgs
+		changed = true
+	}
+	if newNote != item.toolNote {
+		item.toolNote = newNote
+		changed = true
+	}
+	return changed
+}
+
 // renderStreamingFilePath shows just the path (file_delete).
 func renderStreamingFilePath(rawArgs string, width int) string {
 	closed := closePartialJSON(rawArgs)
