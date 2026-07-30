@@ -3149,7 +3149,7 @@ func RunTUI(
 		})
 	}
 
-	prog = tea.NewProgram(&m)
+	prog = tea.NewProgram(&m, tea.WithAsyncRenderer(1))
 	_, err = prog.Run()
 	return err
 }

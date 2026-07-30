@@ -70,3 +70,5 @@ require (
 	golang.org/x/tools v0.48.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 )
+
+replace charm.land/bubbletea/v2 => github.com/icedream/bubbletea/v2 v2.0.8-async-render
