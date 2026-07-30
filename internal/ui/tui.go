@@ -1055,19 +1055,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingModel:
 			switch msg.String() {
 			case "esc", "ctrl+c":
-				m.returnFromModelPicker()
-			case "enter":
-				if sel := m.modelPicker.SelectedItem(); sel != nil {
-					item := sel.(modelItem)
-					m.modelManager.SetModel(item.ModelItem)
-					m.modelName = item.Display()
-					// Invalidate cached model info and re-fetch for the new model.
-					m.modelInfo = ai.ModelInfo{}
-					if getter, ok := m.client.(ai.ModelInfoGetter); ok {
-						cmds = append(cmds, doGetModelInfo(m.ctx, getter))
-					}
+				if m.modelPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.modelPicker, pickerCmd = m.modelPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					m.returnFromModelPicker()
 				}
-				m.returnFromModelPicker()
+			case "enter":
+				if m.modelPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.modelPicker, pickerCmd = m.modelPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					if sel := m.modelPicker.SelectedItem(); sel != nil {
+						item := sel.(modelItem)
+						m.modelManager.SetModel(item.ModelItem)
+						m.modelName = item.Display()
+						// Invalidate cached model info and re-fetch for the new model.
+						m.modelInfo = ai.ModelInfo{}
+						if getter, ok := m.client.(ai.ModelInfoGetter); ok {
+							cmds = append(cmds, doGetModelInfo(m.ctx, getter))
+						}
+					}
+					m.returnFromModelPicker()
+				}
 			default:
 				var pickerCmd tea.Cmd
 				m.modelPicker, pickerCmd = m.modelPicker.Update(msg)
@@ -1077,32 +1089,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingSession:
 			switch msg.String() {
 			case "esc", "ctrl+c":
-				m.setIdle()
-				m.updateCompletion()
+				if m.sessionPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.sessionPicker, pickerCmd = m.sessionPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					m.setIdle()
+					m.updateCompletion()
+				}
 			case "enter":
-				if sel := m.sessionPicker.SelectedItem(); sel != nil {
-					switch item := sel.(type) {
-					case newSessionItem:
-						m.messages = m.newConversation()
-						m.items = nil
-						m.toolCallIdx = make(map[string]int)
-						m.streamingItemIdx = -1
-						m.reasoningItemIdx = -1
-						m.oauthInfoIdx = -1
-						m.sessionID = ""
-						m.sessionCreatedAt = time.Time{}
-						needRebuild = true
-					case sessionItem:
-						m.resumeHint = nil
-						m.applySession(&item.sess)
-						needRebuild = true
-						if cmd := m.recountContext(); cmd != nil {
-							cmds = append(cmds, cmd)
+				if m.sessionPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.sessionPicker, pickerCmd = m.sessionPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					if sel := m.sessionPicker.SelectedItem(); sel != nil {
+						switch item := sel.(type) {
+						case newSessionItem:
+							m.messages = m.newConversation()
+							m.items = nil
+							m.toolCallIdx = make(map[string]int)
+							m.streamingItemIdx = -1
+							m.reasoningItemIdx = -1
+							m.oauthInfoIdx = -1
+							m.sessionID = ""
+							m.sessionCreatedAt = time.Time{}
+							needRebuild = true
+						case sessionItem:
+							m.resumeHint = nil
+							m.applySession(&item.sess)
+							needRebuild = true
+							if cmd := m.recountContext(); cmd != nil {
+								cmds = append(cmds, cmd)
+							}
 						}
 					}
+					m.setIdle()
+					m.updateCompletion()
 				}
-				m.setIdle()
-				m.updateCompletion()
 			default:
 				var pickerCmd tea.Cmd
 				m.sessionPicker, pickerCmd = m.sessionPicker.Update(msg)
@@ -1112,26 +1136,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingTools:
 			switch msg.String() {
 			case "esc", "ctrl+c":
-				// Refresh m.tools from the (possibly updated) disabled set and go back.
-				m.setTools(m.filteredFromAllDefs())
-				m.setIdle()
-				m.updateCompletion()
+				if m.toolPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.toolPicker, pickerCmd = m.toolPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					// Refresh m.tools from the (possibly updated) disabled set and go back.
+					m.setTools(m.filteredFromAllDefs())
+					m.setIdle()
+					m.updateCompletion()
+				}
 			case "enter":
-				// Open detail view for the selected tool.
-				if sel := m.toolPicker.SelectedItem(); sel != nil {
-					item := sel.(toolItem)
-					m.toolDetailItem = item
-					m.toolDetailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(m.height-fixedLines))
-					m.toolDetailVP.SetContent(buildToolDetail(item, m.width))
-					m.state = stateViewingToolDetail
+				if m.toolPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.toolPicker, pickerCmd = m.toolPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					// Open detail view for the selected tool.
+					if sel := m.toolPicker.SelectedItem(); sel != nil {
+						item := sel.(toolItem)
+						m.toolDetailItem = item
+						m.toolDetailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(m.height-fixedLines))
+						m.toolDetailVP.SetContent(buildToolDetail(item, m.width))
+						m.state = stateViewingToolDetail
+					}
 				}
 			case " ":
-				// Toggle the currently selected tool.
-				if sel := m.toolPicker.SelectedItem(); sel != nil {
-					item := sel.(toolItem)
-					item.enabled = !item.enabled
-					m.session.SetToolEnabled(item.name, item.enabled)
-					m.toolPicker.SetItem(m.toolPicker.Index(), item)
+				if m.toolPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.toolPicker, pickerCmd = m.toolPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					// Toggle the currently selected tool.
+					if sel := m.toolPicker.SelectedItem(); sel != nil {
+						item := sel.(toolItem)
+						item.enabled = !item.enabled
+						m.session.SetToolEnabled(item.name, item.enabled)
+						m.toolPicker.SetItem(m.toolPicker.Index(), item)
+					}
 				}
 			case "":
 				var pickerCmd tea.Cmd
@@ -1156,15 +1198,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingSkills:
 			switch msg.String() {
 			case "esc", "ctrl+c":
-				m.setIdle()
-				m.updateCompletion()
+				if m.skillPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.skillPicker, pickerCmd = m.skillPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					m.setIdle()
+					m.updateCompletion()
+				}
 			case " ":
-				if sel := m.skillPicker.SelectedItem(); sel != nil {
-					item := sel.(skillItem)
-					item.enabled = !item.enabled
-					m.disabledSkills[item.name] = !item.enabled
-					m.skillPicker.SetItem(m.skillPicker.Index(), item)
-					m.applySkillToggle()
+				if m.skillPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.skillPicker, pickerCmd = m.skillPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					if sel := m.skillPicker.SelectedItem(); sel != nil {
+						item := sel.(skillItem)
+						item.enabled = !item.enabled
+						m.disabledSkills[item.name] = !item.enabled
+						m.skillPicker.SetItem(m.skillPicker.Index(), item)
+						m.applySkillToggle()
+					}
 				}
 			case "":
 				var pickerCmd tea.Cmd
@@ -1179,15 +1233,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePickingMode:
 			switch msg.String() {
 			case "esc", "ctrl+c":
-				m.setIdle()
-				m.updateCompletion()
-			case "enter":
-				if sel := m.modePicker.SelectedItem(); sel != nil {
-					item := sel.(modeItem)
-					m.applyMode(item.mode)
+				if m.modePicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.modePicker, pickerCmd = m.modePicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					m.setIdle()
+					m.updateCompletion()
 				}
-				m.setIdle()
-				m.updateCompletion()
+			case "enter":
+				if m.modePicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.modePicker, pickerCmd = m.modePicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					if sel := m.modePicker.SelectedItem(); sel != nil {
+						item := sel.(modeItem)
+						m.applyMode(item.mode)
+					}
+					m.setIdle()
+					m.updateCompletion()
+				}
 			default:
 				var pickerCmd tea.Cmd
 				m.modePicker, pickerCmd = m.modePicker.Update(msg)
@@ -1331,18 +1397,36 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateAgentWizardTools:
 			switch msg.String() {
 			case "esc", "ctrl+c":
-				m.setIdle()
-				m.updateCompletion()
+				if m.agentWizardToolPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.agentWizardToolPicker, pickerCmd = m.agentWizardToolPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					m.setIdle()
+					m.updateCompletion()
+				}
 			case "enter":
-				// Confirm tool selection and save.
-				cmds = append(cmds, m.saveAgentFromWizard()...)
+				if m.agentWizardToolPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.agentWizardToolPicker, pickerCmd = m.agentWizardToolPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					// Confirm tool selection and save.
+					cmds = append(cmds, m.saveAgentFromWizard()...)
+				}
 			case " ":
-				if sel := m.agentWizardToolPicker.SelectedItem(); sel != nil {
-					item := sel.(agentToolItem)
-					if !item.alwaysOn {
-						item.enabled = !item.enabled
-						m.agentWizardExcluded[item.name] = !item.enabled
-						m.agentWizardToolPicker.SetItem(m.agentWizardToolPicker.Index(), item)
+				if m.agentWizardToolPicker.SettingFilter() {
+					var pickerCmd tea.Cmd
+					m.agentWizardToolPicker, pickerCmd = m.agentWizardToolPicker.Update(msg)
+					cmds = append(cmds, pickerCmd)
+				} else {
+					if sel := m.agentWizardToolPicker.SelectedItem(); sel != nil {
+						item := sel.(agentToolItem)
+						if !item.alwaysOn {
+							item.enabled = !item.enabled
+							m.agentWizardExcluded[item.name] = !item.enabled
+							m.agentWizardToolPicker.SetItem(m.agentWizardToolPicker.Index(), item)
+						}
 					}
 				}
 			case "":
