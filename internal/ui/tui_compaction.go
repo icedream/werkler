@@ -11,6 +11,62 @@ import (
 	"github.com/icedream/werkler/internal/chat"
 )
 
+// compactBudgetFraction is the fraction of maxTokens reserved for the
+// compaction request itself.  We want the compaction transcript to fit
+// comfortably inside the context window so the summary call never
+// itself overflows.
+const compactBudgetFraction = 0.7
+
+// findSplitPoint walks backward through messages, accumulating token counts,
+// and returns the index where the "keep" portion should begin.
+// Returns 1 (after system message) if no suitable split point is found.
+func findSplitPoint(modelName string, messages []ai.Message, budget int, toolTokens int) int {
+	// Subtract tool-schema overhead from the budget.
+	available := budget - toolTokens
+	if available <= 0 {
+		return 1
+	}
+
+	// Walk backward, accumulating tokens.
+	var accumulated int
+	for i := len(messages) - 1; i >= 1; i-- {
+		msg := messages[i]
+		if msg.Role == "system" {
+			continue
+		}
+		tokens, err := ai.CountTokens(modelName, []ai.Message{msg})
+		if err != nil {
+			// Fallback: estimate 100 tokens per message.
+			tokens.Total = 100
+		}
+		accumulated += tokens.Total
+
+		// If we've exceeded the budget, the split point is the previous message.
+		if accumulated > available {
+			// Find a valid cut point: user message or assistant message.
+			for j := i; j >= 1; j-- {
+				if messages[j].Role == "user" || messages[j].Role == "assistant" {
+					return j + 1
+				}
+			}
+			return 1
+		}
+	}
+	// Budget not exceeded — keep everything.
+	return -1
+}
+
+// findTurnStartIndex finds the user message that started the turn containing
+// the message at index `idx` (walking backward).  Returns -1 if none found.
+func findTurnStartIndex(messages []ai.Message, idx int) int {
+	for i := idx - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return i
+		}
+	}
+	return -1
+}
+
 // doCompact sends the current message history to the AI as a summarization
 // request and returns a compactDoneMsg with the resulting summary text.
 // modelName, toolTokens and maxTokens are used to trim the kept-turn count
@@ -72,36 +128,116 @@ func doCompact(ctx context.Context, client ai.StreamCompleter, messages []ai.Mes
 	// Build the transcript from a snapshot, so the goroutine doesn't race.
 	snap := make([]ai.Message, len(messages))
 	copy(snap, messages)
-	return func() tea.Msg {
-		// Build a structured JSON transcript that preserves tool call IDs,
-		// full arguments, and complete tool results — unlike the old flat-text
-		// approach that truncated args to 300 chars and capped tool results.
-		// The compaction AI receives the same structured format it saw during
-		// the actual conversation, yielding much more precise summaries.
-		transcript := buildCompactTranscript(snap)
 
-		summaryMessages := []ai.Message{
-			{
-				Role:    "system",
-				Content: chat.CompactionSystemPrompt,
-			},
-			{
-				Role:    "user",
-				Content: chat.CompactionUserMessage(transcript),
-			},
+	// Estimate the token size of the full transcript.  If it would exceed
+	// the compaction budget (typically the model's context window), split
+	// the transcript into older + recent portions so the compaction call
+	// itself never overflows.
+	transcript := buildCompactTranscript(snap)
+	transcriptTokens, _ := ai.CountTokens(modelName, []ai.Message{{Role: "user", Content: transcript}})
+
+	var splitAt int
+	var turnPrefixMessages []ai.Message
+	var summaryPrompt string
+
+	budget := int(float32(maxTokens)*compactBudgetFraction) - toolTokens
+	if budget <= 0 {
+		budget = maxTokens / 2 // fallback
+	}
+
+	if transcriptTokens.Total > budget {
+		// Split: keep recent messages verbatim, summarize the older ones.
+		splitAt = findSplitPoint(modelName, snap, budget, toolTokens)
+		if splitAt < 0 {
+			splitAt = 1 // keep everything after system message
 		}
 
-		// Start the stream and hand the channel back to the Update loop so the
-		// summary can be streamed live into the chat log.
-		ch := client.CompleteStream(ctx, summaryMessages, nil)
-		return compactStartMsg{
-			ch:         ch,
-			snap:       snap,
-			modelName:  modelName,
-			toolTokens: toolTokens,
-			maxTokens:  maxTokens,
+		// Find the user message that started the current turn (the one at
+		// or just before the split point).  We'll generate a prefix summary
+		// for the older part of this turn.
+		turnStart := findTurnStartIndex(snap, splitAt)
+		if turnStart >= 0 && turnStart < splitAt {
+			// The split is mid-turn: collect the prefix messages.
+			turnPrefixMessages = make([]ai.Message, 0, splitAt-turnStart)
+			for _, m := range snap[turnStart:splitAt] {
+				if m.Role != "system" {
+					turnPrefixMessages = append(turnPrefixMessages, m)
+				}
+			}
+		}
+
+		// Build the older-only transcript.
+		older := make([]ai.Message, 0, splitAt)
+		for _, m := range snap[:splitAt] {
+			if m.Role != "system" {
+				older = append(older, m)
+			}
+		}
+		if len(older) > 0 {
+			summaryPrompt = chat.CompactionUserMessage(buildCompactTranscript(older))
+		} else {
+			summaryPrompt = chat.CompactionUserMessage("(no older messages to summarize)")
 		}
 	}
+
+	return func() tea.Msg {
+		var summary string
+		var turnPrefixSummary string
+
+		if splitAt >= 0 {
+			// Build messages for the older-only summary.
+			olderSystem := chat.CompactionOldPrompt
+			olderMessages := []ai.Message{
+				{Role: "system", Content: olderSystem},
+				{Role: "user", Content: summaryPrompt},
+			}
+			ch := client.CompleteStream(ctx, olderMessages, nil)
+			summary = readStream(ctx, ch)
+
+			// If the split is mid-turn, generate a prefix summary.
+			if len(turnPrefixMessages) > 0 {
+				prefixMessages := []ai.Message{
+					{Role: "system", Content: chat.CompactionTurnPrefixPrompt},
+					{Role: "user", Content: chat.CompactionUserMessage(buildCompactTranscript(turnPrefixMessages))},
+				}
+				ch2 := client.CompleteStream(ctx, prefixMessages, nil)
+				turnPrefixSummary = readStream(ctx, ch2)
+			}
+		} else {
+			// No split needed — use the full transcript.
+			summaryMessages := []ai.Message{
+				{Role: "system", Content: chat.CompactionSystemPrompt},
+				{Role: "user", Content: chat.CompactionUserMessage(transcript)},
+			}
+			ch := client.CompleteStream(ctx, summaryMessages, nil)
+			summary = readStream(ctx, ch)
+		}
+
+		return compactDoneMsg{
+			summary:           summary,
+			splitAt:           splitAt,
+			turnPrefixSummary: turnPrefixSummary,
+		}
+	}
+}
+
+// readStream drains a streaming channel and returns the concatenated content.
+func readStream(ctx context.Context, ch <-chan ai.StreamChunk) string {
+	var sb strings.Builder
+	for {
+		chunk, ok := <-ch
+		if !ok {
+			break
+		}
+		if chunk.Err != nil {
+			return ""
+		}
+		if chunk.Done {
+			break
+		}
+		sb.WriteString(chunk.Delta)
+	}
+	return sb.String()
 }
 
 // buildCompactTranscript serialises the message snapshot into a compact JSON
@@ -177,15 +313,32 @@ func (m *Model) applyCompaction(msg compactDoneMsg) []tea.Cmd {
 	newMessages := make([]ai.Message, 0, 8)
 	if len(oldMessages) > 0 && oldMessages[0].Role == "system" {
 		systemMsg := oldMessages[0]
-		systemMsg.Content = replaceSummaryBlock(systemMsg.Content, summary)
+		newContent := replaceSummaryBlock(systemMsg.Content, summary)
+		// When we split the transcript, append the turn prefix summary
+		// so the resumed AI can understand the retained suffix.
+		if msg.turnPrefixSummary != "" {
+			newContent += "\n\n## Turn Prefix Summary\n\n" + msg.turnPrefixSummary
+		}
+		systemMsg.Content = newContent
 		newMessages = append(newMessages, systemMsg)
 	} else {
+		sysContent := "## Summary of previous conversation\n\n" + summary
+		if msg.turnPrefixSummary != "" {
+			sysContent += "\n\n## Turn Prefix Summary\n\n" + msg.turnPrefixSummary
+		}
 		newMessages = append(newMessages, ai.Message{
 			Role:    "system",
-			Content: "## Summary of previous conversation\n\n" + summary,
+			Content: sysContent,
 		})
 	}
-	newMessages = append(newMessages, extractLastTurns(oldMessages, keepTurns)...)
+
+	// If we split the transcript, keep messages from the split point onwards.
+	// Otherwise, keep the last N complete turns.
+	if msg.splitAt > 0 {
+		newMessages = append(newMessages, oldMessages[msg.splitAt:]...)
+	} else {
+		newMessages = append(newMessages, extractLastTurns(oldMessages, keepTurns)...)
+	}
 	m.messages = newMessages
 
 	// Use the compact-summary items snapshotted in the Done tick (same Update
