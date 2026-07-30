@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -1197,6 +1198,64 @@ func (m *Model) rebuildRegistryInstalledState() {
 		m.registryInstalledNames[s.Name] = true
 	}
 	m.registryInstalledList.SetItems(buildInstalledItems(m.configuredMCPServers))
+}
+
+// contextOverflowPatterns are regex patterns that match context overflow errors
+// from various providers. Adapted from the Pi agent's overflow detection.
+var contextOverflowPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)prompt is too long`),                                                           // Anthropic
+	regexp.MustCompile(`(?i)request_too_large`),                                                            // Anthropic (HTTP 413)
+	regexp.MustCompile(`(?i)input is too long for requested model`),                                        // Amazon Bedrock
+	regexp.MustCompile(`(?i)exceeds the context window`),                                                   // OpenAI
+	regexp.MustCompile(`(?i)exceeds (?:the )?(?:model'?s )?maximum context length`),                        // OpenAI-compatible / LiteLLM
+	regexp.MustCompile(`(?i)input token count.*exceeds the maximum`),                                       // Google Gemini
+	regexp.MustCompile(`(?i)maximum prompt length is \d+`),                                                 // xAI Grok
+	regexp.MustCompile(`(?i)reduce the length of the messages`),                                            // Groq
+	regexp.MustCompile(`(?i)maximum context length is \d+ tokens`),                                         // OpenRouter
+	regexp.MustCompile(`(?i)exceeds (?:the )?maximum allowed input length`),                                // OpenRouter/Poolside
+	regexp.MustCompile(`(?i)input \(\d+ tokens\) is longer than the model'?s context length`),              // Together AI
+	regexp.MustCompile(`(?i)exceeds the limit of \d+`),                                                     // GitHub Copilot
+	regexp.MustCompile(`(?i)exceeds the available context size`),                                           // llama.cpp
+	regexp.MustCompile(`(?i)greater than the context length`),                                              // LM Studio
+	regexp.MustCompile(`(?i)context window exceeds limit`),                                                 // MiniMax
+	regexp.MustCompile(`(?i)exceeded model token limit`),                                                   // Kimi For Coding
+	regexp.MustCompile(`(?i)too large for model with \d+ maximum context length`),                          // Mistral
+	regexp.MustCompile(`(?i)prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?`), // DS4
+	regexp.MustCompile(`(?i)model_context_window_exceeded`),                                                // z.ai
+	regexp.MustCompile(`(?i)prompt too long; exceeded (?:max )?context length`),                            // Ollama
+	regexp.MustCompile(`(?i)context[_ ]length[_ ]exceeded`),                                                // Generic fallback
+	regexp.MustCompile(`(?i)token limit exceeded`),                                                         // Generic fallback
+	regexp.MustCompile(`(?i)^4(?:00|13)\s*(?:status code)?\s*\(no body\)`),                                 // Cerebras
+}
+
+// nonOverflowPatterns are regex patterns that indicate non-overflow errors.
+// If an error matches any of these, it is NOT treated as a context overflow
+// even if it also matches an overflow pattern (e.g. "Throttling: Too many tokens").
+var nonOverflowPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^(Throttling error|Service unavailable):`), // AWS Bedrock
+	regexp.MustCompile(`(?i)rate limit`),                               // Generic rate limiting
+	regexp.MustCompile(`(?i)too many requests`),                        // HTTP 429
+}
+
+// isContextOverflowError reports whether err matches a context overflow error
+// from any supported provider. It first checks for non-overflow patterns
+// (rate limiting, throttling) and only returns true if the error matches
+// an overflow pattern without being excluded.
+func isContextOverflowError(err error) bool {
+	msg := err.Error()
+	// Skip known non-overflow patterns first.
+	for _, p := range nonOverflowPatterns {
+		if p.MatchString(msg) {
+			return false
+		}
+	}
+	// Check overflow patterns.
+	for _, p := range contextOverflowPatterns {
+		if p.MatchString(msg) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) filteredFromAllDefs() []ai.ToolDefinition {

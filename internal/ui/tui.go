@@ -2260,7 +2260,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case chunk.Err != nil:
 			debugLog("streamChunk: error: %v", chunk.Err)
-			if errors.Is(chunk.Err, context.Canceled) {
+			switch {
+			case errors.Is(chunk.Err, context.Canceled):
 				// User-initiated cancellation: go idle cleanly.
 				// Roll back the last user message since it got no response.
 				if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "user" {
@@ -2276,7 +2277,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setIdle()
 				needRebuild = true
 				cmds = append(cmds, m.input.Focus())
-			} else {
+			case isContextOverflowError(chunk.Err):
+				// The context has grown beyond the model's limit — the last user
+				// message pushed us over.  Remove it so compaction can run, then
+				// compact and restart the AI turn.
+				debugLog("streamChunk: context overflow — compacting")
+				if m.streamingItemIdx >= 0 {
+					m.items[m.streamingItemIdx].content += "\n[context full — compacting]"
+					m.streamingItemIdx = -1
+					m.reasoningItemIdx = -1
+				} else {
+					m.items = append(m.items, displayItem{kind: itemInfo, content: "⚠ Context full — compacting…"})
+				}
+				// Drop the last user message (the one that caused the overflow).
+				if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "user" {
+					m.messages = m.messages[:len(m.messages)-1]
+				}
+				// Clear the incremental client's cached response ID so the next
+				// stream call sends full context (the old ID is tied to the
+				// pre‑compaction history).
+				if m.incrementalClient != nil {
+					m.incrementalClient.SetLastResponseID("")
+				}
+				m.autoCompactPending = true
+				m.state = stateCompacting
+				cmds = append(cmds, doCompact(m.newOpCtx(), m.client, m.messages, m.modelName, m.toolTokensCache, m.modelInfo.Context.MaxTokens))
+			default:
 				// Stream error: go idle but keep queued prompts intact.
 				// The user can retry from idle state.
 				if m.streamingItemIdx >= 0 {
