@@ -57,6 +57,10 @@ func (m *Model) recalcLayout() {
 	m.viewport.SetWidth(mainW)
 	m.input.SetWidth(mainW - 5) // 5 = len("You> ")
 	m.syncViewportHeight()
+	// Invalidate render cache on resize — content may wrap differently at new width.
+	for i := range m.items {
+		m.items[i].rawMarkdown = ""
+	}
 }
 
 // activeBorderColor returns the lipgloss color for the TUI separator lines,
@@ -584,7 +588,10 @@ func (m Model) renderItem(item displayItem) string {
 
 	case itemAssistant:
 		prefix := assistantPrefixStyle.Render("Werkler")
-		body := renderMarkdown(m.renderer, item.content)
+		body := item.rawMarkdown
+		if body == "" {
+			body = renderMarkdown(m.renderer, item.content)
+		}
 		return prefix + "\n" + body
 
 	case itemToolCall:
@@ -768,7 +775,11 @@ func (m Model) renderItem(item displayItem) string {
 		return infoStyle.Render(content)
 
 	case itemMarkdown:
-		return renderMarkdown(m.renderer, item.content)
+		content := item.rawMarkdown
+		if content == "" {
+			content = renderMarkdown(m.renderer, item.content)
+		}
+		return content
 
 	case itemProcessOutput:
 		// Use toolNote (AI-formulated intent) as primary label; fall back to "[process:<handle>]".
@@ -835,8 +846,12 @@ func (m Model) renderItem(item displayItem) string {
 				)))
 			}
 		default:
+			content := item.rawMarkdown
+			if content == "" {
+				content = renderMarkdown(m.renderer, item.content)
+			}
 			sb.WriteString("\n")
-			sb.WriteString(renderMarkdown(m.renderer, item.content))
+			sb.WriteString(content)
 		}
 		return sb.String()
 

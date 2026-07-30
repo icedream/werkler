@@ -152,6 +152,7 @@ type displayItem struct {
 	toolLiveOutput string // live stdout/stderr while run_command is executing; cleared on done
 	toolOutput     string // combined stdout+stderr stored after run_command completes; shown on /expand
 	toolResultNote string // short result summary set on completion (e.g. "exit: 0"); kept separate from intent title in toolNote
+	rawMarkdown    string // cached full-content before rendering (empty = not yet rendered)
 }
 
 // --- Tea messages ---

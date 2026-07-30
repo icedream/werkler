@@ -188,7 +188,7 @@ func rebuildItemsFromMessages(msgs []ai.Message) []displayItem {
 					})
 				}
 			} else if msg.Content != "" {
-				items = append(items, displayItem{kind: itemAssistant, content: msg.Content})
+				items = append(items, displayItem{kind: itemAssistant, content: msg.Content, rawMarkdown: msg.Content})
 			}
 		}
 	}

@@ -1953,8 +1953,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autopilotDisable()
 		m.currentTaskTitle = "" // clear task title on completion
 		m.items = append(m.items, displayItem{
-			kind:    itemMarkdown,
-			content: "✓ **Task complete**\n\n" + msg.summary,
+			kind:        itemMarkdown,
+			content:     "✓ **Task complete**\n\n" + msg.summary,
+			rawMarkdown: "✓ **Task complete**\n\n" + msg.summary,
 		})
 		needRebuild = true
 		if m.sessionStore != nil {
@@ -2414,7 +2415,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.items = append(m.items, displayItem{kind: itemReasoning, content: chunk.Msg.Reasoning})
 				}
 				if chunk.Msg.Content != "" {
-					m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content})
+					m.items = append(m.items, displayItem{kind: itemAssistant, content: chunk.Msg.Content, rawMarkdown: chunk.Msg.Content})
 				}
 			}
 			m.lastTokenSpeed = 0
@@ -2672,7 +2673,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.reasoningItemIdx = len(m.items)
 				m.items = append(m.items, displayItem{kind: itemReasoning, content: ""})
 				m.streamingItemIdx = len(m.items)
-				m.items = append(m.items, displayItem{kind: itemAssistant, content: ""})
+				m.items = append(m.items, displayItem{kind: itemAssistant, content: "", rawMarkdown: ""})
 				if m.state != stateStreaming {
 					m.state = stateStreaming
 					m.streamingStart = time.Now()
@@ -2694,6 +2695,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if chunk.Delta != "" || chunk.ReasoningDelta != "" {
 				needRebuild = true
 			}
+			// Sync rawMarkdown alongside content so the cache stays valid.
+			if m.streamingItemIdx >= 0 {
+				m.items[m.streamingItemIdx].rawMarkdown += chunk.Delta
+			}
 			cmds = append(cmds, readNextChunk(msg.ch))
 		}
 
@@ -2704,9 +2709,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.compactSummaryPrevTok = m.contextUsage.Total
 		m.compactSummaryItemIdx = len(m.items)
 		m.items = append(m.items, displayItem{
-			kind:    itemCompactSummary,
-			handle:  compactHandle,
-			content: "",
+			kind:        itemCompactSummary,
+			handle:      compactHandle,
+			content:     "",
+			rawMarkdown: "",
 		})
 		m.collapsedHandles[compactHandle] = true
 		m.compactSummaryAccum.Reset()
@@ -2736,6 +2742,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.compactSummaryItemIdx >= 0 && m.compactSummaryItemIdx < len(m.items) {
 				if s != "" {
 					m.items[m.compactSummaryItemIdx].content = s
+					m.items[m.compactSummaryItemIdx].rawMarkdown = s
 				}
 			}
 			m.compactSummaryItemIdx = -1
@@ -2775,6 +2782,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.compactSummaryAccum.WriteString(chunk.Delta)
 				if m.compactSummaryItemIdx >= 0 && m.compactSummaryItemIdx < len(m.items) {
 					m.items[m.compactSummaryItemIdx].content = m.compactSummaryAccum.String()
+					m.items[m.compactSummaryItemIdx].rawMarkdown = m.compactSummaryAccum.String()
 				}
 				needRebuild = true
 			}
