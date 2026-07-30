@@ -2594,7 +2594,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Live-streamed item already created; patch in the final display args.
 						m.items[liveIdx].toolArgs = toolCallDisplayArgs(tc.Name, tc.Arguments)
 						m.items[liveIdx].toolRawArgs = string(rawArgs)
-						m.items[liveIdx].toolNote = toolCallIntent(tc.Name, tc.Arguments)
+						updateToolDisplayArgs(&m.items[liveIdx], tc.Name)
 					} else {
 						// No live-streamed item (server sent no argument deltas): create now.
 						m.toolCallIdx[tc.ID] = len(m.items)
@@ -2656,6 +2656,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if tcc.ArgumentsDelta != "" && tcc.ID != "" {
 						if itemIdx, ok := m.toolCallIdx[tcc.ID]; ok && itemIdx >= 0 && itemIdx < len(m.items) {
 							m.items[itemIdx].toolRawArgs += tcc.ArgumentsDelta
+							// Update compact args and intent title from partial JSON.
+							updateToolDisplayArgs(&m.items[itemIdx], tcc.Name)
 						}
 					}
 				}
