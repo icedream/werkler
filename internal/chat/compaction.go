@@ -54,3 +54,60 @@ RULES — follow strictly:
 func CompactionUserMessage(transcript string) string {
 	return "Produce the handoff note for this conversation:\n\n" + transcript
 }
+
+// CompactionOldPrompt is the system prompt sent to the AI when only older
+// messages are available (the compaction split the transcript).
+const CompactionOldPrompt = `You are a state recorder for an AI coding assistant.
+Your output will be inserted directly as context so the assistant can resume work.
+Write as if leaving a precise handoff note for yourself.
+
+The following is a partial transcript of older messages from the conversation.
+Recent messages are kept verbatim and not included here.
+Produce a handoff note based on the older messages.
+
+INPUT FORMAT — the conversation transcript is a JSON array of messages.
+
+OUTPUT FORMAT:
+
+## Goal
+One sentence: the user's overall objective for this session.
+
+## Completed
+Bullet list of work that is fully done. Most recent last.
+
+## Key Facts
+Bullet list of decisions, constraints, patterns, or file locations the assistant must remember.
+
+## Files Read
+Bullet list of file paths the assistant has already read.
+
+## Next Action
+One sentence: the exact next step the assistant should take when it resumes.
+
+RULES:
+1. NO code blocks, file contents, or command output.
+2. Facts only. Past tense for completed work.
+3. Keep bullets short. Omit filler.
+4. If a prior summary exists, merge it.`
+
+// CompactionTurnPrefixPrompt is sent to the AI when summarizing a turn prefix
+// (the user request + assistant response + tool calls before the compaction cut point).
+const CompactionTurnPrefixPrompt = `You are a state recorder for an AI coding assistant.
+This is the PREFIX of a turn that was too large to keep in full.
+The SUFFIX (recent work) is retained verbatim.
+Summarize what happened in this prefix so the AI can understand the retained suffix.
+
+INPUT FORMAT — the turn prefix is a JSON array of messages.
+
+OUTPUT FORMAT:
+
+## Original Request
+[What did the user ask for?]
+
+## Early Progress
+- [Key decisions and work done]
+
+## Context for Suffix
+- [Information needed to understand the retained recent work]
+
+Be concise. Focus on what's needed to understand the kept suffix.`

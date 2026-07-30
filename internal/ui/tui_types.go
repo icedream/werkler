@@ -223,11 +223,13 @@ type tokenCountMsg struct {
 // compactDoneMsg is returned by doCompact when the AI summary is complete or
 // an error has occurred.
 type compactDoneMsg struct {
-	summary     string
-	keepTurns   int    // number of recent turns to retain verbatim; 0 = use compactionKeepTurns default
-	warning     string // non-fatal advisory shown after compaction (e.g. context still very full)
-	err         error
-	totalTokens int // cached total token count from pre-check (for optimization)
+	summary           string
+	keepTurns         int    // number of recent turns to retain verbatim; 0 = use compactionKeepTurns default
+	warning           string // non-fatal advisory shown after compaction (e.g. context still very full)
+	err               error
+	totalTokens       int    // cached total token count from pre-check (for optimization)
+	splitAt           int    // index in oldMessages where kept portion starts; -1 = no split
+	turnPrefixSummary string // summary of the current turn prefix (set when splitAt is mid-turn)
 }
 
 // registryLoadedMsg carries a page of servers from the MCP registry.
