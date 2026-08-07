@@ -805,10 +805,7 @@ func (m *Model) processNextCall() tea.Cmd {
 
 	// task_complete terminates the autopilot loop — intercept before normal dispatch.
 	if call.Name == "task_complete" {
-		summary := ""
-		if s, ok := call.Arguments["summary"].(string); ok {
-			summary = s
-		}
+		summary := chat.TaskCompleteSummary(call)
 		// Mark the tool call display item as done.
 		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
 			m.items[idx].toolStatus = toolStatusDone
@@ -816,11 +813,7 @@ func (m *Model) processNextCall() tea.Cmd {
 		// Synthesise terminal tool results for any remaining sibling calls so
 		// the message history stays valid.
 		for _, sibling := range m.pendingCalls {
-			m.messages = append(m.messages, ai.Message{
-				Role:       "tool",
-				ToolCallID: sibling.ID,
-				Content:    "Cancelled: task_complete was called.",
-			})
+			m.messages = append(m.messages, chat.TaskCompleteSiblingMessage(sibling))
 		}
 		m.pendingCalls = m.pendingCalls[:0]
 		m.currentCall = nil

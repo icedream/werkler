@@ -40,21 +40,33 @@ func toolDescriptorIsAutoApprove(name string) bool {
 	return AlwaysApprovedTools[name]
 }
 
-// taskCompleteSummary extracts the "summary" argument from a task_complete tool
+// TaskCompleteSummary extracts the "summary" argument from a task_complete tool
 // call, falling back to "" if missing or malformed.
-func taskCompleteSummary(tc ai.ToolCall) string {
+func TaskCompleteSummary(tc ai.ToolCall) string {
 	s, _ := tc.Arguments["summary"].(string)
 	return s
 }
 
-// denyToolMessage builds the tool-result message appended to history when a
+// DenyToolMessage builds the tool-result message appended to history when a
 // tool call is denied. `reason` is free-form text shown to the AI (e.g. "(tool
 // call was not approved — run interactively to approve tools, or add to
 // auto_approve_tools in config)").
-func denyToolMessage(tc ai.ToolCall, reason string) ai.Message {
+func DenyToolMessage(tc ai.ToolCall, reason string) ai.Message {
 	return ai.Message{
 		Role:       "tool",
 		ToolCallID: tc.ID,
 		Content:    reason,
+	}
+}
+
+// TaskCompleteSiblingMessage builds the tool-result message appended to a
+// sibling of a task_complete call when task_complete terminates the turn.
+// The message reads "Cancelled: task_complete was called." — callers should use
+// this for every sibling call that was not the task_complete itself.
+func TaskCompleteSiblingMessage(tc ai.ToolCall) ai.Message {
+	return ai.Message{
+		Role:       "tool",
+		ToolCallID: tc.ID,
+		Content:    "Cancelled: task_complete was called.",
 	}
 }
