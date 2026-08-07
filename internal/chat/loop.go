@@ -12,25 +12,9 @@ import (
 // autopilotDefaultMaxCycles mirrors the TUI default so prompt mode behaves consistently.
 const autopilotDefaultMaxCycles = 50
 
-// alwaysApprovedTools is the set of built-in tool names that are always
-// allowed in non-interactive (--prompt) mode without appearing in
-// auto_approve_tools. These are control-flow, state, and utility tools that
-// carry no side-effects or whose denial would break normal operation.
-var alwaysApprovedTools = map[string]bool{
-	"ask_user":       true,
-	"confirm_plan":   true,
-	"todo_add":       true,
-	"todo_add_many":  true,
-	"todo_update":    true,
-	"todo_list":      true,
-	"memory_list":    true,
-	"memory_read":    true,
-	"memory_write":   true,
-	"memory_delete":  true,
-	"memory_promote": true,
-	"calculate":      true,
-	"sleep":          true,
-}
+// alias for callers that need the unexported name for parity with pre-refactor
+// code paths.
+var alwaysApprovedTools = AlwaysApprovedTools
 
 // PromptOptions configures non-interactive RunPrompt behaviour.
 type PromptOptions struct {
@@ -95,13 +79,13 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 			if opts.Autopilot {
 				autopilotCycle++
 				if autopilotCycle >= maxCycles {
-					return msg.Content, fmt.Errorf("autopilot reached cycle cap of %d without calling task_complete", maxCycles)
+					return msg.Content, fmt.Errorf(autopilotExceededMsg, maxCycles)
 				}
 				// Ephemeral continuation — not appended to messages permanently.
 				// Set step to -1 so the post-increment brings it back to 0,
 				// giving this autopilot cycle a full maxAgentSteps budget.
 				step = -1
-				messages = append(messages, ai.Message{Role: "user", Content: "Continue working."})
+				messages = append(messages, ai.Message{Role: "user", Content: autopilotEphemeralMsg})
 				continue
 			}
 			return msg.Content, nil
@@ -110,10 +94,7 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 		for _, tc := range msg.ToolCalls {
 			// task_complete terminates the autopilot loop (and is always approved).
 			if tc.Name == "task_complete" {
-				summary := ""
-				if s, ok := tc.Arguments["summary"].(string); ok {
-					summary = s
-				}
+				summary := TaskCompleteSummary(tc)
 				if opts.Progress != nil {
 					_, _ = fmt.Fprintf(opts.Progress, "[task_complete: %s]\n", summary)
 				}
@@ -140,11 +121,7 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 				if opts.Progress != nil {
 					_, _ = fmt.Fprintf(opts.Progress, "[tool denied (not pre-approved in non-interactive mode): %s]\n", tc.Name)
 				}
-				messages = append(messages, ai.Message{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Content:    "(tool call was not approved — run interactively to approve tools, or add to auto_approve_tools in config)",
-				})
+				messages = append(messages, DenyToolMessage(tc, "(tool call was not approved — run interactively to approve tools, or add to auto_approve_tools in config)"))
 				continue
 			}
 
