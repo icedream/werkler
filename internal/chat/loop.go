@@ -91,9 +91,35 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 			return msg.Content, nil
 		}
 
+		// Build callbacks for this turn.
+		cbs := &ToolCallCallbacks{
+			OnToolDenied: func(tc ai.ToolCall, reason string) ai.Message {
+				if opts.Progress != nil {
+					_, _ = fmt.Fprintf(opts.Progress, "[tool denied (not pre-approved in non-interactive mode): %s]\n", tc.Name)
+				}
+				msg := DenyToolMessage(tc, "(tool call was not approved — run interactively to approve tools, or add to auto_approve_tools in config)")
+				messages = append(messages, msg)
+				return msg
+			},
+			OnToolApproved: func(ctx context.Context, tc ai.ToolCall) (string, error) {
+				if opts.Progress != nil {
+					_, _ = fmt.Fprintf(opts.Progress, "[tool: %s]\n", tc.Name)
+				}
+				result, err := session.CallTool(ctx, tc)
+				if err == nil {
+					messages = append(messages, ai.Message{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Content:    result,
+					})
+				}
+				return result, err
+			},
+		}
+
 		for _, tc := range msg.ToolCalls {
-			// task_complete terminates the autopilot loop (and is always approved).
-			if tc.Name == "task_complete" {
+			switch res := ExecuteToolCall(ctx, tc, session, cbs); res.Result {
+			case ToolCallTaskComplete:
 				summary := TaskCompleteSummary(tc)
 				if opts.Progress != nil {
 					_, _ = fmt.Fprintf(opts.Progress, "[task_complete: %s]\n", summary)
@@ -107,37 +133,22 @@ func RunPrompt(ctx context.Context, client ai.Completer, session *Session, promp
 							Content:    "Task complete: " + summary,
 						})
 					} else {
-						messages = append(messages, ai.Message{
-							Role:       "tool",
-							ToolCallID: sibling.ID,
-							Content:    "Cancelled: task_complete was called.",
-						})
+						messages = append(messages, TaskCompleteSiblingMessage(sibling))
 					}
 				}
 				return summary, nil
-			}
 
-			if !session.IsApproved(tc.Name) && !alwaysApprovedTools[tc.Name] && !session.IsSubagentTool(tc.Name) {
-				if opts.Progress != nil {
-					_, _ = fmt.Fprintf(opts.Progress, "[tool denied (not pre-approved in non-interactive mode): %s]\n", tc.Name)
-				}
-				messages = append(messages, DenyToolMessage(tc, "(tool call was not approved — run interactively to approve tools, or add to auto_approve_tools in config)"))
+			case ToolCallDenied:
+				// The callback has already appended the denial message to messages.
 				continue
-			}
 
-			if opts.Progress != nil {
-				_, _ = fmt.Fprintf(opts.Progress, "[tool: %s]\n", tc.Name)
-			}
+			case ToolCallApproved:
+				// The callback has already appended the tool result to messages.
+				continue
 
-			result, err := session.CallTool(ctx, tc)
-			if err != nil {
-				return "", err
+			case ToolCallError:
+				return "", fmt.Errorf("tool error: %s", tc.Name)
 			}
-			messages = append(messages, ai.Message{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Content:    result,
-			})
 		}
 	}
 

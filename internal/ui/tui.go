@@ -80,6 +80,7 @@ type Model struct {
 	// Agent state machine.
 	state            tuiState
 	pendingCalls     []ai.ToolCall
+	_pendingToolCmd  tea.Cmd // captured by ExecuteToolCall callbacks
 	currentCall      *ai.ToolCall
 	callingToolName  string // name of tool currently executing (stateCallingTool)
 	callingToolTitle string // AI-provided title for the current tool call (may be empty)

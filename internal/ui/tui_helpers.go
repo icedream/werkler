@@ -822,15 +822,55 @@ func (m *Model) processNextCall() tea.Cmd {
 
 	// ask_user, confirm_plan, subagent tools, use_skill, use_agent, task_start, todo_*, memory_*, and connect_server
 	// are always dispatched immediately without an approval dialog.
-	if m.session.IsApproved(call.Name) || toolDescriptor(call.Name).AutoApprove || m.session.IsSubagentTool(call.Name) {
-		if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
-			m.items[idx].toolStatus = toolStatusRunning
-		}
-		m.setCallingTool(call)
-		m.currentCall = nil
-		m.executingCall = &callCopy
-		m.state = stateCallingTool
-		return doCallToolStream(m.newOpCtx(), m.toolMgr, m.session, call)
+	cbs := &chat.ToolCallCallbacks{
+		OnToolDenied: func(tc ai.ToolCall, reason string) ai.Message {
+			// Note: m.currentCall is intentionally NOT cleared here — the
+			// stateAwaitingApproval handler uses it to get the call for y/a/p/n.
+			if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
+				m.items[idx].toolStatus = toolStatusDenied
+				if h := m.items[idx].handle; h != "" {
+					m.collapsedHandles[h] = true
+				}
+			}
+			msg := ai.Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    "(tool call was denied by the user)",
+			}
+			m.messages = append(m.messages, msg)
+			return msg
+		},
+		OnToolApproved: func(ctx context.Context, tc ai.ToolCall) (string, error) {
+			if idx, ok := m.toolCallIdx[call.ID]; ok && idx >= 0 {
+				m.items[idx].toolStatus = toolStatusRunning
+			}
+			m.setCallingTool(call)
+			m.currentCall = nil
+			m.executingCall = &callCopy
+			m.state = stateCallingTool
+			// Note: the tea.Cmd for dispatching the tool is returned by
+			// doCallToolStream, but ExecuteToolCall expects (string, error).
+			// We capture the Cmd in m._pendingToolCmd so Update can return it.
+			m._pendingToolCmd = doCallToolStream(ctx, m.toolMgr, m.session, call)
+			return "", nil
+		},
+	}
+
+	switch chat.ExecuteToolCall(m.newOpCtx(), call, m.session, cbs).Result {
+	case chat.ToolCallApproved:
+		// Cmd was captured in m._pendingToolCmd.
+		return m._pendingToolCmd
+	case chat.ToolCallDenied:
+		// Tool denied — go to approval state (the user will see the denial
+		// message and can retry or the tool will be auto-denied).
+		m.state = stateAwaitingApproval
+		m.pendingApprovalChoice = ""
+		return nil
+	case chat.ToolCallTaskComplete:
+		// Should not happen — task_complete is handled above.
+		return nil
+	case chat.ToolCallError:
+		return nil
 	}
 
 	m.state = stateAwaitingApproval
