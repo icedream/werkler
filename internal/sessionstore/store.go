@@ -36,9 +36,6 @@ type Session struct {
 	// AgentName is the name of the active custom agent when this session was saved.
 	// Empty means no agent was active.
 	AgentName string `json:"agent_name,omitempty"`
-	// ContextJSON stores the incremental context for the session.
-	// This is serialized separately to avoid circular dependencies.
-	ContextJSON *ContextJSON `json:"context_json,omitempty"`
 }
 
 // Store reads and writes sessions to a directory on disk.
@@ -104,34 +101,7 @@ func (s *Store) Save(sess *Session) error {
 	return os.Rename(tmp.Name(), dest)
 }
 
-// SaveContextJSON saves the context JSON for a session.
-func (s *Store) SaveContextJSON(id string, ctxJSON *ContextJSON) error {
-	path := filepath.Join(s.dir, id+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("sessionstore: reading %s: %w", id, err)
-	}
-	var sess Session
-	if err := json.Unmarshal(data, &sess); err != nil {
-		return fmt.Errorf("sessionstore: parsing %s: %w", id, err)
-	}
-	sess.ContextJSON = ctxJSON
-	return s.Save(&sess)
-}
 
-// LoadContextJSON loads the context JSON for a session.
-func (s *Store) LoadContextJSON(id string) (*ContextJSON, error) {
-	path := filepath.Join(s.dir, id+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("sessionstore: reading %s: %w", id, err)
-	}
-	var sess Session
-	if err := json.Unmarshal(data, &sess); err != nil {
-		return nil, fmt.Errorf("sessionstore: parsing %s: %w", id, err)
-	}
-	return sess.ContextJSON, nil
-}
 
 // Load reads the session with the given ID.
 func (s *Store) Load(id string) (*Session, error) {
